@@ -3,8 +3,8 @@ name: Drone Vision CI/CD
 on:
   push:
     paths:
-      - 'projects/drone-vision/**'
-      - '.github/workflows/drone-vision.yml'
+      - "projects/drone-vision/**"
+      - ".github/workflows/drone-vision.yml"
 
 jobs:
   deploy:
