@@ -1,0 +1,13 @@
+name: Drone Vision CI/CD
+
+on:
+  push:
+    paths:
+      - 'projects/drone-vision/**'
+      - '.github/workflows/drone-vision.yml'
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_project-template.yml
+    with:
+      project-dir: projects/drone-vision
