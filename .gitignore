@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.env/
+.venv/
+
+# Node
+node_modules/
+
+# Models & large binaries
+projects/**/model/*.onnx
+*.tar.gz
+*.zip
