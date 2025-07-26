@@ -11,3 +11,4 @@ jobs:
     uses: ./.github/workflows/_project-template.yml
     with:
       project-dir: projects/drone-vision
+# trigger run
