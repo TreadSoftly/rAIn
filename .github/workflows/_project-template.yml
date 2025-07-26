@@ -1,46 +1,40 @@
 name: Deploy Monorepo Project
-
 on:
   workflow_call:
     inputs:
       project-dir:
         required: true
         type: string
-
 permissions:
   id-token: write
   contents: read
-
 env:
-  AWS_REGION: us-east-1        # so the shell script can reference $AWS_REGION
-
+  AWS_REGION: us-east-1
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ${{ inputs.project-dir }}
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::211125358149:role/TreadSoftlyAWS-GHA-OIDC
           aws-region: us-east-1
-
-      - name: Build and push Lambda image
+      - name: Build & push Lambda image
         run: |
           IMAGE_NAME=$(basename ${{ inputs.project-dir }})-lambda
           aws ecr describe-repositories --repository-names "$IMAGE_NAME" \
             || aws ecr create-repository --repository-name "$IMAGE_NAME"
           AWS_ID=$(aws sts get-caller-identity --query Account --output text)
           docker build -t "$IMAGE_NAME" lambda
-          docker tag "$IMAGE_NAME:latest" "$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:latest"
-          aws ecr get-login-password | docker login --username AWS --password-stdin "$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+          docker tag "$IMAGE_NAME:latest" \
+            "$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:latest"
+          aws ecr get-login-password | docker login --username AWS --password-stdin \
+            "$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
           docker push "$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:latest"
-
       - name: CDK deploy
         run: |
           pip install --quiet aws-cdk-lib constructs
