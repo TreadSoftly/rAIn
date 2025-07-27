@@ -21,7 +21,7 @@ class DroneStack(Stack):
         fn = _lambda.DockerImageFunction(
             self,
             "DetectorFn",
-            code=_lambda.DockerImageCode.from_image_asset("../lambda"),
+            code=_lambda.DockerImageCode.from_image_asset("lambda"),
             memory_size=512,
             timeout=Duration.seconds(30),
         )
