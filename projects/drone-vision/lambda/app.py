@@ -1,6 +1,6 @@
 from io import BytesIO
 from PIL import Image, ImageDraw
-import base64, json, os
+import base64
 
 def handler(event, context):
     # API Gateway proxy event with base64‑encoded body
@@ -12,7 +12,8 @@ def handler(event, context):
     w, h = img.size
     draw.rectangle([(w*0.25, h*0.25), (w*0.75, h*0.75)], outline="red", width=4)
 
-    buf = BytesIO(); img.save(buf, format="JPEG")
+    buf = BytesIO()
+    img.save(buf, format="JPEG")
     out_b64 = base64.b64encode(buf.getvalue()).decode()
 
     return {
