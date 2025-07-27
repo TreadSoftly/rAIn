@@ -12,3 +12,7 @@ COPY app.py              .
 COPY model/yolov8n.onnx  ./model/
 
 CMD ["app.handler"]
+
+# --- Python deps -------------------------------------------------------------
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
