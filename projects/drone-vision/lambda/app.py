@@ -3,69 +3,114 @@ import io
 import json
 import os
 import urllib.request
-from PIL import Image, ImageDraw
+import uuid
+import datetime
+from pathlib import Path
+
 import numpy as np
-import onnxruntime as rt
+from PIL import Image, ImageDraw
+import onnxruntime as ort
+import boto3                       # only used when task == geojson
+import cv2                         # required for heat‑map
 
-# ---- model -----------------------------------------------------------------
-MODEL = os.path.join(os.getcwd(), "model", "yolov8n.onnx")
-session = rt.InferenceSession(MODEL, providers=["CPUExecutionProvider"])
-in_name = session.get_inputs()[0].name
-STRIDE  = 640
+from heatmap import heatmap_overlay
+from geo_sink import to_geojson
 
-# ---- helpers ---------------------------------------------------------------
-def fetch(url: str, timeout=10) -> bytes:
-    """Download bytes from URL with a desktop UA (Unsplash blocks curl)."""
+# ---------------------------------------------------------------------------#
+# 1.  load both ONNX graphs once per container                               #
+# ---------------------------------------------------------------------------#
+MODELS = {
+    "drone":    "model/drone.onnx",        # VisDrone   (imgsz 640)
+    "airplane": "model/airplane.onnx"      # HRPlanes   (imgsz 960)
+}
+SESSIONS, IN_NAMES, STRIDES = {}, {}, {}
+
+for k, path in MODELS.items():
+    s = ort.InferenceSession(os.path.join(os.getcwd(), path),
+                            providers=["CPUExecutionProvider"])
+    SESSIONS[k] = s
+    IN_NAMES[k] = s.get_inputs()[0].name
+    # yolov8 exports always square ↦ take width
+    STRIDES[k]  = s.get_inputs()[0].shape[2]
+
+# ---------------------------------------------------------------------------#
+# 2.  utilities                                                              #
+# ---------------------------------------------------------------------------#
+def fetch_image(url: str, timeout=10) -> Image.Image:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+        return Image.open(io.BytesIO(resp.read())).convert("RGB")
 
-def detect(img: Image.Image) -> Image.Image:
-    img_rs = img.resize((STRIDE, STRIDE))
-    x = np.asarray(img_rs).transpose(2, 0, 1)[None].astype(np.float32) / 255.0
-    pred = np.array(session.run(None, {in_name: x})[0])[0]   # (84, 8400)
-
-    scores = pred[4]
-    best   = int(scores.argmax())
-    if scores[best] > 0.40:
-        x1, y1, x2, y2 = pred[:4, best]
-
-        # --- sanitise -------------------------------------------------------
+def run_inference(img: Image.Image, model_key: str):
+    """Return ndarray[N,5]  –  (x1,y1,x2,y2,conf) in *pixel* coords"""
+    stride   = STRIDES[model_key]
+    img_rs   = img.resize((stride, stride))
+    x        = np.asarray(img_rs).transpose(2,0,1)[None].astype(np.float32)/255
+    logits   = SESSIONS[model_key].run(
+                None, {IN_NAMES[model_key]: x})[0][0]            # (84,8400)
+    conf     = logits[4]
+    keep     = conf > 0.40
+    if not keep.any():
+        return np.empty((0,5))
+    boxes    = np.vstack((logits[:4, keep].T, conf[keep])).T        # (N,5)
+    # sanitize each box                                               #
+    scale    = np.array([img.width, img.height]*2)
+    out      = []
+    for x1,y1,x2,y2,p in boxes:
         x1, x2 = sorted((x1, x2))
         y1, y2 = sorted((y1, y2))
-        if x2 - x1 < 1 or y2 - y1 < 1:   # 1 px or less → ignore
-            return img
-        # -------------------------------------------------------------------
+        if x2-x1 < 1 or y2-y1 < 1:
+            continue
+        out.append([*(np.array([x1,y1,x2,y2])*scale/stride), p])
+    return np.array(out, float)
 
-        scale = np.array([img.width, img.height] * 2) / STRIDE
-        box   = (np.array([x1, y1, x2, y2]) * scale).tolist()
-        ImageDraw.Draw(img).rectangle(box, outline="red", width=3)
-
+def draw_boxes(img: Image.Image, boxes):
+    d = ImageDraw.Draw(img)
+    for x1,y1,x2,y2,_ in boxes:
+        d.rectangle((x1,y1,x2,y2), outline="red", width=3)
     return img
 
-# ---- Lambda handler --------------------------------------------------------
+def pack_jpeg_base64(pil_img: Image.Image):
+    buf = io.BytesIO()
+    pil_img.save(buf, format="JPEG")
+    return {
+        "statusCode": 200,
+        "isBase64Encoded": True,
+        "headers": {"Content-Type": "image/jpeg"},
+        "body": base64.b64encode(buf.getvalue()).decode()
+    }
+
+# ---------------------------------------------------------------------------#
+# 3.  Lambda handler                                                         #
+# ---------------------------------------------------------------------------#
+s3   = boto3.client("s3")
+BUCKET = os.environ.get("GEO_BUCKET")      # create once & set in CDK
+
 def handler(event, _context):
     try:
-        body_str = event.get("body", "") or ""
-        if event.get("isBase64Encoded"):              # S3 trigger
-            img_bytes = base64.b64decode(body_str)
-        else:
-            try:                                      # try JSON first
-                data = json.loads(body_str)
-                img_bytes = fetch(data["image_url"])
-            except (json.JSONDecodeError, KeyError):
-                img_bytes = base64.b64decode(body_str)
+        body = json.loads(event["body"])
+        img  = fetch_image(body["image_url"])
+        mdl  = body.get("model", "drone")
+        task = body.get("task",  "detect")
 
-        img_out = detect(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
-        buf = io.BytesIO()
-        img_out.save(buf, format="JPEG")
-        return {
-            "statusCode": 200,
-            "isBase64Encoded": True,
-            "headers": {"Content-Type": "image/jpeg"},
-            "body": base64.b64encode(buf.getvalue()).decode(),
-        }
+        boxes = run_inference(img, mdl)
 
-    except Exception as exc:
-        # Anything goes wrong → plain text 500 so you see the error
-        return {"statusCode": 500, "body": str(exc)}
+        # ---------- task router ------------------------------------------- #
+        if task == "heatmap":
+            out = heatmap_overlay(np.asarray(img)[:,:,::-1], boxes)  # BGR
+            return pack_jpeg_base64(Image.fromarray(out[:,:,::-1]))
+
+        if task == "geojson":
+            geo = to_geojson(body["image_url"], boxes)
+            key = f"detections/{datetime.date.today()}/{uuid.uuid4()}.geojson"
+            s3.put_object(Bucket=BUCKET, Key=key,
+                        Body=json.dumps(geo).encode(),
+                        ContentType="application/geo+json")
+            return {"statusCode": 201, "body": json.dumps({"s3_key": key})}
+
+        # default: draw rectangles
+        out = draw_boxes(img, boxes)
+        return pack_jpeg_base64(out)
+
+    except Exception as e:                   # surfacing every error helps.
+        return {"statusCode": 500, "body": str(e)}
