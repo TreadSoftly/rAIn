@@ -31,8 +31,14 @@ class DroneStack(Stack):
             events.S3EventSource(bucket_in, events=[s3.EventType.OBJECT_CREATED])
         )
 
-        # Simple REST endpoint -> Lambda
-        api = apigw.LambdaRestApi(self, "Endpoint", handler=fn) # type: ignore[arg-type]
+        # Simple REST endpoint -> Lambda  (tell API GW JPEG is binary)
+        api = apigw.LambdaRestApi(
+            self,
+            "Endpoint",
+            handler=fn,                       # type: ignore[arg-type]
+            binary_media_types=["image/jpeg"] # ← NEW
+        )
+
 
         # Output the invoke URL so the CI logs show it
         self.api_url_output = api.url
