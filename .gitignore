@@ -11,3 +11,7 @@ node_modules/
 projects/**/model/*.onnx
 *.tar.gz
 *.zip
+
+# ─── keep the Lambda ONNX weights ─────────────────────────────────────────────
+!projects/drone-vision/lambda/model/
+!projects/drone-vision/lambda/model/*.onnx
