@@ -21,17 +21,26 @@ def fetch(url: str, timeout=10) -> bytes:
         return resp.read()
 
 def detect(img: Image.Image) -> Image.Image:
-    """Run YOLO and return image with an optional red rectangle."""
     img_rs = img.resize((STRIDE, STRIDE))
     x = np.asarray(img_rs).transpose(2, 0, 1)[None].astype(np.float32) / 255.0
-    pred = np.array(session.run(None, {in_name: x})[0])[0]  # (84, 8400)
+    pred = np.array(session.run(None, {in_name: x})[0])[0]   # (84, 8400)
+
     scores = pred[4]
     best   = int(scores.argmax())
     if scores[best] > 0.40:
         x1, y1, x2, y2 = pred[:4, best]
+
+        # --- sanitise -------------------------------------------------------
+        x1, x2 = sorted((x1, x2))
+        y1, y2 = sorted((y1, y2))
+        if x2 - x1 < 1 or y2 - y1 < 1:   # 1 px or less → ignore
+            return img
+        # -------------------------------------------------------------------
+
         scale = np.array([img.width, img.height] * 2) / STRIDE
         box   = (np.array([x1, y1, x2, y2]) * scale).tolist()
         ImageDraw.Draw(img).rectangle(box, outline="red", width=3)
+
     return img
 
 # ---- Lambda handler --------------------------------------------------------
