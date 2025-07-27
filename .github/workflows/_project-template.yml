@@ -1,54 +1,93 @@
-name: Deploy Monorepo Project
+# =====================================================================
+#  Re‑usable CI/CD for any project in projects/<name>/ using AWS‑CDK + 
+#  a container‑image Lambda.  Called by tiny per‑project workflows.
+# =====================================================================
+
+name: Deploy Monorepo Project  # template name (shows in run history)
 
 on:
   workflow_call:
     inputs:
       project-dir:
+        description: "Path like projects/drone-vision"
         required: true
         type: string
 
 permissions:
-  id-token: write
-  contents: read
+  id-token: write   # OIDC → AWS
+  contents:  read   # repo checkout
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: us-east-1        # change if you deploy elsewhere
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ inputs.project-dir }}
 
     steps:
-      - uses: actions/checkout@v4
+    # --------------------------------------------------
+    # 0) Checkout ‑‑ WITH Git‑LFS weights
+    # --------------------------------------------------
+    - name: Check out source
+      uses: actions/checkout@v4
+      with:
+        lfs: true          # <- **critical** for ONNX / model files
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::211125358149:role/TreadSoftlyAWS-GHA-OIDC
-          aws-region: us-east-1
+    # --------------------------------------------------
+    # 1) Configure AWS creds via OIDC
+    # --------------------------------------------------
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::211125358149:role/TreadSoftlyAWS-GHA-OIDC
+        aws-region: ${{ env.AWS_REGION }}
 
-      # ➜ NEW: install the CDK CLI so cdk synth/deploy work
-      - name: Install CDK CLI
-        run: npm install -g aws-cdk@2
+    # --------------------------------------------------
+    # 2) Install CDK CLI so synth/deploy work
+    # --------------------------------------------------
+    - name: Install CDK CLI
+      run: npm install -g aws-cdk@2
 
-      - name: Build & push Lambda image
-        run: |
-          IMAGE_NAME=$(basename ${{ inputs.project-dir }})-lambda
-          aws ecr describe-repositories --repository-names "$IMAGE_NAME" \
-            || aws ecr create-repository --repository-name "$IMAGE_NAME"
-          AWS_ID=$(aws sts get-caller-identity --query Account --output text)
-          docker build -t "$IMAGE_NAME" lambda
-          docker tag "$IMAGE_NAME:latest" \
-            "$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:latest"
-          aws ecr get-login-password | docker login --username AWS --password-stdin \
-            "$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
-          docker push "$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:latest"
+    # --------------------------------------------------
+    # 3) Build & push Lambda image to ECR
+    # --------------------------------------------------
+    - name: Build & push Lambda image
+      working-directory: ${{ inputs.project-dir }}/lambda
+      env:
+        IMAGE_NAME: ${{ github.run_id }}-${{ github.sha }}   # unique tag
+      run: |
+        PROJECT=$(basename "${{ inputs.project-dir }}")
+        REPO_NAME="${PROJECT}-lambda"
 
-      - name: CDK deploy
-        run: |
-          pip install --quiet aws-cdk-lib constructs
-          cdk synth
-          cdk deploy --require-approval never
+        # ensure repo exists
+        aws ecr describe-repositories --repository-names "$REPO_NAME" \
+          || aws ecr create-repository --repository-name "$REPO_NAME"
+
+        AWS_ID=$(aws sts get-caller-identity --query Account --output text)
+        REGISTRY="$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+        docker build -t "$REPO_NAME" .
+        docker tag  "$REPO_NAME:latest" "$REGISTRY/$REPO_NAME:latest"
+
+        # login & push
+        aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+        docker push "$REGISTRY/$REPO_NAME:latest"
+
+        echo "IMAGE_URI=$REGISTRY/$REPO_NAME:latest" >> $GITHUB_ENV
+
+    # --------------------------------------------------
+    # 4) CDK deploy (using the just‑pushed image)
+    # --------------------------------------------------
+    - name: Install Python deps for CDK app
+      working-directory: ${{ inputs.project-dir }}
+      run: pip install --quiet aws-cdk-lib constructs
+
+    - name: CDK synth
+      working-directory: ${{ inputs.project-dir }}
+      run: cdk synth
+
+    - name: CDK deploy
+      working-directory: ${{ inputs.project-dir }}
+      env:
+        IMAGE_URI: ${{ env.IMAGE_URI }}   # picked up by your stack code
+      run: cdk deploy --require-approval never
