@@ -1,12 +1,26 @@
 # projects/drone-vision/lambda/Dockerfile
+# ------------------------------------------------------------
+#  Python 3.10 Lambda base image
+# ------------------------------------------------------------
 FROM public.ecr.aws/lambda/python:3.10
 
-# ----- Copy code + model ----------------------------------------------------
-#   Everything under lambda/ goes to /var/task  (= Lambda “root”)
-COPY . .
+# ------------------------------------------------------------
+#  Copy application code
+#    Everything in lambda/ → /var/task   (Lambda workdir)
+# ------------------------------------------------------------
+COPY . /var/task
 
-# ----- Install Python deps ---------------------------------------------------
-RUN pip install --no-cache-dir -r requirements.txt
+# ------------------------------------------------------------
+#  Copy ALL ONNX weights into /var/task/model/
+# ------------------------------------------------------------
+COPY model/*.onnx /var/task/model/
 
-# ----- Set handler ----------------------------------------------------------
+# ------------------------------------------------------------
+#  Install Python dependencies (no wheel cache to keep image small)
+# ------------------------------------------------------------
+RUN pip install --no-cache-dir -r /var/task/requirements.txt
+
+# ------------------------------------------------------------
+#  Lambda entry‑point
+# ------------------------------------------------------------
 CMD ["app.handler"]
