@@ -1,0 +1,3 @@
+
+model/
+!projects/drone-vision/lambda/model/*.onnx
