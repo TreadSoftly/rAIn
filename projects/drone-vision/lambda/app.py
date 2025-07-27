@@ -1,24 +1,44 @@
-from io import BytesIO
-from PIL import Image, ImageDraw
 import base64
+import io
+import os
+from PIL import Image, ImageDraw
+import numpy as np
+import onnxruntime as rt
+
+# Load model once at cold‑start
+MODEL_PATH = os.path.join(os.getcwd(), "model", "yolov8n.onnx")
+session = rt.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+in_name  = session.get_inputs()[0].name
+stride   = 640  # model input
 
 def handler(event, context):
-    # API Gateway proxy event with base64‑encoded body
-    body = base64.b64decode(event["body"])
-    img  = Image.open(BytesIO(body)).convert("RGB")
+    """API Gateway / S3 event → annotated JPEG"""
+    b64 = event["body"] if isinstance(event["body"], str) else ""
+    img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
 
-    # draw a fake bounding‑box just to prove it works
-    draw = ImageDraw.Draw(img)
-    w, h = img.size
-    draw.rectangle([(w*0.25, h*0.25), (w*0.75, h*0.75)], outline="red", width=4)
+    # Pre‑process
+    img_rs = img.resize((stride, stride))
+    x = np.asarray(img_rs).transpose(2,0,1)[None].astype(np.float32) / 255.0
 
-    buf = BytesIO()
-    img.save(buf, format="JPEG")
-    out_b64 = base64.b64encode(buf.getvalue()).decode()
+    # Inference
+    pred = session.run(None, {in_name: x})[0]            # (1,84,8400)
+    pred = np.array(pred)[0]                             # (84,8400)
 
+    # Very rough post‑processing: find highest‑score object
+    scores = pred[4]
+    best   = np.argmax(scores)
+    if scores[best] > 0.4:                               # threshold
+        x1,y1,x2,y2 = pred[:4, best]
+        scale = np.array([img.width, img.height]*2) / stride
+        box   = (np.array([x1,y1,x2,y2]) * scale).tolist()
+        draw  = ImageDraw.Draw(img)
+        draw.rectangle(box, outline="red", width=3)
+
+    # Return JPEG bytes
+    buf = io.BytesIO(); img.save(buf, format="JPEG")
     return {
         "statusCode": 200,
         "isBase64Encoded": True,
-        "headers": { "Content-Type": "image/jpeg" },
-        "body": out_b64,
+        "headers": {"Content-Type": "image/jpeg"},
+        "body": base64.b64encode(buf.getvalue()).decode()
     }
