@@ -15,3 +15,19 @@ projects/**/model/*.onnx
 # ─── keep the Lambda ONNX weights ─────────────────────────────────────────────
 !projects/drone-vision/lambda/model/
 !projects/drone-vision/lambda/model/*.onnx
+# build artefacts
+*.jpg
+*.b64
+projects/**/cdk.out/
+
+# large weights
+*.onnx
+*.pt
+# build artefacts
+*.jpg
+*.b64
+projects/**/cdk.out/
+
+# large weights
+*.onnx
+*.pt
