@@ -1,2 +1,3 @@
 
 !projects/drone-vision/lambda/model/*.onnx
+local_detect.jpg
