@@ -32,3 +32,6 @@ projects/**/cdk.out/
 *.onnx
 *.pt
 projects/drone-vision/tests/
+
+# VSCode logs
+.vscode/*.log
