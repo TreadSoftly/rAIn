@@ -31,3 +31,4 @@ projects/**/cdk.out/
 # large weights
 *.onnx
 *.pt
+tests/
