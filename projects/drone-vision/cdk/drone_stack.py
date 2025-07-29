@@ -7,14 +7,16 @@ from constructs import Construct
 
 
 class DroneStack(Stack):
-    def __init__(self, scope: Construct, id: str, **kwargs: object) -> None:
-        super().__init__(scope, id, **kwargs) # type: ignore[arg-type]
+    """Defines the S3 → Lambda → API Gateway stack used in CI/CD."""
 
-        # S3 buckets for uploads and (future) processed results
-        bucket_in  = s3.Bucket(self, "InputBucket")
-        bucket_out = s3.Bucket(self, "OutputBucket") # type: ignore
+    def __init__(self, scope: Construct, id: str, **kwargs) -> None:       # noqa: D401
+        super().__init__(scope, id, **kwargs)
 
-        # Docker-based Lambda built from ../lambda
+        # ── buckets ───────────────────────────────────────────────────────
+        bucket_in = s3.Bucket(self, "InputBucket")
+        bucket_out = s3.Bucket(self, "OutputBucket")
+
+        # ── Lambda (Docker image built from ./lambda) ─────────────────────
         fn = _lambda.DockerImageFunction(
             self,
             "DetectorFn",
@@ -23,27 +25,18 @@ class DroneStack(Stack):
             timeout=Duration.seconds(30),
         )
 
-        # Trigger Lambda whenever a new object is put in the input bucket
+        # trigger Lambda on every upload to the *input* bucket
         fn.add_event_source(
             events.S3EventSource(bucket_in, events=[s3.EventType.OBJECT_CREATED])
         )
 
-        # Simple REST endpoint -> Lambda  (tell API GW JPEG is binary)
+        # ── public REST endpoint (binary JPEG support) ────────────────────
         api = apigw.LambdaRestApi(
             self,
             "Endpoint",
-            handler=fn,                       # type: ignore[arg-type]
-            binary_media_types=["image/jpeg"] # ← NEW
+            handler=fn,
+            binary_media_types=["image/jpeg"],
         )
 
-
-        # Output the invoke URL so the CI logs show it
-        self.api_url_output = api.url
-            "Endpoint",
-            handler=fn,                       # type: ignore[arg-type]
-            binary_media_types=["image/jpeg"] # ← NEW
-        )
-
-
-        # Output the invoke URL so the CI logs show it
+        # surface the invoke URL in CloudFormation Outputs (visible in CI)
         self.api_url_output = api.url

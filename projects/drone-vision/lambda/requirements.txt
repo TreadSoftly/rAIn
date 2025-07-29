@@ -1,4 +1,9 @@
-onnxruntime==1.16.3
+# projects/drone-vision/lambda/requirements.txt
+# ──────────────────────────────────────────────
+# First onnxruntime build that supports CPython 3.12 (Windows & Linux)
+onnxruntime==1.17.3
+
+# Everything else stays the same
 numpy==1.26.4
 pillow==11.3.0
 opencv-python-headless==4.10.0.82

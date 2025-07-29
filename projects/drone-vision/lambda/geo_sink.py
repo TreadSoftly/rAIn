@@ -45,7 +45,7 @@ def to_geojson(image_url: str,
     """
     lat0, lon0 = _latlon(image_url)
 
-    features = []
+    features: list[Dict[str, Any]] = []
     if boxes:           # detections → offset points
         for x1, y1, x2, y2, conf in boxes:
             relx, rely = ((x1 + x2) / 2 - 320) / 320, ((y1 + y2) / 2 - 320) / 320
