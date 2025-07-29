@@ -1,11 +1,8 @@
-from aws_cdk import (
-    Stack,
-    Duration,
-    aws_s3 as s3,
-    aws_lambda as _lambda,
-    aws_apigateway as apigw,
-    aws_lambda_event_sources as events,
-)
+from aws_cdk import Duration, Stack
+from aws_cdk import aws_apigateway as apigw
+from aws_cdk import aws_lambda as _lambda
+from aws_cdk import aws_lambda_event_sources as events
+from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
 
@@ -17,7 +14,7 @@ class DroneStack(Stack):
         bucket_in  = s3.Bucket(self, "InputBucket")
         bucket_out = s3.Bucket(self, "OutputBucket") # type: ignore
 
-        # Docker‑based Lambda built from ../lambda
+        # Docker-based Lambda built from ../lambda
         fn = _lambda.DockerImageFunction(
             self,
             "DetectorFn",
@@ -31,9 +28,17 @@ class DroneStack(Stack):
             events.S3EventSource(bucket_in, events=[s3.EventType.OBJECT_CREATED])
         )
 
-        # Simple REST endpoint -> Lambda  (tell API GW JPEG is binary)
+        # Simple REST endpoint -> Lambda  (tell API GW JPEG is binary)
         api = apigw.LambdaRestApi(
             self,
+            "Endpoint",
+            handler=fn,                       # type: ignore[arg-type]
+            binary_media_types=["image/jpeg"] # ← NEW
+        )
+
+
+        # Output the invoke URL so the CI logs show it
+        self.api_url_output = api.url
             "Endpoint",
             handler=fn,                       # type: ignore[arg-type]
             binary_media_types=["image/jpeg"] # ← NEW

@@ -1,5 +1,5 @@
 ###############################################################################
-# ⛔  Don’t commit generated or binary artefacts
+# ⛔  Don't commit generated or binary artefacts
 ###############################################################################
 # Python
 __pycache__/

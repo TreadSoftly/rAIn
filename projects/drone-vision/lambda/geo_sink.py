@@ -1,7 +1,7 @@
 """
-projects/drone‑vision/lambda/geo_sink.py
-Back‑compat helper that turns an image‑URL containing “lat…_lon…” plus (optionally)
-a list of YOLO‑style boxes into GeoJSON.
+projects/drone-vision/lambda/geo_sink.py
+Back-compat helper that turns an image-URL containing “lat…_lon…” plus (optionally)
+a list of YOLO-style boxes into GeoJSON.
 
 If *boxes* is omitted or empty, we emit a single point at the centre.
 Otherwise each box becomes a point, displaced naïvely from the centre.
@@ -9,12 +9,12 @@ Otherwise each box becomes a point, displaced naïvely from the centre.
 from __future__ import annotations
 
 import re
-import uuid
 import urllib.parse
+import uuid
+from datetime import UTC, datetime
 from typing import Any, Dict, Sequence
-from datetime import datetime, UTC
 
-# lat37.0_lon‑122.0, signed ints or floats
+# lat37.0_lon-122.0, signed ints or floats
 _COORD_RE = re.compile(r"lat(?P<lat>-?\d+(?:\.\d+)?)_lon(?P<lon>-?\d+(?:\.\d+)?)",
                     re.IGNORECASE)
 
@@ -34,7 +34,7 @@ def to_geojson(image_url: str,
     image_url : str
         Must embed “…lat<lat>_lon<lon>…”.
     boxes : iterable[(x1, y1, x2, y2, conf)], optional
-        YOLO‑style pixel boxes.  When omitted (or empty) we return just the
+        YOLO-style pixel boxes.  When omitted (or empty) we return just the
         centre point; otherwise each box is mapped to a point offset from
         the centre by a fixed, very naïve scale (good enough for the tests).
 

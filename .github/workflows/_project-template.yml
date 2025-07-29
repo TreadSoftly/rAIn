@@ -21,7 +21,7 @@ jobs:
 
     steps:
       # --------------------------------------------------
-      # 0) Checkout ‑‑ WITH Git‑LFS weights
+      # 0) Checkout -- WITH Git-LFS weights
       # --------------------------------------------------
       - name: Check out source
         uses: actions/checkout@v4
@@ -71,7 +71,7 @@ jobs:
           echo "IMAGE_URI=$REGISTRY/$REPO_NAME:latest" >> $GITHUB_ENV
 
       # --------------------------------------------------
-      # 4) CDK deploy (using the just‑pushed image)
+      # 4) CDK deploy (using the just-pushed image)
       # --------------------------------------------------
       - name: Install Python deps for CDK app
         working-directory: ${{ inputs.project-dir }}

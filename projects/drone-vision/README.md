@@ -1,4 +1,4 @@
 # trigger
-# re‑trigger
+# re-trigger
 # retrigger
 # retrigger

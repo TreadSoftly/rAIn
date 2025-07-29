@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name            = "dronevision"
+version         = "0.1.0"
+description     = "One-step JPEG / video inference for small-object detection."
+authors         = [{ name = "YOUR NAME", email = "you@example.com" }]
+readme          = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+  # core runtime
+  "torch>=2.2",
+  "torchvision>=0.17",
+  "ultralytics>=8.0",
+  "onnxruntime>=1.16",
+  "opencv-python-headless>=4.10",
+  "numpy<2",
+  "pillow>=11.3",
+  # cli
+  "typer[all]>=0.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "black", "isort", "pre-commit"]
+
+[project.scripts]
+target = "dronevision.cli:main"     # installs the `target` shell command
+
+[tool.hatch.build]
+include = [
+  "dronevision/**/*.py",
+  "dronevision/model/*.onnx",
+  "dronevision/assets/*",
+]
+
+[tool.pytest.ini_options]
+addopts   = "-q"
+testpaths = ["tests"]
