@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 
 def heatmap_overlay(bgr_img: np.ndarray, boxes, drop_alpha=0.4, sigma=25):
-    """Return BGR image with jet‑colored heat‑map."""
+    """Return BGR image with jet-colored heat-map."""
     h, w = bgr_img.shape[:2]
     mask = np.zeros((h, w), np.float32)
     for x1,y1,x2,y2,conf in boxes:
