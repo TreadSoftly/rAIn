@@ -124,4 +124,3 @@ def run_single(
         dst = Path(src).with_name(f"{Path(src).stem}_boxes.jpg")
         out_img.save(dst, "JPEG")
         print(f"★ wrote {dst}")
-        print(f"★ wrote {dst}")
