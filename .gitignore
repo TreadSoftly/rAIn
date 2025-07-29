@@ -31,4 +31,4 @@ projects/**/cdk.out/
 # large weights
 *.onnx
 *.pt
-tests/
+projects/drone-vision/tests/
