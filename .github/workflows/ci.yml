@@ -1,27 +1,48 @@
 name: Drone-Vision CI
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
 
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+
+    # Build & test across all OS/Python combinations,
+    # but don't cancel the whole matrix if one job fails.
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.9", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      # ------------------------------------------------------------------
+      # 1) Checkout repo (with Git‑LFS so model weights are pulled)
+      # ------------------------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
-          lfs: true # pulls the .onnx weights
+          lfs: true
 
-      - uses: actions/setup-python@v5
+      # ------------------------------------------------------------------
+      # 2) Install the requested Python version
+      # ------------------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
+      # ------------------------------------------------------------------
+      # 3) Install the package (editable = latest workspace code)
+      # ------------------------------------------------------------------
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          pip install projects/drone-vision[dev]
+          pip install -e projects/drone-vision[dev]
 
+      # ------------------------------------------------------------------
+      # 4) Run tests (pytest auto‑discovers inside the project dir)
+      # ------------------------------------------------------------------
       - name: Unit tests
-        run: pytest -q projects/drone-vision/tests
+        working-directory: projects/drone-vision
+        run: pytest -q
