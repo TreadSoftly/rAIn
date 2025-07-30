@@ -1,37 +1,29 @@
 # Python
 __pycache__/
 *.py[cod]
-.env/
-.venv/
 
 # Node
 node_modules/
 
 # Models & large binaries
 projects/**/model/*.onnx
-*.tar.gz
-*.zip
 
-# ─── keep the Lambda ONNX weights ─────────────────────────────────────────────
+# ── keep the Lambda ONNX weights ──────────────────────────────
 !projects/drone-vision/lambda/model/
 !projects/drone-vision/lambda/model/*.onnx
-# build artefacts
-*.jpg
-*.b64
-projects/**/cdk.out/
 
 # large weights
 *.onnx
 *.pt
+
+# DO NOT ignore the test‑suite any more
+# ( ↓‑‑ remove or comment‑out this line ↓ )
+# projects/drone-vision/tests/
+
 # build artefacts
 *.jpg
 *.b64
 projects/**/cdk.out/
-
-# large weights
-*.onnx
-*.pt
-projects/drone-vision/tests/
 
 # VSCode logs
 .vscode/*.log
