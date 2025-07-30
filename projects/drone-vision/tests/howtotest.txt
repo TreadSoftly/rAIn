@@ -1,0 +1,4 @@
+python -m dronevision.predict_mp4 `
+       projects/drone-vision/tests/raw/bunny.mp4 `
+       save_dir=projects/drone-vision/tests/results `
+       conf=0.3 imgsz=640
