@@ -10,16 +10,18 @@ authors         = [{ name = "YOUR NAME", email = "you@example.com" }]
 readme          = "README.md"
 requires-python = ">=3.9"
 
+# ───────────────────────── runtime ─────────────────────────
 dependencies = [
-  # core runtime
   "torch>=2.2",
   "torchvision>=0.17",
   "ultralytics>=8.0",
-  "onnxruntime>=1.16",
-  "opencv-python-headless>=4.10",
+  # wheels for 3.12 start at 1.22
+  "onnxruntime>=1.22,<1.24",
+  # OpenCV 4.12 → NumPy ≥ 2.3, so pin < 4.12
+  "opencv-python-headless>=4.10,<4.12",
   "numpy<2",
   "pillow>=11.3",
-  # cli
+  # CLI
   "typer[all]>=0.12",
 ]
 
@@ -30,9 +32,9 @@ dev = [
   "black",
   "isort",
   "pre-commit",
-  # ─ tests / local-stack ─
+  # ─ tests / local‑stack ─
   "boto3",
-  'moto[all] ~= 4.2',
+  "moto[all] ~= 4.2",
 ]
 
 [project.scripts]
