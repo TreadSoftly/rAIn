@@ -1,29 +1,68 @@
-# Python
+#────────────────────────────────────────
+#  Python build & tooling artefacts
+#────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*.pyo
 
-# Node
+#────────────────────────────────────────
+#  Virtual‑environment folders
+#────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+#────────────────────────────────────────
+#  Node
+#────────────────────────────────────────
 node_modules/
 
-# Models & large binaries
+#────────────────────────────────────────
+#  Models & large binaries
+#────────────────────────────────────────
 projects/**/model/*.onnx
 
 # ── keep the Lambda ONNX weights ──────────────────────────────
 !projects/drone-vision/lambda/model/
 !projects/drone-vision/lambda/model/*.onnx
 
-# large weights
+# large weights checked in elsewhere by mistake
 *.onnx
 *.pt
 
-# DO NOT ignore the test‑suite any more
-# ( ↓‑‑ remove or comment‑out this line ↓ )
+#────────────────────────────────────────
+#  Test‑suite  (we **keep** the tests now)
+#────────────────────────────────────────
+# (line below intentionally commented out)
 # projects/drone-vision/tests/
 
-# build artefacts
+#────────────────────────────────────────
+#  Build / packaging outputs
+#────────────────────────────────────────
 *.jpg
 *.b64
 projects/**/cdk.out/
+build/
+dist/
+*.egg-info/
 
-# VSCode logs
+#────────────────────────────────────────
+#  Test / coverage artefacts
+#────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+#────────────────────────────────────────
+#  IDE junk
+#────────────────────────────────────────
+.vscode/
+.idea/
 .vscode/*.log
+
+#────────────────────────────────────────
+#  OS‑generated cruft
+#────────────────────────────────────────
+.DS_Store
+Thumbs.db
