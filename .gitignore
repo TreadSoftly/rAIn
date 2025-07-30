@@ -66,3 +66,6 @@ htmlcov/
 #────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# legacy pin file no longer used
+projects/drone-vision/requirements-py39.txt
