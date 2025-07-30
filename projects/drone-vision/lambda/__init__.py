@@ -1,1 +1,1 @@
-from .app import *  # re‑export for "import lambda.app"
+from .app import *  # re-export for "import lambda.app"
