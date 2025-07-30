@@ -39,3 +39,5 @@ cdk.out/
 # OS junk
 .DS_Store
 Thumbs.db
+
+yolov8n-seg.pt

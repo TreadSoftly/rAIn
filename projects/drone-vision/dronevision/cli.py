@@ -3,22 +3,28 @@ Tiny Typer wrapper that installs as **target**.
 
 • JPEG / PNG  → saved into tests/results as *<stem>_boxes.jpg* / *_heat.jpg* …
 • MP4         → uses predict_mp4 to create an annotated MP4 in tests/results
-• HTTP/S URL  → prints base-64 JPEG (detect | heatmap) or GeoJSON to stdout.
+• HTTP/S URL  → prints base‑64 JPEG (detect | heatmap) or GeoJSON to stdout.
+• data:…      → treated exactly like a remote URL (GeoJSON, base‑64 JPEG).
 """
 from __future__ import annotations
 
+import re
 import urllib.parse
-from pathlib import Path #type: ignore[import-untyped]
+from pathlib import Path  # type: ignore[import-untyped]
 
 import typer
 
-from .lambda_like import run_single #type: ignore  # lazy inferencing helper
+from .lambda_like import run_single  # type: ignore  # lazy inferencing helper
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 
+# recognise http/https AND data‑URI (base‑64) images
+_URL_RE = re.compile(r"^(https?://.+|data:image/[^;]+;base64,.+)$", re.I)
+
 
 def _is_url(text: str) -> bool:
-    return urllib.parse.urlparse(text).scheme in {"http", "https"}
+    # fast path for http/https, fall back to regex for data‑URLs
+    return urllib.parse.urlparse(text).scheme in {"http", "https"} or bool(_URL_RE.match(text))
 
 
 @app.command()
@@ -26,16 +32,16 @@ def target(
     inputs: list[str] = typer.Argument(
         ..., help="Path(s) or URL(s) to image / video."
     ),
-    model: str = typer.Option("drone", help="[drone|airplane] - selects weights file"),
+    model: str = typer.Option("drone", help="[drone|airplane] – selects weights file"),
     task: str = typer.Option(
-        "detect", help="[detect|heatmap|geojson] - processing to perform"
+        "detect", help="[detect|heatmap|geojson] – processing to perform"
     ),
 ) -> None:
-    """Batch process one or more local files / URLs."""
+    """Batch process one or more local files / URLs / data‑URIs."""
     for item in inputs:
         # ─── video ──────────────────────────────────────────────────────
         if item.lower().endswith(".mp4"):
-            # Import on-demand so normal image runs do NOT pull in heavy deps
+            # Import on‑demand so normal image runs do NOT pull in heavy deps
             from .predict_mp4 import main as _predict_mp4
 
             _predict_mp4(item)  # (model/task are image-only for now)
@@ -46,7 +52,7 @@ def target(
             run_single(
                 item,
                 model,  # type: ignore[arg-type]
-                task    # type: ignore[arg-type]
+                task,   # type: ignore[arg-type]
             )
             continue
 
@@ -54,7 +60,7 @@ def target(
         raise typer.Exit(2)
 
 
-def main() -> None:  # invoked by console-script hook
+def main() -> None:  # invoked by console‑script hook
     app()
 
 
