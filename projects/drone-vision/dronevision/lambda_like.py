@@ -3,7 +3,7 @@ Local-inference helper shared by the Typer CLI.
 
 * Loads ONNX weights (tiny, CPU-only).
 * Writes every artefact into **tests/results/** – keeps tests/raw/ clean.
-* Absolutely NO torch / cv2 imports → works fine on NumPy ≥ 2.
+* Absolutely NO torch / cv2 imports → works fine on NumPy ≥ 2.
 """
 from __future__ import annotations
 

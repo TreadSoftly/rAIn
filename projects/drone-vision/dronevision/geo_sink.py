@@ -1,5 +1,5 @@
 """
-geo_sink.py – turn detection boxes into a GeoJSON FeatureCollection.
+geo_sink.py – turn detection boxes into a GeoJSON FeatureCollection.
 
 Why another implementation?
 ---------------------------
@@ -58,7 +58,7 @@ def to_geojson(
     src
         Image path / URL / PIL image – used only for the *source* field.
     boxes
-        ndarray[N, 5] – (x1, y1, x2, y2, conf) in **pixels**.
+        ndarray[N, 5] – (x1, y1, x2, y2, conf) in **pixels**.
 
     Returns
     -------

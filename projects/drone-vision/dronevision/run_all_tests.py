@@ -15,12 +15,12 @@ from pathlib import Path
 from typing import List
 
 import cv2
-from ultralytics import YOLO # type: ignore[import-untyped]
+from ultralytics import YOLO  # type: ignore[import-untyped]
 
 # ─────────────────────────────────────────────────────────────
 # ❶  Paths & global config
 # ─────────────────────────────────────────────────────────────
-ROOT = Path(__file__).resolve().parents[1]          # ← projects/drone-vision
+ROOT = Path(__file__).resolve().parents[1]          # ← projects/drone-vision
 RAW  = ROOT / "tests" / "raw"
 RES  = ROOT / "tests" / "results"
 RES.mkdir(parents=True, exist_ok=True)

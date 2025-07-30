@@ -7,7 +7,7 @@ from constructs import Construct
 
 
 class DroneStack(Stack):
-    """Defines the S3 → Lambda → API Gateway stack used in CI/CD."""
+    """Defines the S3 → Lambda → API Gateway stack used in CI/CD."""
 
     def __init__(self, scope: Construct, id: str, **kwargs) -> None:       # noqa: D401
         super().__init__(scope, id, **kwargs)

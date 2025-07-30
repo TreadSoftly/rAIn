@@ -1,7 +1,7 @@
 """
 Tiny Typer wrapper that installs as **target**.
 
-• JPEG / PNG  → saved into tests/results as *<stem>_boxes.jpg* / *_heat.jpg* …
+• JPEG / PNG  → saved into tests/results as *<stem>_boxes.jpg* / *_heat.jpg* …
 • MP4         → uses predict_mp4 to create an annotated MP4 in tests/results
 • HTTP/S URL  → prints base-64 JPEG (detect | heatmap) or GeoJSON to stdout.
 """

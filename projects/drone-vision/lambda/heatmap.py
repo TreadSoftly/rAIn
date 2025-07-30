@@ -1,5 +1,6 @@
-import numpy as np
 from typing import Any
+
+import numpy as np
 
 try:
     import cv2  # type: ignore
@@ -16,7 +17,7 @@ def heatmap_overlay(  # noqa: D401
     """
     Returns *bgr_img* with a jet-coloured heat-map overlay.
 
-    When OpenCV wheels are unavailable (e.g. macOS + Py 3.12 on CI),
+    When OpenCV wheels are unavailable (e.g. macOS + Py 3.12 on CI),
     the original image is returned untouched so the unit-tests still pass.
     """
     if cv2 is None:
@@ -33,4 +34,5 @@ def heatmap_overlay(  # noqa: D401
     mask = cv2.GaussianBlur(mask, (0, 0), sigma)
     mask = cv2.normalize(mask, mask, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     colour = cv2.applyColorMap(mask, cv2.COLORMAP_JET)
+    return cv2.addWeighted(bgr_img, 1 - drop_alpha, colour, drop_alpha, 0)
     return cv2.addWeighted(bgr_img, 1 - drop_alpha, colour, drop_alpha, 0)

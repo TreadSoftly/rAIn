@@ -15,12 +15,19 @@ dependencies = [
   "torch>=2.2",
   "torchvision>=0.17",
   "ultralytics>=8.0",
-  # wheels for 3.12 start at 1.22
-  "onnxruntime>=1.22,<1.24",
-  # OpenCV 4.12 → NumPy ≥ 2.3, so pin < 4.12
+
+  # ── onnxruntime wheels ───────────────────────────────────
+  # Python ≤ 3.9: last available Linux/macOS wheel is 1.19.2
+  "onnxruntime==1.19.2 ; python_version < '3.10'",
+  # Python ≥ 3.10: use the newer wheels (< 1.24 keeps ABI stable)
+  "onnxruntime>=1.22,<1.24 ; python_version >= '3.10'",
+
+  # OpenCV 4.12 jumps to NumPy ≥ 2.3, so stay below it
   "opencv-python-headless>=4.10,<4.12",
+
   "numpy<2",
   "pillow>=11.3",
+
   # CLI
   "typer[all]>=0.12",
 ]
@@ -32,7 +39,7 @@ dev = [
   "black",
   "isort",
   "pre-commit",
-  # ─ tests / local‑stack ─
+  # ─ tests / local-stack ─
   "boto3",
   "moto[all] ~= 4.2",
 ]
