@@ -1,21 +1,29 @@
-# Runtime / CLI deps
+# ───────── Runtime / CLI ─────────
 torch>=2.2
 torchvision>=0.17
 ultralytics>=8.0
 
-# Split pin so CI can install on both 3.9 & 3.12
+# ONNXRuntime - different wheels for ≤3.9 vs ≥3.10
 onnxruntime==1.19.2 ; python_version < "3.10"
 onnxruntime>=1.22,<1.24 ; python_version >= "3.10"
 
-# OpenCV 4.12 moves to NumPy ≥ 2.3
+# OpenCV 4.12 jumps to NumPy ≥ 2.3 - stay below it for now
 opencv-python-headless>=4.10,<4.12
 
 numpy<2
-pandas
-matplotlib
-scipy
-thop                  # FLOP counter
+pillow>=11.3
+pillow-avif-plugin>=1.4
 
-# Test‑time & local‑stack deps
+# Visualisation / analysis helpers
+matplotlib
+scipy>=1.11
+pandas
+redis>=5.0             # (optional) heatmap accumulation
+
+# Misc
+typer[all]>=0.12
+thop
+
+# ───────── Test-time & local -stack ─────────
 boto3
-moto[all]
+moto[all]~=4.2

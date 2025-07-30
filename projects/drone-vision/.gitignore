@@ -40,4 +40,8 @@ cdk.out/
 .DS_Store
 Thumbs.db
 
-yolov8n-seg.pt
+yolov8nx.pt
+!projects/drone-vision/model/
+!projects/drone-vision/model/*.pt
+!projects/drone-vision/model/*.onnx
+!projects/drone-vision/model/*.yml

@@ -2,7 +2,7 @@
 "typeCheckingMode": "strict",
   // Treat *-stubs packages as optional
 "exclude": [],
-  "reportMissingModuleSource": "none",   // don’t warn when a stub is absent
+  "reportMissingModuleSource": "none",   // don't warn when a stub is absent
 "reportUnknownMemberType": "none",
 "reportUnknownVariableType": "none",
 "reportUnknownArgumentType": "none"

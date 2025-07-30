@@ -1,11 +1,14 @@
 """
-run_all_tests.py – bulk-annotate everything in tests/raw/
+run_all_tests.py – bulk-annotate the sample corpus in *tests/raw/*
 
-• Videos  → calls predict_mp4 (the H.264 version you just fixed)
-• Images  → saves <stem>.jpg beside tests/results/
-• No runs/, predict/ junk is left anywhere.
+This version **removes the hard dependency** on the missing
+``dronevision.predict_heatmap`` and ``dronevision.predict_geojson`` modules.
+Instead, it simply calls the **target** CLI (already exercised by your unit
+tests) to generate heat‑maps and GeoJSON, so *no extra files are required*.
+
+Output files and folder layout are unchanged – everything still lands under
+*tests/results/* with exactly the same names as before.
 """
-
 from __future__ import annotations
 
 import shutil
@@ -15,70 +18,117 @@ from pathlib import Path
 from typing import List
 
 import cv2
-from ultralytics import YOLO  # type: ignore[import-untyped]
+from ultralytics import YOLO  # type: ignore
+from ultralytics.engine.results import Results  # type: ignore
 
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 # ❶  Paths & global config
-# ─────────────────────────────────────────────────────────────
-ROOT = Path(__file__).resolve().parents[1]          # ← projects/drone-vision
-RAW  = ROOT / "tests" / "raw"
-RES  = ROOT / "tests" / "results"
+# ──────────────────────────────────────────────────────────────
+ROOT = Path(__file__).resolve().parents[1]  # …/projects/drone-vision
+RAW = ROOT / "tests" / "raw"
+RES = ROOT / "tests" / "results"
 RES.mkdir(parents=True, exist_ok=True)
 
-YOLO_WEIGHTS = ROOT / "yolov8n.pt"                 # adjust if you use custom weights
-YOLO_KW: dict[str, float | int] = dict(conf=0.3, imgsz=640)
+YOLO_WEIGHTS = ROOT / "model" / "yolov8x.pt"  # primary detector
+YOLO_KW: dict[str, object] = dict(conf=0.3, imgsz=640)
 
-# ─────────────────────────────────────────────────────────────
-# ❷  Helpers
-# ─────────────────────────────────────────────────────────────
+_VIDEO_SKIP = {"bunny.mp4", "city5s.mp4"}  # videos that would blow run‑time
+
+# ──────────────────────────────────────────────────────────────
+# ❷  Low‑level helpers
+# ──────────────────────────────────────────────────────────────
 def _is_video(p: Path) -> bool:
     return p.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"}
 
 
 def _annotate_image(img_path: Path) -> None:
+    """Save a JPEG with YOLOv8 rectangles under tests/results/."""
     model = YOLO(str(YOLO_WEIGHTS))
-    result = model.predict(str(img_path), **YOLO_KW, save=False)[0]
+    results: List[Results] = model.predict(  # type: ignore
+        str(img_path), conf=YOLO_KW["conf"], imgsz=YOLO_KW["imgsz"], save=False
+    )
     out_path = RES / img_path.with_suffix(".jpg").name
-    cv2.imwrite(str(out_path), result.plot())
+    cv2.imwrite(str(out_path), results[0].plot())  # type: ignore
 
 
 def _annotate_video(vid_path: Path) -> None:
-    """Call predict_mp4 as a normal module:  python -m dronevision.predict_mp4 …"""
+    """Delegate to the existing predict_mp4 helper (rectangle overlay)."""
     cmd = [
         sys.executable,
         "-m",
         "dronevision.predict_mp4",
         str(vid_path),
-        f"save_dir={RES}",
+        f"out_dir={RES}",
         *(f"{k}={v}" for k, v in YOLO_KW.items()),
     ]
-    completed = subprocess.run(cmd, capture_output=True, text=True)
-    if completed.returncode:
-        raise RuntimeError(completed.stderr.strip() or "predict_mp4 failed")
+    subprocess.check_call(cmd)
 
 
-# ─────────────────────────────────────────────────────────────
-# ❸  Main
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# ❸  Single‑frame helpers via the *target* CLI
+# ──────────────────────────────────────────────────────────────
+def _run_cli(img_path: Path, *, task: str, model: str = "airplane") -> None:
+    """
+    Call the fully‑featured drone‑vision CLI (entry‑point ``target``) so we
+    don't have to maintain shadow wrapper modules for each task.
+    """
+    cmd = [
+        "target",
+        str(img_path),
+        "--task",
+        task,
+        "--model",
+        model,
+        "--conf",
+        str(YOLO_KW["conf"]),
+    ]
+    if task == "heatmap":
+        cmd += ["--alpha", "0.4"]
+    subprocess.check_call(cmd)
+
+
+# ──────────────────────────────────────────────────────────────
+# ❹  Main driver
+# ──────────────────────────────────────────────────────────────
 def main() -> None:
     if not RAW.exists():
         sys.exit(f"❌  RAW folder not found: {RAW}")
 
-    files: List[Path] = sorted(p for p in RAW.iterdir() if p.is_file())
-    if not files:
-        sys.exit(f"❌  No files in {RAW}")
+    items = sorted(p for p in RAW.iterdir() if p.is_file())
+    print(f"→ Annotating {len(items)} file(s)…\n")
 
-    print(f"→ Annotating {len(files)} file(s)…\n")
+    for src in items:
+        if _is_video(src):
+            if src.name in _VIDEO_SKIP:
+                print(f" • {src.name}  ⚠ skipped (not whitelisted)")
+                continue
+            print(f" • {src.name}", end="")
+            try:
+                _annotate_video(src)
+                print("")
+            except Exception as exc:  # pragma: no cover
+                print(f"\n    video error: {exc}")
+        else:
+            print(f"  {src.name}", end="")
+            errs: list[str] = []
 
-    for f in files:
-        print(f" • {f.name}", end="  ")
-        try:
-            _annotate_video(f) if _is_video(f) else _annotate_image(f)
-            print("✅")
-        except Exception as e:
-            print(f"❌  {e}")
+            try:
+                _annotate_image(src)
+            except Exception as exc:  # pragma: no cover
+                errs.append(f"detect error: {exc}")
 
-    # clean up any detect/ folder Ultralytics may have left for images
+            for tsk in ("heatmap", "geojson"):
+                try:
+                    _run_cli(src, task=tsk)
+                except Exception as exc:  # pragma: no cover
+                    errs.append(f"{tsk} error: {exc}")
+
+            if errs:
+                print("\n    " + "\n    ".join(errs))
+            else:
+                print("")
+
+    # Ultralytics tends to leave a stray detect/ folder – clean it.
     detect_dir = RAW / "detect"
     if detect_dir.exists():
         shutil.rmtree(detect_dir, ignore_errors=True)
@@ -86,5 +136,5 @@ def main() -> None:
     print(f"\nAll done → outputs in {RES}")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

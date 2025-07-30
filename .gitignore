@@ -29,7 +29,7 @@ projects/**/model/*.onnx
 
 # large weights checked in elsewhere by mistake
 *.onnx
-*.pt
+# *.pt moved under model\
 
 #────────────────────────────────────────
 #  Test-suite  (we **keep** the tests now)
@@ -69,3 +69,9 @@ Thumbs.db
 
 # legacy pin file no longer used
 projects/drone-vision/requirements-py39.txt
+###############################################################################
+# Keep the unified model folder (overrides earlier *.pt / *.onnx ignores)
+!projects/drone-vision/model/
+!projects/drone-vision/model/*.pt
+!projects/drone-vision/model/*.onnx
+###############################################################################

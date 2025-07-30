@@ -1,0 +1,20 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -122.43281258087158,
+          37.79640479316711
+        ]
+      },
+      "properties": {
+        "conf": 0.6344034671783447,
+        "id": "0164f93d16494b7a89a0aa934d36943d"
+      }
+    }
+  ],
+  "timestamp": "2025-08-04T15:55:35.209735+00:00"
+}
