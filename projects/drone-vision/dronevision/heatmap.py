@@ -3,7 +3,8 @@ Toy “heat-map” overlay – converts YOLO detections into a pseudo-thermal vi
 """
 from __future__ import annotations
 
-from typing import Iterable, Any
+from typing import Any, Iterable
+
 import numpy as np
 import torch
 from numpy.typing import NDArray
@@ -29,10 +30,10 @@ def heatmap_overlay(img: Image.Image, masks: Iterable[NDArray[Any]] | None = Non
     """
     Quick-and-dirty visualisation: blend every mask into a single heat-map.
 
-    *If* the caller passes masks they are used; otherwise YOLOv8 segmentation
+    *If* the caller passes masks they are used; otherwise YOLOv8 segmentation
     masks are generated on-the-fly.
     """
-    from ultralytics import YOLO # type: ignore  # heavy import kept local
+    from ultralytics import YOLO  # type: ignore  # heavy import kept local
 
     img_arr = np.asarray(img).astype(np.float32) / 255
 
@@ -60,4 +61,5 @@ def heatmap_overlay(img: Image.Image, masks: Iterable[NDArray[Any]] | None = Non
     heat = _to_heat(heat) / 255.0
 
     blended = (0.6 * img_arr + 0.4 * heat) * 255
+    return Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8))
     return Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8))

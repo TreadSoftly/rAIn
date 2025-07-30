@@ -14,28 +14,30 @@ import os
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any # type: ignore[import]
+from typing import Any  # type: ignore[import]
 
 import numpy as np
 import numpy.typing as npt
+
 try:
-    import cv2                      # OpenCV is optional on CI builders
+    import cv2  # OpenCV is optional on CI builders
 except ModuleNotFoundError:         # pragma: no cover
     cv2 = None                      # type: ignore
 
 import boto3
-import onnxruntime as ort           # type: ignore
+import onnxruntime as ort  # type: ignore
 from PIL import Image, ImageDraw
 
 # ───── optional mypy-boto3 type stubs ───────────────────────────────────────
 try:
-    from mypy_boto3_s3 import S3Client # type: ignore  # noqa: WPS433  (runtime-optional import)
+    from mypy_boto3_s3 import \
+        S3Client  # type: ignore  # noqa: WPS433  (runtime-optional import)
 except ModuleNotFoundError:             # pragma: no cover – stubs not installed
     S3Client = object  # type: ignore[assignment]
 
+from .geo_sink import to_geojson  # type: ignore
 # local helpers
-from .heatmap import heatmap_overlay    # type: ignore
-from .geo_sink import to_geojson        # type: ignore
+from .heatmap import heatmap_overlay  # type: ignore
 
 # ────────────────────────────────────────────────────────────
 # 1 · load the ONNX graphs once per process
@@ -73,7 +75,7 @@ def run_inference(
     img: Image.Image,
     model: str = "drone",
 ) -> npt.NDArray[np.float_]:
-    """Return ``array[N,5]`` → (x1 y1 x2 y2 conf) in *pixel* coordinates."""
+    """Return ``array[N,5]`` → (x1 y1 x2 y2 conf) in *pixel* coordinates."""
     stride = _STRIDES[model]
     x: npt.NDArray[np.float32] = (
         np.asarray(img.resize((stride, stride)))
@@ -130,7 +132,7 @@ BUCKET = os.environ.get("OUT_BUCKET", "out")         # moto creates this in test
 
 def handler(event: dict[str, Any], _ctx: Any) -> dict[str, object]:   # noqa: D401
     """
-    Entry-point for AWS Lambda **and** the local unit-tests.
+    Entry-point for AWS Lambda **and** the local unit-tests.
 
     • **detect**   – rectangle overlay JPEG
     • **heatmap**  – pseudo-thermal JPEG (falls back to raw image if OpenCV
@@ -164,7 +166,7 @@ def handler(event: dict[str, Any], _ctx: Any) -> dict[str, object]:   # noqa: D4
         if task == "heatmap":
             if cv2 is None:                              # OpenCV not avail.
                 return _pack_jpeg_base64(img)
-            bgr = heatmap_overlay(                       # expects BGR
+            bgr = heatmap_overlay(                       # expects BGR
                 np.asarray(img)[:, :, ::-1],
                 boxes.tolist(),
             )
@@ -172,6 +174,9 @@ def handler(event: dict[str, Any], _ctx: Any) -> dict[str, object]:   # noqa: D4
 
         # default → detect
         return _pack_jpeg_base64(_draw_boxes(img, boxes))
+
+    except Exception as exc:                             # surface in tests
+        return {"statusCode": 500, "body": str(exc)}
 
     except Exception as exc:                             # surface in tests
         return {"statusCode": 500, "body": str(exc)}

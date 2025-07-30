@@ -33,7 +33,7 @@ def to_geojson(image_url: str,
     ----------
     image_url : str
         Must embed “…lat<lat>_lon<lon>…”.
-    boxes : iterable[(x1, y1, x2, y2, conf)], optional
+    boxes : iterable[(x1, y1, x2, y2, conf)], optional
         YOLO-style pixel boxes.  When omitted (or empty) we return just the
         centre point; otherwise each box is mapped to a point offset from
         the centre by a fixed, very naïve scale (good enough for the tests).

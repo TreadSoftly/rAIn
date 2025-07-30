@@ -1,4 +1,4 @@
-name: Drone‑Vision CI
+name: Drone-Vision CI
 
 on: [push, pull_request]
 

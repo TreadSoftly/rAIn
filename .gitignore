@@ -6,7 +6,7 @@ __pycache__/
 *.pyo
 
 #────────────────────────────────────────
-#  Virtual‑environment folders
+#  Virtual-environment folders
 #────────────────────────────────────────
 .venv/
 venv/
@@ -32,7 +32,7 @@ projects/**/model/*.onnx
 *.pt
 
 #────────────────────────────────────────
-#  Test‑suite  (we **keep** the tests now)
+#  Test-suite  (we **keep** the tests now)
 #────────────────────────────────────────
 # (line below intentionally commented out)
 # projects/drone-vision/tests/
@@ -62,7 +62,7 @@ htmlcov/
 .vscode/*.log
 
 #────────────────────────────────────────
-#  OS‑generated cruft
+#  OS-generated cruft
 #────────────────────────────────────────
 .DS_Store
 Thumbs.db
