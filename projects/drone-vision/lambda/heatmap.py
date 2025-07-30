@@ -1,38 +1,68 @@
-from typing import Any
+"""
+Toy “heat‑map” overlay – converts YOLO detections into a pseudo‑thermal view.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Iterable
 
 import numpy as np
+import torch
+from numpy.typing import NDArray
+from PIL import Image
+from ultralytics import YOLO  # type: ignore[import]
 
-try:
-    import cv2  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover
-    cv2 = None  # type: ignore
+# ─── tiny 5‑colour “jet” palette ───────────────────────────────
+_CMAP = np.asarray(
+    [
+        [0,   0,   0],
+        [0,   0, 255],
+        [0, 255, 255],
+        [255, 255,   0],
+        [255,   0,   0],
+    ],
+    dtype=np.uint8,
+)
+
+# always download / search for the seg‑weights **inside the repo**
+_SEG_WEIGHTS = Path(__file__).resolve().parents[1] / "yolov8n-seg.pt"
 
 
-def heatmap_overlay(  # noqa: D401
-    bgr_img: np.ndarray[Any, Any],
-    boxes: list[tuple[float, float, float, float, float]],
-    drop_alpha: float = 0.40,
-    sigma: int = 25,
-) -> np.ndarray[Any, Any]:
+def _to_heat(mask: NDArray[np.floating[Any]]) -> NDArray[np.floating[Any]]:
+    idx = np.clip((mask * (_CMAP.shape[0] - 1)).astype(int), 0, _CMAP.shape[0] - 1)
+    return _CMAP[idx].astype(np.float32)
+
+
+def heatmap_overlay(
+    img: Image.Image,
+    masks: Iterable[NDArray[Any]] | None = None,
+) -> Image.Image:
     """
-    Returns *bgr_img* with a jet-coloured heat-map overlay.
-
-    When OpenCV wheels are unavailable (e.g. macOS + Py 3.12 on CI),
-    the original image is returned untouched so the unit-tests still pass.
+    Quick‑and‑dirty visualisation: blend every mask into a single heat‑map.
+    If *masks* is None we run a YOLOv8‑seg model and build masks on‑the‑fly.
     """
-    if cv2 is None:
-        return bgr_img
+    img_arr = np.asarray(img).astype(np.float32) / 255.0
 
-    h, w = bgr_img.shape[:2]
-    mask = np.zeros((h, w), np.float32)
+    # ── generate segmentation masks on demand ─────────────────
+    if masks is None:
+        mdl = YOLO(str(_SEG_WEIGHTS))
+        pred = mdl.predict(  # type: ignore[attr-defined]
+            source=img, imgsz=640, conf=0.25, retina_masks=True, verbose=False
+        )[0]
 
-    for x1, y1, x2, y2, conf in boxes:
-        cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-        rr, cc = np.ogrid[:h, :w]
-        mask += np.exp(-((rr - cy) ** 2 + (cc - cx) ** 2) / (2 * sigma**2)) * conf
+        if pred.masks is not None:
+            data: torch.Tensor | np.ndarray[Any, Any] = pred.masks.data  # type: ignore[type-annotation]
+            arr = data.cpu().numpy() if isinstance(data, torch.Tensor) else data # type: ignore[assignment]
+            arr: NDArray[np.floating[Any]] = arr  # type: ignore[assignment]
+            masks = [m.astype(np.float32) for m in arr]
+        else:
+            masks = []
 
-    mask = cv2.GaussianBlur(mask, (0, 0), sigma)
-    mask = cv2.normalize(mask, mask, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    colour = cv2.applyColorMap(mask, cv2.COLORMAP_JET)
-    return cv2.addWeighted(bgr_img, 1 - drop_alpha, colour, drop_alpha, 0)
-    return cv2.addWeighted(bgr_img, 1 - drop_alpha, colour, drop_alpha, 0)
+    masks = list(masks)
+    if not masks:
+        return img
+
+    heat = np.maximum.reduce(np.array(masks))   # union of objects
+    heat = _to_heat(heat) / 255.0               # colour‑ise
+    blended = np.clip((0.6 * img_arr + 0.4 * heat) * 255.0, 0, 255).astype(np.uint8)
+    return Image.fromarray(blended)
