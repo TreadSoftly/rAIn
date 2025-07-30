@@ -24,7 +24,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "black", "isort", "pre-commit"]
+dev = [
+  "pytest",
+  "pytest-cov",
+  "black",
+  "isort",
+  "pre-commit",
+  # ─ tests / local-stack ─
+  "boto3",
+  'moto[all] ~= 4.2',
+]
 
 [project.scripts]
 target = "dronevision.cli:main"     # installs the `target` shell command

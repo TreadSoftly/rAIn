@@ -14,10 +14,10 @@ def heatmap_overlay(  # noqa: D401
     sigma: int = 25,
 ) -> np.ndarray[Any, Any]:
     """
-    Returns *bgr_img* with a jet‑coloured heat‑map overlay.
+    Returns *bgr_img* with a jet-coloured heat-map overlay.
 
     When OpenCV wheels are unavailable (e.g. macOS + Py 3.12 on CI),
-    the original image is returned untouched so the unit‑tests still pass.
+    the original image is returned untouched so the unit-tests still pass.
     """
     if cv2 is None:
         return bgr_img

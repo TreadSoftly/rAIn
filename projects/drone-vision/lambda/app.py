@@ -1,6 +1,6 @@
 # projects/drone-vision/lambda/app.py
 """
-Standalone version of the production Lambda so the local test‑suite
+Standalone version of the production Lambda so the local test-suite
 (`tests/test_tasks.py`) can import it.
 """
 
@@ -27,9 +27,9 @@ import boto3
 import onnxruntime as ort           # type: ignore
 from PIL import Image, ImageDraw
 
-# ───── optional mypy‑boto3 type stubs ───────────────────────────────────────
+# ───── optional mypy-boto3 type stubs ───────────────────────────────────────
 try:
-    from mypy_boto3_s3 import S3Client # type: ignore  # noqa: WPS433  (runtime‑optional import)
+    from mypy_boto3_s3 import S3Client # type: ignore  # noqa: WPS433  (runtime-optional import)
 except ModuleNotFoundError:             # pragma: no cover – stubs not installed
     S3Client = object  # type: ignore[assignment]
 
@@ -59,7 +59,7 @@ for name, path in MODELS.items():
 # 2 · helpers
 # ────────────────────────────────────────────────────────────
 def _fetch_image(url: str, timeout: int = 10) -> Image.Image:
-    """HTTP fetch or base‑64 data‑URL → ``PIL.Image``."""
+    """HTTP fetch or base-64 data-URL → ``PIL.Image``."""
     if url.startswith("data:"):
         _, b64 = url.split(",", 1)
         return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
@@ -112,7 +112,7 @@ def _draw_boxes(
 
 
 def _pack_jpeg_base64(pil_img: Image.Image) -> dict[str, object]:
-    """Convert an image to the Lambda proxy‑integration JSON shape."""
+    """Convert an image to the Lambda proxy-integration JSON shape."""
     buf = io.BytesIO()
     pil_img.save(buf, format="JPEG")
     return {
@@ -130,10 +130,10 @@ BUCKET = os.environ.get("OUT_BUCKET", "out")         # moto creates this in test
 
 def handler(event: dict[str, Any], _ctx: Any) -> dict[str, object]:   # noqa: D401
     """
-    Entry‑point for AWS Lambda **and** the local unit‑tests.
+    Entry-point for AWS Lambda **and** the local unit-tests.
 
     • **detect**   – rectangle overlay JPEG
-    • **heatmap**  – pseudo‑thermal JPEG (falls back to raw image if OpenCV
+    • **heatmap**  – pseudo-thermal JPEG (falls back to raw image if OpenCV
                     isn’t present)
     • **geojson**  – writes a GeoJSON point/collection to S3 **without**
                     downloading the image (network disabled in tests)
@@ -146,7 +146,7 @@ def handler(event: dict[str, Any], _ctx: Any) -> dict[str, object]:   # noqa: D4
 
         # ── geojson: no image fetch required ──────────────────────────────
         if task == "geojson":
-            geo = to_geojson(url)                        # centre‑point only
+            geo = to_geojson(url)                        # centre-point only
             key = f"detections/{datetime.date.today()}/{uuid.uuid4()}.geojson"
             s3 = boto3.client("s3")  # type: ignore  # noqa: PGH003
             s3.put_object(  # type: ignore[attr-defined]

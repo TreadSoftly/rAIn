@@ -11,6 +11,6 @@ matplotlib
 scipy
 thop                  # FLOP counter
 
-# Test‑time & local‑stack deps
+# Test-time & local-stack deps
 boto3
 moto[all]
