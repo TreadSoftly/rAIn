@@ -31,3 +31,7 @@ jobs:
       # ──────────────────────────────────────────────────────────────
       - name: Unit tests
         run: pytest -q projects/drone-vision/tests
+
+      - name: Show tree (debug)
+        run: |
+          tree -L 2 projects/drone-vision || true
