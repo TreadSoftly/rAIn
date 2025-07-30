@@ -1,14 +1,11 @@
-name: Drone-Vision CI
-on:
-  push:
-  pull_request:
+# .github/workflows/drone-vision.yml  (same change for ci.yml & _project-template.yml)
+name: Drone‑Vision CI
+
+on: [push, pull_request]
 
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-
-    # Build & test across all OS/Python combinations,
-    # but don't cancel the whole matrix if one job fails.
     strategy:
       fail-fast: false
       matrix:
@@ -16,33 +13,21 @@ jobs:
         python: ["3.9", "3.12"]
 
     steps:
-      # ------------------------------------------------------------------
-      # 1) Checkout repo (with Git‑LFS so model weights are pulled)
-      # ------------------------------------------------------------------
-      - name: Checkout source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           lfs: true
 
-      # ------------------------------------------------------------------
-      # 2) Install the requested Python version
-      # ------------------------------------------------------------------
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
-      # ------------------------------------------------------------------
-      # 3) Install the package (editable = latest workspace code)
-      # ------------------------------------------------------------------
       - name: Install package
         run: |
           python -m pip install --upgrade pip
           pip install -e projects/drone-vision[dev]
 
-      # ------------------------------------------------------------------
-      # 4) Run tests (pytest auto‑discovers inside the project dir)
-      # ------------------------------------------------------------------
+      # ──────────────────────────────────────────────────────────────
+      # point pytest at the *real* test directory
+      # ──────────────────────────────────────────────────────────────
       - name: Unit tests
-        working-directory: projects/drone-vision
-        run: pytest -q
+        run: pytest -q projects/drone-vision/tests
