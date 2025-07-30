@@ -1,189 +1,229 @@
-"""
-Local‑inference helper shared by the Typer CLI.
-
-… (original doc‑string unchanged) …
-"""
 from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import re
+import sys
+import urllib.parse
 import urllib.request
-import contextlib
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
-import onnxruntime as ort  # type: ignore
-from PIL import Image, ImageDraw
+from numpy.typing import NDArray
+from PIL import Image, ImageDraw, ImageFont
 
-from .geo_sink import to_geojson           # polygon sink (local images)
-from .heatmap import heatmap_overlay       # type: ignore[import‑untyped]
+from .geo_sink import to_geojson
+from .heatmap import heatmap_overlay  # segmentation overlay for heatmap tasks
 
-# ─────────────────────────────────────────────────────────────
-# 1 · Paths & models
-# ─────────────────────────────────────────────────────────────
-_BASE       = Path(__file__).resolve().parent            # …/dronevision
-ROOT        = _BASE.parent                               # …/projects/drone‑vision
-RESULTS_DIR = ROOT / "tests" / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+# ─────────────────────────── paths & model initialization ──────────────────────
+_BASE = Path(__file__).resolve().parent           # …/dronevision
+ROOT = _BASE.parent                               # …/projects/drone-vision
 
-# allow test‑suites / CI to inject a different model location
-_MODEL_DIR = Path(os.getenv("DRONEVISION_MODEL_PATH", _BASE / "model"))
+try:
+    from ultralytics import YOLO  # type: ignore[import]
+    _has_yolo = True
+except ImportError:
+    YOLO = None  # type: ignore
+    _has_yolo = False
 
+MODEL_DIR = Path(os.getenv("DRONEVISION_MODEL_PATH", ROOT / "model"))
+# Define model references (drone and airplane both use YOLOv8x)
 MODELS = {
-    "drone":    _MODEL_DIR / "drone.onnx",
-    "airplane": _MODEL_DIR / "airplane.onnx",
+    "drone": MODEL_DIR / "yolov8x.pt",
+    "airplane": MODEL_DIR / "yolov8x.pt",
 }
 
-_SESSIONS: dict[str, ort.InferenceSession | None] = {}
-_IN_NAMES: dict[str, str] = {}
-_STRIDES:  dict[str, int] = {}
+_det_model = None
+_seg_model = None
 
-for key, onnx_path in MODELS.items():
-    if onnx_path.exists():
-        with contextlib.suppress(Exception):
-            sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-            _SESSIONS[key] = sess
-            inp            = sess.get_inputs()[0]            # type: ignore[index]
-            _IN_NAMES[key] = inp.name                       # type: ignore[attr-defined]
-            _STRIDES[key]  = int(inp.shape[2])              # type: ignore[attr-defined]
+if _has_yolo and YOLO is not None:
+    # Load detection model (YOLOv8x or fallback)
+    for cand in (MODEL_DIR / "yolov8x.pt", MODEL_DIR / "yolo11x.pt", MODEL_DIR / "yolov8n.pt", MODEL_DIR / "yolo11n.pt"):
+        if cand.exists():
+            _det_model = YOLO(str(cand))
+            break
+    # Load segmentation model (YOLOv8-seg or fallback)
+    for cand in (MODEL_DIR / "yolo11x-seg.pt", MODEL_DIR / "yolo11m-seg.pt", MODEL_DIR / "yolov8x-seg.pt", MODEL_DIR / "yolov8s-seg.pt", MODEL_DIR / "yolov8n-seg.pt"):
+        if cand.exists():
+            _seg_model = YOLO(str(cand))
+            break
+
+# ─────────────────────────── inference and drawing helpers ─────────────────────
+def run_inference(img: Image.Image, model: str = "drone", *, conf_thr: float = 0.40) -> NDArray[np.float32]:
+    """
+    Run object detection using the YOLO model (if available).
+    Returns ndarray [N,6] -> [x1, y1, x2, y2, conf, class_idx].
+    """
+    if not _has_yolo or _det_model is None:
+        return np.empty((0, 6), dtype=np.float32)
+    res_list = _det_model.predict(img, imgsz=640, conf=conf_thr, verbose=False)  # type: ignore
+    if not res_list:
+        return np.empty((0, 6), dtype=np.float32)
+    res = res_list[0]
+    if not hasattr(res, "boxes") or res.boxes is None or not hasattr(res.boxes, "data"):
+        return np.empty((0, 6), dtype=np.float32)
+    boxes_data = res.boxes.data  # type: ignore
+    try:
+        import torch  # type: ignore[import]
+        if isinstance(boxes_data, torch.Tensor):
+            boxes_arr: NDArray[np.float32] = boxes_data.cpu().numpy().astype(np.float32)  # type: ignore
+        else:
+            boxes_arr: NDArray[np.float32] = np.asarray(boxes_data, dtype=np.float32)
+    except ImportError:
+        boxes_arr: NDArray[np.float32] = np.asarray(boxes_data, dtype=np.float32)
+    if boxes_arr.size == 0:
+        return np.empty((0, 6), dtype=np.float32)
+    return boxes_arr.reshape(-1, 6)
+
+def _draw_boxes(img: Image.Image, boxes: np.ndarray[Any, Any], label: str | None = None) -> Image.Image:
+    """Draw bounding boxes with class labels and confidence scores on the image."""
+    boxes_arr = np.asarray(boxes, dtype=float).reshape(-1, boxes.shape[-1] if boxes.size else 5)
+    draw = ImageDraw.Draw(img)
+    for box in boxes_arr:
+        if box.shape[0] < 4:
             continue
-
-    # ── stub‑out when weights are absent ───────────────────────
-    _SESSIONS[key] = None
-    _IN_NAMES[key] = ""
-    _STRIDES[key]  = 640            # sensible default so resize() still works
-
-# ─────────────────────────────────────────────────────────────
-# 2 · Helpers
-# ─────────────────────────────────────────────────────────────
-_DATA_RE    = re.compile(r"^data:image/[^;]+;base64,(.+)", re.I | re.S)
-_LATLON_TAG = re.compile(r"#lat-?\d+(?:\.\d+)?_lon-?\d+(?:\.\d+)?", re.I)
-
-
-def _fetch_image(src: str, timeout: int = 10) -> Image.Image:
-    """Return a PIL‑RGB image from http(s), data‑URL or local path."""
-    if src.startswith(("http://", "https://")):
-        req = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return Image.open(io.BytesIO(resp.read())).convert("RGB")
-
-    if m := _DATA_RE.match(src):
-        raw = base64.b64decode(m.group(1))
-        return Image.open(io.BytesIO(raw)).convert("RGB")
-
-    return Image.open(Path(src)).convert("RGB")            # local file
-
-
-def _normalise_logits(arr: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
-    """Accept common YOLO‑ONNX layouts and return (N, 6)."""
-    if arr.ndim == 3 and arr.shape[0] == 1:
-        arr = arr[0]
-    if arr.ndim == 2 and arr.shape[1] >= 6:
-        return arr
-    if arr.ndim == 2 and arr.shape[0] == 6:
-        return arr.T
-    raise ValueError(arr.shape)
-
-
-def _run_inference(img: Image.Image, key: str) -> np.ndarray[Any, Any]:
-    """
-    Return ndarray[N, 5] := (x1, y1, x2, y2, conf) in pixels.
-
-    If weights are missing we short‑circuit to “no detections”.
-    """
-    if _SESSIONS.get(key) is None:              # stub mode
-        return np.empty((0, 5), float)
-
-    stride = _STRIDES[key]
-    x = (
-        np.asarray(img.resize((stride, stride)))
-        .transpose(2, 0, 1)[None]
-        .astype(np.float32)
-        / 255.0
-    )
-    raw    = np.asarray(_SESSIONS[key].run(None, {_IN_NAMES[key]: x})[0])  # type: ignore
-    logits = _normalise_logits(raw)
-    keep   = logits[:, 4] > 0.40
-    if not keep.any():
-        return np.empty((0, 5), float)
-    boxes  = logits[keep, :5]
-    scale  = np.array([img.width, img.height] * 2, float)
-    boxes[:, :4] *= scale / stride
-    return boxes.astype(float)
-
-
-def _draw_boxes(img: Image.Image, boxes: np.ndarray[Any, Any]) -> Image.Image:
-    d = ImageDraw.Draw(img)
-    for x1, y1, x2, y2, _ in boxes:
-        d.rectangle((x1, y1, x2, y2), outline="red", width=3)
+        x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        conf = float(box[4]) if box.shape[0] > 4 else None
+        # Draw rectangle
+        draw.rectangle((x1, y1, x2, y2), outline="red", width=3)
+        # Prepare label text
+        text = ""
+        if conf is not None:
+            text = f"{conf:.2f}"
+        if box.shape[0] >= 6:
+            class_id = int(box[5])
+            if _has_yolo and _det_model is not None:
+                class_name = _det_model.names.get(class_id, str(class_id))
+            else:
+                class_name = str(class_id)
+            if class_name:
+                text = f"{class_name} {conf:.2f}" if conf is not None else class_name
+        elif label:
+            text = f"{label} {text}" if text else label
+        # Draw label background and text
+        if text:
+            font = ImageFont.load_default()
+            text_bbox = draw.textbbox((0, 0), text, font=font)
+            text_w = text_bbox[2] - text_bbox[0]
+            text_h = text_bbox[3] - text_bbox[1]
+            text_x = max(0.0, float(x1))
+            text_y = max(0.0, float(y1) - float(text_h) - 2.0)
+            # Draw filled background rectangle (black) for text
+            draw.rectangle(
+                (
+                    int(round(float(text_x))),
+                    int(round(float(text_y))),
+                    int(round(float(text_x) + float(text_w) + 2)),
+                    int(round(float(text_y) + float(text_h) + 2)),
+                ),
+                fill="black",
+            )
+            # Draw text in red on top of background
+            draw.text((int(float(text_x) + 1), int(float(text_y) + 1)), text, fill="red", font=font)
     return img
-
 
 def _is_remote(src: str) -> bool:
     return src.startswith(("http://", "https://", "data:"))
 
-# ─────────────────────────────────────────────────────────────
-# 3 · Public entry – used by `target`
-# ─────────────────────────────────────────────────────────────
+# ────────────────────────── public worker (main entry) ─────────────────────────
 def run_single(
-    src:   str | os.PathLike[str],
+    src: str | os.PathLike[str],
+    *,
     model: Literal["drone", "airplane"] = "drone",
-    task:  Literal["detect", "heatmap", "geojson"] = "detect",
+    task: Literal["detect", "heatmap", "geojson"] = "detect",
+    **hm_kwargs: Any,
 ) -> None:
     """
-    • Local images → write to tests/results/
-    • Remote (http/https/data‑URI) → stream base‑64 JPEG / GeoJSON to stdout.
+    Process a single input for the specified task and output result to disk or stdout.
+    - Local file inputs -> writes output file under tests/results/
+    - Remote/URL inputs -> writes Base64/JSON to STDOUT.
     """
-    import json  # local import for faster module load
-
     src_str = str(src)
-    pil     = _fetch_image(src_str)
-    boxes   = _run_inference(pil, model)
-    stem    = Path(src_str).stem or "image"
+    # Load image (supports file path, URL, or base64 data URI)
+    if src_str.startswith("data:"):
+        _, b64data = src_str.split(",", 1)
+        pil_img = Image.open(io.BytesIO(base64.b64decode(b64data))).convert("RGB")
+    elif src_str.lower().startswith(("http://", "https://")):
+        req = urllib.request.Request(src_str, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req) as resp:
+            pil_img = Image.open(io.BytesIO(resp.read())).convert("RGB")
+    else:
+        pil_img = Image.open(src_str).convert("RGB")
+    # Confidence threshold for detection
+    conf_thr = float(hm_kwargs.get("conf", 0.40))
+    boxes = run_inference(pil_img, model=model, conf_thr=conf_thr)
+    stem = Path(src_str).stem or "image"
 
-    # ── task dispatch ─────────────────────────────────────────
-    if task == "heatmap":
-        out_img  = heatmap_overlay(pil)
-        out_path = RESULTS_DIR / f"{stem}_heat.jpg"
-
-    elif task == "geojson":
-        if _is_remote(src_str) and _LATLON_TAG.search(src_str):
-            url_geojson = import_module("lambda.geo_sink").to_geojson  # type: ignore
-            geo = url_geojson(src_str, boxes.tolist() if len(boxes) else None)  # type: ignore[arg-type]
-        else:
-            geo = to_geojson(src_str, boxes)
-
+    if task == "geojson":
+        # Generate GeoJSON output
+        try:
+            if src_str.lower().startswith(("http://", "https://")) and re.search(r"lat-?\d+(?:\.\d+)?_lon-?\d+(?:\.\d+)?", urllib.parse.unquote(src_str)):
+                geo = import_module("lambda.geo_sink").to_geojson(src_str, [list(b)[:5] for b in boxes.tolist()] if boxes.size else None)
+            else:
+                geo = to_geojson(src_str, [list(b)[:5] for b in boxes.tolist()] if boxes.size else None)
+        except Exception:
+            geo = to_geojson("", [list(b)[:5] for b in boxes.tolist()] if boxes.size else None)
         if _is_remote(src_str):
-            import sys
-            json.dump(geo, sys.stdout)
+            json.dump(geo, sys.stdout, separators=(",", ":"))
             sys.stdout.write("\n")
-            return
-
-        (RESULTS_DIR / f"{stem}.geojson").write_text(json.dumps(geo, indent=2))
-        print(f"★ wrote {RESULTS_DIR / f'{stem}.geojson'}")
+        else:
+            out_path = ROOT / "tests" / "results" / f"{stem}.geojson"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(geo, indent=2))
+            print(f"★ wrote {out_path}")
         return
 
-    else:                                              # detect
+    if task == "heatmap":
+        out_img: Image.Image | None = None
+        # Create segmentation mask overlay
         try:
-            from ultralytics import YOLO  # type: ignore
-            yolo = YOLO(str(ROOT / "yolov8n.pt"))
-            res  = yolo.predict(pil, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore
-            bgr  = res.plot()                                                 # type: ignore[no-untyped-call]
-            out_img = Image.fromarray(bgr[:, :, ::-1].astype(np.uint8))
+            alpha_val = float(hm_kwargs.get("alpha", 0.4))
+            overlay_result = heatmap_overlay(pil_img, boxes=boxes if boxes.size else None, alpha=alpha_val)
+            if isinstance(overlay_result, np.ndarray):
+                # Convert BGR numpy array to PIL Image (RGB)
+                if overlay_result.ndim == 3:
+                    out_img = Image.fromarray(overlay_result.astype(np.uint8)[:, :, ::-1])
+                else:
+                    out_img = Image.fromarray(overlay_result.astype(np.uint8))
+            else:
+                out_img = overlay_result  # Should be Image.Image or None
         except Exception:
-            out_img = _draw_boxes(pil.copy(), boxes)
-        out_path = RESULTS_DIR / f"{stem}_boxes.jpg"
+            out_img = None
+        if out_img is None:
+            # Fallback: draw detection boxes if segmentation failed
+            out_img = _draw_boxes(pil_img.copy(), boxes, label=model)
+        suffix = Path(src_str).suffix.lower()
+        out_ext = suffix if suffix in {".jpg", ".jpeg", ".png"} else ".jpg"
+        out_path = ROOT / "tests" / "results" / f"{stem}_heat{out_ext}"
+    else:
+        # task == "detect"
+        out_img = None
+        if _has_yolo and _det_model is not None:
+            try:
+                # The result of predict is List[Results], and plot returns np.ndarray (BGR)
+                res = _det_model.predict(pil_img, imgsz=640, conf=conf_thr, verbose=False)[0]  # type: ignore
+                plotted: np.ndarray = res.plot()  # type: ignore
+                out_img = Image.fromarray(plotted[:, :, ::-1].astype(np.uint8))
+            except Exception:
+                out_img = None
+        if out_img is None:
+            out_img = _draw_boxes(pil_img.copy(), boxes, label=model)
+        suffix = Path(src_str).suffix.lower()
+        out_ext = suffix if suffix in {".jpg", ".jpeg", ".png"} else ".jpg"
+        out_path = ROOT / "tests" / "results" / f"{stem}_boxes{out_ext}"
 
-    # ── write / stream ───────────────────────────────────────
+    # Save or output the result
+    if isinstance(out_img, np.ndarray):
+        out_img = Image.fromarray(out_img.astype(np.uint8))
     if _is_remote(src_str):
-        import sys
         buf = io.BytesIO()
-        out_img.save(buf, "JPEG")
+        out_img.save(buf, format="JPEG")  # type: ignore
         sys.stdout.write(base64.b64encode(buf.getvalue()).decode() + "\n")
     else:
-        out_img.save(out_path, "JPEG")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_img.save(out_path)  # type: ignore
         print(f"★ wrote {out_path}")
