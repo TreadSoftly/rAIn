@@ -1,4 +1,4 @@
-# TreadSoftly / AWS Cloud Based AI/ML Projects
+# Rendered Adaptive Intelligent Networks (rAIn) Is A Repo Based Around AWS Cloud & AI/ML Projects
 
 This repository will hold **many individual AWS security & ML projects** in `projects/`.
 
