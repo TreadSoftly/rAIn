@@ -1,4 +1,4 @@
-# TreadSoftly / AWS Monorepo
+# TreadSoftly / AWS Cloud Based AI/ML Projects
 
 This repository will hold **many individual AWS security & ML projects** in `projects/`.
 
