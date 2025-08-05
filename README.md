@@ -2,7 +2,7 @@
   
 ## Rendered Adaptive Intelligence Networks (rAIn) ~ Cloud, Drone & AI/ML Projects
 
-This repository will hold **Cloud, security, drone & AI/ML architecture projects** in [`projects/`](https://github.com/TreadSoftly/rAIn/tree/main/projects).
+This repository will hold **Cloud, security, drone & AI/ML architecture projects** in [`projects/`](https://github.com/TreadSoftly/rAIn/tree/main/projects)
 
 
 <div align="center">
