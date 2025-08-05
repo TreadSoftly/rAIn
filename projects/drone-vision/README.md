@@ -1,16 +1,24 @@
 <div align="center">
   
-# Demo Videos
+# ~ Capabilities Demo Videos ~
+
+<div align="left">
+
+- Tracking
+- Detection + ID Boxes + Confidence Percentage
+- Segmented Multi-Color + ID With/and/Without Boxes + Confidence Percentage
+- Only Segemented Highlights -No ID / -No Confidence Percentage
 
 <table align="center"> 
   
-<tr> 
-  
-<!-- Multi-Color (left) -->
+<tr>
+
 <td align="center" valign="middle" style="height:350px"> 
   
 <strong>
-Multi-Color Segmented Targets
+
+Multi-Color Segmentation Highlights + Tracking + ID + Confidence Percentages
+
 </strong>
 
 <br> 
@@ -19,12 +27,11 @@ Multi-Color Segmented Targets
 
 </td> 
 
-<!-- Same-Color (right) -->
 <td align="center" valign="middle" style="height:350px"> 
   
 <strong>
-Same Color Segmented Targets:
-</strong> <em>AND MUSIC</em>
+
+Same-Color Segmented Highlights + ID Boxes + Tracking + Confidence Percentages:</strong> <em>✨ALSO MUSIC✨</em>
 
 <br> 
 
@@ -34,21 +41,33 @@ Same Color Segmented Targets:
 
 </tr>
 
-<!-- Second row: two additional videos -->
 <tr>
-  
 
-</strong> 
-
-
-<br> 
 <td align="center" valign="middle" style="height:350px">
+
+<strong>
+
+Detection + ID Boxes + Tracking + Confidence Percentages
+
+</strong>
+
+<br>
+
 <video src="https://github.com/user-attachments/assets/a6a42d82-faed-4c91-912a-81a3e8da27ec" width="500" controls></video>
+
 </td>
 
-
 <td align="center" valign="middle" style="height:350px">
-<video src="https://github.com/user-attachments/assets/733269b9-a2f8-441b-a376-8022860979ed" width="500" controls></video>
+
+<strong>
+
+Segmented Highlights + Tracking | -No IDs / -No Confidence Percentages
+
+</strong>
+  
+<br>
+
+<video src="https://github.com/user-attachments/assets/5ed5b57c-8c9b-4578-aee7-9ed80c9ff8e5" width="500" controls></video>
 </td>
 
 </tr>
@@ -59,7 +78,12 @@ Same Color Segmented Targets:
 
 <div align="center">
   
-# Demo Images
+# ~ Capabilities Demo Images ~
+
+<div align="left">
+
+- Detection ID Boxes + Confidence Percentage
+- Segmented Multi-Color + ID + Confidence Percentage
 
 <br>
 
@@ -67,8 +91,8 @@ Same Color Segmented Targets:
 
 <!-- Row 1 -->
 <tr>
-<td align="center"><img src="https://github.com/user-attachments/assets/84fac12c-2ddd-4d2e-8f5c-3a92dd8661b7" width="300" alt="Image"></td>
 <td align="center"><img src="https://github.com/user-attachments/assets/db45bc31-3b7d-4001-b868-eb37589de66c" width="300" alt="Image"></td>
+<td align="center"><img src="https://github.com/user-attachments/assets/84fac12c-2ddd-4d2e-8f5c-3a92dd8661b7" width="300" alt="Image"></td>
 <td align="center"><img src="https://github.com/user-attachments/assets/c8f90d41-beab-4ac8-ae62-df0c4814c3d6" width="300" alt="Image"></td>
 <td align="center"><img src="https://github.com/user-attachments/assets/c2957623-577e-4cf6-b772-038fc6292a2a" width="300" alt="Image"></td>
 </tr>
