@@ -47,7 +47,7 @@ Same-Color Segmented Highlights + ID Boxes + Tracking + Confidence Percentages:<
 
 <strong>
 
-Detection + ID Boxes + Tracking + Confidence Percentages
+Detection + ID Boxes + Tracking + Confidence Percentages | -No Segmented Highlights
 
 </strong>
 
@@ -61,7 +61,7 @@ Detection + ID Boxes + Tracking + Confidence Percentages
 
 <strong>
 
-Segmented Highlights + Tracking | -No IDs / -No Confidence Percentages
+Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 
 </strong>
   
