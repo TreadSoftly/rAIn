@@ -5,7 +5,8 @@
 <div align="center">
 
 <table style="display:inline-block; text-align:left; border-collapse:collapse;">
-<tr><td style="padding:0 .5em;">•</td><td>Tracking + Detection + ID Boxes + Confidence Percentage</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Tracking</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Detection + ID Boxes + Confidence Percentage</td></tr>
 <tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color + ID With/and/Without Boxes + Confidence Percentage</td></tr>
 <tr><td style="padding:0 .5em;">•</td><td>Only Segmented Highlights – No ID / No Confidence Percentage</td></tr>
 
@@ -72,7 +73,7 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 
 <table style="display:inline-block; text-align:left; border-collapse:collapse;">
 <tr><td style="padding:0 .5em;">•</td><td>Detection ID Boxes + Confidence Percentage</td></tr>
-<tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color + ID + Confidence Percentage</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color Highlights + ID + Confidence Percentage</td></tr>
 </table>
 
 </div>
