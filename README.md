@@ -1,4 +1,4 @@
-# Rendered Adaptive Intelligent Networks (rAIn) Is A Repo Based Around AWS Cloud & AI/ML Projects
+# Rendered Adaptive Intelligence Networks (rAIn) Is A Repo Based Around AWS Cloud & AI/ML Projects
 
 This repository will hold **Cloud, security, drone & ML architexture projects** in `projects/`.
 
