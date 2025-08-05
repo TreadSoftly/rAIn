@@ -40,14 +40,12 @@ Same Color Segmented Targets:
 
 </strong> 
 
-<em>Just The ID Boxing & Tracking</em>
 
 <br> 
 <td align="center" valign="middle" style="height:350px">
 <video src="https://github.com/user-attachments/assets/a6a42d82-faed-4c91-912a-81a3e8da27ec" width="500" controls></video>
 </td>
 
-<em>City Traffic ID Boxing & Tracking</em>
 
 <td align="center" valign="middle" style="height:350px">
 <video src="https://github.com/user-attachments/assets/733269b9-a2f8-441b-a376-8022860979ed" width="500" controls></video>
