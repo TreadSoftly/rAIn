@@ -4,7 +4,7 @@ This repository will hold **Cloud, security, drone & ML architexture projects** 
 
 <div align="center">
 
-| Project Path | One-liner |
+| Project Path | Desc.     |
 |--------------|-----------|
 | `projects/drone-vision (name change soon)` | Serverless intelligent detector, tracking, identification & segmenting classifier utilizing YOLO models (Lambda + S3 + API Gateway) |
 | `projects/soon-ish to come` | When D-V is finished being tested immediate projects will invlude more add-in/plug-in features like SDR, Audio detection, GeoFencing, Dashboard..etc.. |
