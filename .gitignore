@@ -1,58 +1,67 @@
 ###############################################################################
-#  PYTHON - artefacts & tooling
+# ⛔  GENERAL BUILD / BINARY ARTEFACTS
 ###############################################################################
+
+# ── Python byte-code / metadata ─────────────────────────────────────────────
 __pycache__/
-*.py[cod]  *.pyo  *.pyd  *.so  *.egg-info/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
 
-###############################################################################
-#  VIRTUAL ENVS
-###############################################################################
-.venv/  venv/  env/  ENV/
+# ── Virtual-envs (top-level **and** inside sub-projects) ────────────────────
+.venv/
+env/
+venv/
+ENV/
+projects/**/.venv/
 
-###############################################################################
-#  NODE
-###############################################################################
+# ── Node ────────────────────────────────────────────────────────────────────
 node_modules/
 
-###############################################################################
-#  BIG BINARIES  – keep OUT of Git                                 ⛔
-###############################################################################
-*.onnx
-*.pt
-*.ckpt
-*.mp4  *.mov
-*.jpg *.jpeg *.png *.gif
+# ── Models & other large binaries ───────────────────────────────────────────
+projects/**/model/*.onnx
+*.onnx                 # catch any stray upload
 
-###############################################################################
-#  THE MODEL FOLDER ITSELF (keep placeholder only)
-###############################################################################
-projects/drone-vision/model/**
-!projects/drone-vision/model/.gitkeep   # track the folder, nothing else
+#     ··· KEEP THESE WEIGHTS ···
+!projects/drone-vision/lambda/model/
+!projects/drone-vision/lambda/model/*.onnx
+!projects/drone-vision/model/
+!projects/drone-vision/model/*.pt
+!projects/drone-vision/model/*.onnx
+!projects/drone-vision/model/*.yml
 
-###############################################################################
-#  TEST CLIPS / OUTPUTS  – ignore all
-###############################################################################
-projects/drone-vision/tests/raw/**
-projects/drone-vision/tests/results/**
+# ── Test / coverage artefacts ───────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+projects/drone-vision/tests/results/         # per-run outputs only
 
-###############################################################################
-#  BUILD / DIST
-###############################################################################
-build/  dist/  projects/**/cdk.out/
+# ── Build / packaging outputs ───────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+projects/**/cdk.out/
 
-###############################################################################
-#  COVERAGE & CACHE
-###############################################################################
-.pytest_cache/  .coverage  htmlcov/
+# ── Media produced during ad-hoc runs (never tracked) ───────────────────────
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.b64
+*.mp4
+*.mov
 
-###############################################################################
-#  IDE & OS JUNK
-###############################################################################
-.vscode/  .idea/  *.code-workspace
+# ── IDE / editor junk ───────────────────────────────────────────────────────
+.vscode/
 .vscode/*.log
-.DS_Store  Thumbs.db
+projects/**/.vscode/
 
-###############################################################################
-#  LEGACY FILES
-###############################################################################
+# ── OS noise ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Historical artefacts we no longer need ──────────────────────────────────
 projects/drone-vision/requirements-py39.txt
+###############################################################################
