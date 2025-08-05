@@ -5,10 +5,10 @@
 <div align="center">
 
 <table style="display:inline-block; text-align:left; border-collapse:collapse;">
-  <tr><td style="padding:0 .5em;">•</td><td>Tracking</td></tr>
-  <tr><td style="padding:0 .5em;">•</td><td>Detection + ID Boxes + Confidence Percentage</td></tr>
-  <tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color + ID With/and/Without Boxes + Confidence Percentage</td></tr>
-  <tr><td style="padding:0 .5em;">•</td><td>Only Segmented Highlights – No ID / No Confidence Percentage</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Tracking + Detection + ID Boxes + Confidence Percentage</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color + ID With/and/Without Boxes + Confidence Percentage</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Only Segmented Highlights – No ID / No Confidence Percentage</td></tr>
+
 </table>
 
 </div>
@@ -18,28 +18,20 @@
   
 <tr>
 
-<td align="center" valign="middle" style="height:350px"> 
+<td align="center" valign="top"> 
   
 <strong>
-
 Multi-Color Segmentation Highlights + Tracking + ID + Confidence Percentages
-
-</strong>
-
-<br> 
-
+</strong><br>
 <video src="https://github.com/user-attachments/assets/d9b6f0f8-6ea2-4f29-813e-96ff84ae1ab2" width="500" controls></video> 
 
 </td> 
 
-<td align="center" valign="middle" style="height:350px"> 
+<td align="center" valign="top"> 
   
 <strong>
-
-Same-Color Segmented Highlights + ID Boxes + Tracking + Confidence Percentages:</strong> <em>✨ALSO MUSIC✨</em>
-
-<br> 
-
+Same-Color Segmented Highlights + ID Boxes + Tracking + Confidence Percentages:
+</strong> <em>✨ALSO MUSIC✨</em><br>
 <video src="https://github.com/user-attachments/assets/07168b7d-7589-4948-bbdd-55f4c723d33d" width="500" controls></video> 
 
 </td> 
@@ -48,31 +40,22 @@ Same-Color Segmented Highlights + ID Boxes + Tracking + Confidence Percentages:<
 
 <tr>
 
-<td align="center" valign="middle" style="height:350px">
+<td align="center" valign="top">
 
 <strong>
-
 Detection + ID Boxes + Tracking + Confidence Percentages | -No Segmented Highlights
-
-</strong>
-
-<br>
-
+</strong><br>
 <video src="https://github.com/user-attachments/assets/a6a42d82-faed-4c91-912a-81a3e8da27ec" width="500" controls></video>
 
 </td>
 
-<td align="center" valign="middle" style="height:350px">
+<td align="center" valign="top">
 
 <strong>
-
 Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
-
-</strong>
-  
-<br>
-
+</strong><br>
 <video src="https://github.com/user-attachments/assets/5ed5b57c-8c9b-4578-aee7-9ed80c9ff8e5" width="500" controls></video>
+
 </td>
 
 </tr>
@@ -88,8 +71,8 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 <div align="center">
 
 <table style="display:inline-block; text-align:left; border-collapse:collapse;">
-  <tr><td style="padding:0 .5em;">•</td><td>Detection ID Boxes + Confidence Percentage</td></tr>
-  <tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color + ID + Confidence Percentage</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Detection ID Boxes + Confidence Percentage</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color + ID + Confidence Percentage</td></tr>
 </table>
 
 </div>
@@ -148,7 +131,7 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 <div align="center">
 
 <table style="display:inline-block; text-align:left; border-collapse:collapse;">
-  <tr><td style="padding:0 .5em;">•</td><td>Geotagged GeoJson Files</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Geotagged GeoJson Files</td></tr>
 </table>
 
 </div>
@@ -157,6 +140,11 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 <tr>
 <td align="center"><img src="https://github.com/user-attachments/assets/c6382b7b-9ad0-4b13-be2a-0128d7669ce3" width="300" alt="Geo Map 1"></td>
 <td align="center"><img src="https://github.com/user-attachments/assets/b406b50d-ea6a-4633-b716-e68b298029ec" width="300" alt="Geo Map 2"></td>
+
+</tr>
+
+<tr>
+
 <td align="center"><img src="https://github.com/user-attachments/assets/d2613e96-7df7-4a1c-baf8-fa8680cfa57a" width="300" alt="Geo Map 3"></td>
 <td align="center"><img src="https://github.com/user-attachments/assets/24e0bc9e-b32a-48a5-813d-51bed1199f9b" width="300" alt="Geo Map 4"></td>
 </tr>
