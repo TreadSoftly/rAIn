@@ -1,11 +1,11 @@
 ###############################################################################
-#  PYTHON BUILD & TOOLING
+#  PYTHON - artefacts & tooling
 ###############################################################################
 __pycache__/
 *.py[cod]  *.pyo  *.pyd  *.so  *.egg-info/
 
 ###############################################################################
-#  VIRTUAL-ENV FOLDERS
+#  VIRTUAL ENVS
 ###############################################################################
 .venv/  venv/  env/  ENV/
 
@@ -15,44 +15,41 @@ __pycache__/
 node_modules/
 
 ###############################################################################
-#  LARGE WEIGHTS / BINARIES  – default ⛔
+#  BIG BINARIES  – keep OUT of Git                                 ⛔
 ###############################################################################
 *.onnx
 *.pt
 *.ckpt
-
-# ── KEEP THE WEIGHTS WE ACTUALLY SHIP ────────────────────────────────────────
-!projects/drone-vision/model/
-!projects/drone-vision/model/*.onnx
-!projects/drone-vision/model/*.pt
-!projects/drone-vision/model/*.yml
-!projects/drone-vision/lambda/model/
-!projects/drone-vision/lambda/model/*.onnx
+*.mp4  *.mov
+*.jpg *.jpeg *.png *.gif
 
 ###############################################################################
-#  MEDIA & TEMP OUTPUTS
+#  THE MODEL FOLDER ITSELF (keep placeholder only)
 ###############################################################################
-*.jpg *.jpeg *.png *.gif *.mp4 *.mov *.b64
+projects/drone-vision/model/**
+!projects/drone-vision/model/.gitkeep   # track the folder, nothing else
 
 ###############################################################################
-#  BUILD & PACKAGING OUTPUTS
+#  TEST CLIPS / OUTPUTS  – ignore all
+###############################################################################
+projects/drone-vision/tests/raw/**
+projects/drone-vision/tests/results/**
+
+###############################################################################
+#  BUILD / DIST
 ###############################################################################
 build/  dist/  projects/**/cdk.out/
 
 ###############################################################################
-#  TEST & COVERAGE  ARTEFACTS
+#  COVERAGE & CACHE
 ###############################################################################
 .pytest_cache/  .coverage  htmlcov/
-projects/drone-vision/tests/results/*.geojson
 
 ###############################################################################
-#  IDE / EDITOR
+#  IDE & OS JUNK
 ###############################################################################
-.vscode/  .idea/  *.code-workspace  .vscode/*.log
-
-###############################################################################
-#  OS-GENERATED JUNK
-###############################################################################
+.vscode/  .idea/  *.code-workspace
+.vscode/*.log
 .DS_Store  Thumbs.db
 
 ###############################################################################
