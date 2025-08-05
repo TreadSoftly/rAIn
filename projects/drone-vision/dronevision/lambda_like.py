@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -54,10 +54,8 @@ if _has_yolo and YOLO is not None:
 
 # ─────────────────────────── inference and drawing helpers ─────────────────────
 def run_inference(img: Image.Image, model: str = "drone", *, conf_thr: float = 0.40) -> NDArray[np.float32]:
-    """
-    Run object detection using the YOLO model (if available).
-    Returns ndarray [N,6] -> [x1, y1, x2, y2, conf, class_idx].
-    """
+    """Run object detection using the YOLO model (if available).
+    Returns ndarray [N,6] -> [x1, y1, x2, y2, conf, class_idx]."""
     if not _has_yolo or _det_model is None:
         return np.empty((0, 6), dtype=np.float32)
     res_list = _det_model.predict(img, imgsz=640, conf=conf_thr, verbose=False)  # type: ignore
@@ -79,7 +77,7 @@ def run_inference(img: Image.Image, model: str = "drone", *, conf_thr: float = 0
         return np.empty((0, 6), dtype=np.float32)
     return boxes_arr.reshape(-1, 6)
 
-def _draw_boxes(img: Image.Image, boxes: np.ndarray[Any, Any], label: str | None = None) -> Image.Image:
+def _draw_boxes(img: Image.Image, boxes: np.ndarray[Any, Any], label: Optional[str] = None) -> Image.Image:
     """Draw bounding boxes with class labels and confidence scores on the image."""
     boxes_arr = np.asarray(boxes, dtype=float).reshape(-1, boxes.shape[-1] if boxes.size else 5)
     draw = ImageDraw.Draw(img)
@@ -88,7 +86,6 @@ def _draw_boxes(img: Image.Image, boxes: np.ndarray[Any, Any], label: str | None
             continue
         x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
         conf = float(box[4]) if box.shape[0] > 4 else None
-        # Draw rectangle
         draw.rectangle((x1, y1, x2, y2), outline="red", width=3)
         # Prepare label text
         text = ""
@@ -104,26 +101,23 @@ def _draw_boxes(img: Image.Image, boxes: np.ndarray[Any, Any], label: str | None
                 text = f"{class_name} {conf:.2f}" if conf is not None else class_name
         elif label:
             text = f"{label} {text}" if text else label
-        # Draw label background and text
         if text:
             font = ImageFont.load_default()
             text_bbox = draw.textbbox((0, 0), text, font=font)
             text_w = text_bbox[2] - text_bbox[0]
             text_h = text_bbox[3] - text_bbox[1]
-            text_x = max(0.0, float(x1))
-            text_y = max(0.0, float(y1) - float(text_h) - 2.0)
-            # Draw filled background rectangle (black) for text
+            tx = max(0.0, float(x1))
+            ty = max(0.0, float(y1) - float(text_h) - 2.0)
             draw.rectangle(
                 (
-                    int(round(float(text_x))),
-                    int(round(float(text_y))),
-                    int(round(float(text_x) + float(text_w) + 2)),
-                    int(round(float(text_y) + float(text_h) + 2)),
+                    int(round(tx)),
+                    int(round(ty)),
+                    int(round(tx + text_w + 2)),
+                    int(round(ty + text_h + 2)),
                 ),
                 fill="black",
             )
-            # Draw text in red on top of background
-            draw.text((int(float(text_x) + 1), int(float(text_y) + 1)), text, fill="red", font=font)
+            draw.text((int(tx + 1), int(ty + 1)), text, fill="red", font=font)
     return img
 
 def _is_remote(src: str) -> bool:
@@ -131,7 +125,7 @@ def _is_remote(src: str) -> bool:
 
 # ────────────────────────── public worker (main entry) ─────────────────────────
 def run_single(
-    src: str | os.PathLike[str],
+    src: Union[str, os.PathLike[str]],
     *,
     model: Literal["drone", "airplane"] = "drone",
     task: Literal["detect", "heatmap", "geojson"] = "detect",
@@ -143,7 +137,7 @@ def run_single(
     - Remote/URL inputs -> writes Base64/JSON to STDOUT.
     """
     src_str = str(src)
-    # Load image (supports file path, URL, or base64 data URI)
+    # Load image (file path, URL, or base64 data URI)
     if src_str.startswith("data:"):
         _, b64data = src_str.split(",", 1)
         pil_img = Image.open(io.BytesIO(base64.b64decode(b64data))).convert("RGB")
@@ -153,13 +147,12 @@ def run_single(
             pil_img = Image.open(io.BytesIO(resp.read())).convert("RGB")
     else:
         pil_img = Image.open(src_str).convert("RGB")
-    # Confidence threshold for detection
+    # Run detection model (if available)
     conf_thr = float(hm_kwargs.get("conf", 0.40))
     boxes = run_inference(pil_img, model=model, conf_thr=conf_thr)
     stem = Path(src_str).stem or "image"
 
     if task == "geojson":
-        # Generate GeoJSON output
         try:
             if src_str.lower().startswith(("http://", "https://")) and re.search(r"lat-?\d+(?:\.\d+)?_lon-?\d+(?:\.\d+)?", urllib.parse.unquote(src_str)):
                 geo = import_module("lambda.geo_sink").to_geojson(src_str, [list(b)[:5] for b in boxes.tolist()] if boxes.size else None)
@@ -167,6 +160,9 @@ def run_single(
                 geo = to_geojson(src_str, [list(b)[:5] for b in boxes.tolist()] if boxes.size else None)
         except Exception:
             geo = to_geojson("", [list(b)[:5] for b in boxes.tolist()] if boxes.size else None)
+        # Add timestamp to GeoJSON output
+        import datetime as _dt
+        geo["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
         if _is_remote(src_str):
             json.dump(geo, sys.stdout, separators=(",", ":"))
             sys.stdout.write("\n")
@@ -178,33 +174,28 @@ def run_single(
         return
 
     if task == "heatmap":
-        out_img: Image.Image | None = None
-        # Create segmentation mask overlay
+        out_img: Optional[Image.Image] = None
         try:
             alpha_val = float(hm_kwargs.get("alpha", 0.4))
             overlay_result = heatmap_overlay(pil_img, boxes=boxes if boxes.size else None, alpha=alpha_val)
             if isinstance(overlay_result, np.ndarray):
-                # Convert BGR numpy array to PIL Image (RGB)
                 if overlay_result.ndim == 3:
                     out_img = Image.fromarray(overlay_result.astype(np.uint8)[:, :, ::-1])
                 else:
                     out_img = Image.fromarray(overlay_result.astype(np.uint8))
             else:
-                out_img = overlay_result  # Should be Image.Image or None
+                out_img = overlay_result
         except Exception:
             out_img = None
         if out_img is None:
-            # Fallback: draw detection boxes if segmentation failed
             out_img = _draw_boxes(pil_img.copy(), boxes, label=model)
         suffix = Path(src_str).suffix.lower()
         out_ext = suffix if suffix in {".jpg", ".jpeg", ".png"} else ".jpg"
         out_path = ROOT / "tests" / "results" / f"{stem}_heat{out_ext}"
     else:
-        # task == "detect"
         out_img = None
         if _has_yolo and _det_model is not None:
             try:
-                # The result of predict is List[Results], and plot returns np.ndarray (BGR)
                 res = _det_model.predict(pil_img, imgsz=640, conf=conf_thr, verbose=False)[0]  # type: ignore
                 plotted: np.ndarray = res.plot()  # type: ignore
                 out_img = Image.fromarray(plotted[:, :, ::-1].astype(np.uint8))
@@ -216,7 +207,6 @@ def run_single(
         out_ext = suffix if suffix in {".jpg", ".jpeg", ".png"} else ".jpg"
         out_path = ROOT / "tests" / "results" / f"{stem}_boxes{out_ext}"
 
-    # Save or output the result
     if isinstance(out_img, np.ndarray):
         out_img = Image.fromarray(out_img.astype(np.uint8))
     if _is_remote(src_str):

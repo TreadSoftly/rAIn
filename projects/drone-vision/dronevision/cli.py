@@ -4,7 +4,7 @@ import re
 import sys
 import urllib.parse
 from pathlib import Path
-from typing import Any, List, Literal, Mapping, cast
+from typing import Any, List, Literal, Mapping, Optional, cast
 
 import typer
 
@@ -57,7 +57,7 @@ def _extract_token(tokens: List[str]) -> tuple[str, List[str]]:
 @app.command()
 def target(  # noqa: C901 (complexity - CLI parsing logic)
     inputs: List[str] = typer.Argument(..., metavar="INPUT… [d|hm|gj]"),
-    task_flag: str | None = typer.Option(None, "--task", "-t"),
+    task_flag: Optional[str] = typer.Option(None, "--task", "-t"),
     model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
     # heat-map tuning
     alpha: float = typer.Option(0.4, help="Heat-map blend 0-1"),

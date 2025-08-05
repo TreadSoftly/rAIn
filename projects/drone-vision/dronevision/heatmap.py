@@ -1,12 +1,3 @@
-"""
-predict_heatmap_mp4.py – apply Drone-Vision segmentation & labelling (heat-map overlay)
-on **every frame** of a video and save the result.
-
-• Always writes “*_heat.mp4” into *tests/results/* by default.
-• Uses FFmpeg for fast H.264 re-encoding if available.
-  – If FFmpeg is **absent** *or* exits with a non-zero status we fall back
-    to moving the raw MJPG/AVI so the file still exists for the tests.
-"""
 from __future__ import annotations
 
 import shutil
@@ -14,7 +5,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Union
 
 import cv2
 import numpy as np
@@ -38,9 +29,9 @@ elif (_MODEL_DIR / "yolov8n-seg.pt").exists():
 else:
     _default_seg_weights = None  # no seg model found
 
-_seg_model: YOLO | None = None
+_seg_model: Optional[YOLO] = None
 
-def heatmap_overlay(image: Image.Image, boxes: np.ndarray[Any, Any] | None = None, *, alpha: float = 0.4, return_mask: bool = False) -> Image.Image | np.ndarray[Any, Any]:
+def heatmap_overlay(image: Image.Image, boxes: Optional[np.ndarray[Any, Any]] = None, *, alpha: float = 0.4, return_mask: bool = False) -> Union[Image.Image, np.ndarray[Any, Any]]:
     """
     Create an overlay image with segmentation masks (each object highlighted with a unique color and labeled),
     or a fallback heatmap overlay using detection boxes if segmentation model is unavailable.
@@ -88,13 +79,10 @@ def heatmap_overlay(image: Image.Image, boxes: np.ndarray[Any, Any] | None = Non
             results = _seg_model.predict(bgr_image, imgsz=640, conf=0.25, verbose=False)  # type: ignore
         except Exception:
             results = []
-        if results:
-            result = results[0]
-        else:
-            result = None
+        result = results[0] if results else None
 
         if result is not None and hasattr(result, "masks") and result.masks is not None:
-            # Get masks data as numpy boolean arrays
+            # Get masks data as numpy arrays
             mask_data = result.masks.data  # type: ignore
             try:
                 import torch  # type: ignore
@@ -125,7 +113,6 @@ def heatmap_overlay(image: Image.Image, boxes: np.ndarray[Any, Any] | None = Non
             # Draw labels and IDs on the overlay
             if hasattr(result, "boxes") and result.boxes is not None:
                 names: dict[int, str] = _seg_model.names if hasattr(_seg_model, "names") else {}
-                # Explicitly convert to numpy arrays with known dtype for type safety
                 cls_arr = np.array(result.boxes.cls, dtype=np.float32)  # type: ignore
                 conf_arr = np.array(result.boxes.conf, dtype=np.float32)  # type: ignore
                 xyxy_arr = np.array(result.boxes.xyxy, dtype=np.float32)  # type: ignore
@@ -134,17 +121,15 @@ def heatmap_overlay(image: Image.Image, boxes: np.ndarray[Any, Any] | None = Non
                     conf_val = float(conf_arr[i]) if hasattr(result.boxes, "conf") else 0.0
                     class_name = names.get(cls_id, str(cls_id))
                     label_text = f"{class_name} {conf_val * 100:.1f}% ID {i+1}"
-                    # Determine text placement (above the object, near top-left of box)
+                    # Determine text placement (above object, near top-left of box)
                     if hasattr(result.boxes, "xyxy"):
                         x1, y1, x2, y2 = map(int, xyxy_arr[i])
                     else:
-                        # Fallback to mask bounds if no boxes
                         ys, xs = np.where(masks_np[i] >= 0.5)
                         y1 = int(ys.min()) if ys.size > 0 else 0
                         x1 = int(xs.min()) if xs.size > 0 else 0
                         x2 = int(xs.max()) if xs.size > 0 else x1
                         y2 = int(ys.max()) if ys.size > 0 else y1
-                    # Draw rectangle background for text
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     font_scale = 0.5
                     thickness = 1
@@ -153,35 +138,33 @@ def heatmap_overlay(image: Image.Image, boxes: np.ndarray[Any, Any] | None = Non
                     bg_y0 = max(0, y1 - text_h - 4)
                     bg_x1 = x1 + text_w + 2
                     bg_y1 = bg_y0 + text_h + 4
+                    # Use mask's overlay color for background rectangle
                     color = (int(overlay[max(y1, 0), max(x1, 0), 0]),
                             int(overlay[max(y1, 0), max(x1, 0), 1]),
                             int(overlay[max(y1, 0), max(x1, 0), 2]))
                     cv2.rectangle(overlay, (bg_x0, bg_y0), (bg_x1, bg_y1), color, -1)
                     cv2.putText(overlay, label_text, (bg_x0 + 1, bg_y0 + text_h + 1), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
-            # If return_mask requested, build a combined mask array
             if return_mask:
                 combined_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-                for i in range(masks_np.shape[0]):
+                for i in range(num_masks):
                     mask_bool = masks_np[i] >= 0.5
-                    combined_mask[mask_bool] = 255  # mark mask areas
+                    combined_mask[mask_bool] = 255
                 return combined_mask
-            # Convert overlay (BGR) back to PIL Image (RGB)
+            # Convert overlay (BGR) back to PIL Image
             overlay_rgb = overlay[:, :, ::-1]
-            out_img = Image.fromarray(overlay_rgb)
-            return out_img
+            return Image.fromarray(overlay_rgb)
     # Fallback if segmentation model is not available or failed
     if boxes is None or boxes.size == 0:
-        # No detection info, just return original image or empty mask
         if return_mask:
             return np.zeros((img_h, img_w), dtype=np.uint8)
         return img.copy()
-    # Fallback heatmap overlay using detection boxes
+    # Fallback overlay using detection boxes
     output_img = img.copy()
     # Use semi-transparent red for each box
-    for i, box in enumerate(np.asarray(boxes).reshape(-1, boxes.shape[-1] if hasattr(boxes, "shape") else 5)):
+    for box in np.asarray(boxes).reshape(-1, boxes.shape[-1] if hasattr(boxes, "shape") else 5):
         if box.shape[0] < 4:
             continue
-        x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        x1, y1, x2, y2 = map(int, box[:4])
         rect_width = x2 - x1
         rect_height = y2 - y1
         overlay_rect = Image.new("RGBA", (rect_width, rect_height), (255, 0, 0, int(alpha * 255)))
@@ -197,12 +180,12 @@ def heatmap_overlay(image: Image.Image, boxes: np.ndarray[Any, Any] | None = Non
     return output_img
 
 def main(
-    src: str | Path,
+    src: Union[str, Path],
     *,
     cmap: str = "COLORMAP_JET",
     alpha: float = 0.4,
     kernel_scale: float = 5.0,
-    out_dir: str | Path | None = None,
+    out_dir: Union[str, Path, None] = None,
     **kw: Any,
 ) -> Path:
     """
@@ -218,12 +201,11 @@ def main(
 
     Returns
     -------
-    Path : Path to the output video file (MP4 format).
+    Path
+        Path to the output video file (MP4 format).
     """
     src_path = Path(src).expanduser()
-    if out_dir is None:
-        out_dir = _PROJECT_ROOT / "tests" / "results"
-    out_dir = Path(out_dir).expanduser()
+    out_dir = Path(out_dir) if out_dir is not None else (_PROJECT_ROOT / "tests" / "results")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     stem = src_path.stem
@@ -277,8 +259,8 @@ def main(
     try:
         subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
         avi_path.unlink(missing_ok=True)
-    except FileNotFoundError:
-        shutil.move(str(avi_path), final_mp4.with_suffix(".avi"))
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        shutil.move(str(avi_path), str(final_mp4))
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     print(f"✅  Saved → {final_mp4}")

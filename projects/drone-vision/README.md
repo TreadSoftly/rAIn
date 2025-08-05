@@ -1,5 +1,5 @@
 <div align="center">
-  
+
 # ~ Capabilities Demo Videos ~
 
 <div align="center">
@@ -15,27 +15,27 @@
 </div>
 
 
-<table align="center"> 
-  
+<table align="center">
+
 <tr>
 
-<td align="center" valign="top"> 
-  
+<td align="center" valign="top">
+
 <strong>
 Multi-Color Segmentation Highlights + Tracking + ID + Confidence Percentages
 </strong><br>
-<video src="https://github.com/user-attachments/assets/d9b6f0f8-6ea2-4f29-813e-96ff84ae1ab2" width="500" controls></video> 
+<video src="https://github.com/user-attachments/assets/d9b6f0f8-6ea2-4f29-813e-96ff84ae1ab2" width="500" controls></video>
 
-</td> 
+</td>
 
-<td align="center" valign="top"> 
-  
+<td align="center" valign="top">
+
 <strong>
 Same-Color Segmented Highlights + ID Boxes + Tracking + Confidence Percentages:
 </strong> <em>✨ALSO MUSIC✨</em><br>
-<video src="https://github.com/user-attachments/assets/07168b7d-7589-4948-bbdd-55f4c723d33d" width="500" controls></video> 
+<video src="https://github.com/user-attachments/assets/07168b7d-7589-4948-bbdd-55f4c723d33d" width="500" controls></video>
 
-</td> 
+</td>
 
 </tr>
 
@@ -66,7 +66,7 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 <br>
 
 <div align="center">
-  
+
 # ~ Capabilities Demo Images ~
 
 <div align="center">
@@ -79,7 +79,7 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 </div>
 
 
-<table align="center" cellpadding="5"> 
+<table align="center" cellpadding="5">
 
 <!-- Row 1 -->
 <tr>
@@ -126,7 +126,7 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 <br>
 
 <div align="center">
-  
+
 # ~ Capabilities Map View Demo Images ~
 
 <div align="center">
@@ -152,4 +152,3 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 </table>
 
 </div>
-
