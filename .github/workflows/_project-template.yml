@@ -63,8 +63,8 @@ jobs:
 
           # 🚨 build context is the PROJECT DIR, not lambda/
           docker build -t "$REPO_NAME" \
-                       -f "$PROJECT_DIR/lambda/Dockerfile" \
-                       "$PROJECT_DIR"
+            -f "$PROJECT_DIR/lambda/Dockerfile" \
+            "$PROJECT_DIR"
 
           docker tag "$REPO_NAME:latest" "$REGISTRY/$REPO_NAME:latest"
 
