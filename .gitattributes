@@ -1,9 +1,8 @@
 * text=auto
 .gitattributes text eol=lf
 
-# treat binary weights as binary but **not** LFS-tracked
-*.onnx -text
-*.pt   -text
-*.ckpt -text
-*.pt filter=lfs diff=lfs merge=lfs -text
+# All heavy weights stay in Git LFS
+*.pt   filter=lfs diff=lfs merge=lfs -text
 *.onnx filter=lfs diff=lfs merge=lfs -text
+projects/drone-vision/model/yolov8x.pt filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text
