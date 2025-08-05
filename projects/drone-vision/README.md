@@ -2,12 +2,17 @@
   
 # ~ Capabilities Demo Videos ~
 
-<div align="left">
+<div align="center">
 
-- Tracking
-- Detection + ID Boxes + Confidence Percentage
-- Segmented Multi-Color + ID With/and/Without Boxes + Confidence Percentage
-- Only Segemented Highlights -No ID / -No Confidence Percentage
+<table style="display:inline-block; text-align:left; border-collapse:collapse;">
+  <tr><td style="padding:0 .5em;">•</td><td>Tracking</td></tr>
+  <tr><td style="padding:0 .5em;">•</td><td>Detection + ID Boxes + Confidence Percentage</td></tr>
+  <tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color + ID With/and/Without Boxes + Confidence Percentage</td></tr>
+  <tr><td style="padding:0 .5em;">•</td><td>Only Segmented Highlights – No ID / No Confidence Percentage</td></tr>
+</table>
+
+</div>
+
 
 <table align="center"> 
   
@@ -80,12 +85,15 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
   
 # ~ Capabilities Demo Images ~
 
-<div align="left">
+<div align="center">
 
-- Detection ID Boxes + Confidence Percentage
-- Segmented Multi-Color + ID + Confidence Percentage
+<table style="display:inline-block; text-align:left; border-collapse:collapse;">
+  <tr><td style="padding:0 .5em;">•</td><td>Detection ID Boxes + Confidence Percentage</td></tr>
+  <tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color + ID + Confidence Percentage</td></tr>
+</table>
 
-<br>
+</div>
+
 
 <table align="center" cellpadding="5"> 
 
@@ -121,21 +129,38 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 <td align="center"><img src="https://github.com/user-attachments/assets/a6d52775-0134-4a8e-9d11-474518d09c89" width="300" alt="Image"></td>
 </tr>
 
-<!-- Row 5 -->
+<!-- Row 5 (unchanged) -->
 <tr>
 <td align="center"><img src="https://github.com/user-attachments/assets/b09a82d2-f930-4204-a732-e437234e551d" width="300" alt="Image"></td>
 <td align="center"><img src="https://github.com/user-attachments/assets/fc02e090-3869-4421-be44-6ae5337b109c" width="300" alt="Image"></td>
 <td align="center"><img src="https://github.com/user-attachments/assets/d1d7a3d8-25a4-48e4-a6a3-4834bfbe324e" width="300" alt="Image"></td>
 <td align="center"><img src="https://github.com/user-attachments/assets/9a48d1c7-0c7a-4ff6-8d22-a776cd8afe08" width="300" alt="Image"></td>
-
 </tr>
 
-<!-- Row 6 -->
-<tr>
-<td align="center"><img src="https://github.com/user-attachments/assets/c6382b7b-9ad0-4b13-be2a-0128d7669ce3" width="300" alt="Image"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/b406b50d-ea6a-4633-b716-e68b298029ec" width="300" alt="Image"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/d2613e96-7df7-4a1c-baf8-fa8680cfa57a" width="300" alt="Image"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/0f462bd1-2f08-4d3a-a78f-03f42b97f07c" width="300" alt="Image"></td>
-</tr>
+</table> <!-- closes the main Image Gallery table -->
+
+<br>
+
+<div align="center">
+  
+# ~ Capabilities Map View Demo Images ~
+
+<div align="center">
+
+<table style="display:inline-block; text-align:left; border-collapse:collapse;">
+  <tr><td style="padding:0 .5em;">•</td><td>Geotagged GeoJson Files</td></tr>
+</table>
 
 </div>
+
+<table align="center" cellpadding="5">
+<tr>
+<td align="center"><img src="https://github.com/user-attachments/assets/c6382b7b-9ad0-4b13-be2a-0128d7669ce3" width="300" alt="Geo Map 1"></td>
+<td align="center"><img src="https://github.com/user-attachments/assets/b406b50d-ea6a-4633-b716-e68b298029ec" width="300" alt="Geo Map 2"></td>
+<td align="center"><img src="https://github.com/user-attachments/assets/d2613e96-7df7-4a1c-baf8-fa8680cfa57a" width="300" alt="Geo Map 3"></td>
+<td align="center"><img src="https://github.com/user-attachments/assets/24e0bc9e-b32a-48a5-813d-51bed1199f9b" width="300" alt="Geo Map 4"></td>
+</tr>
+</table>
+
+</div>
+
