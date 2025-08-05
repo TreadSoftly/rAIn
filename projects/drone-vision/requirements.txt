@@ -1,29 +1,29 @@
-# ───────── Runtime / CLI ─────────
-torch>=2.2
-torchvision>=0.17
-ultralytics>=8.0
+# ───────── Inference / CLI (desktop, CI, ECS, etc.) ─────────
+torch==2.3.*                # 2.3 is current LTS (2025-05) – pins CUDA & CPU wheels
+torchvision==0.18.*         # must match torch major.minor
+ultralytics==8.*            # model zoo & CLI – 8.x series is still active
 
-# ONNXRuntime - different wheels for ≤3.9 vs ≥3.10
-onnxruntime==1.19.2 ; python_version < "3.10"
-onnxruntime>=1.22,<1.24 ; python_version >= "3.10"
+# ONNX Runtime – oldest wheel that still supports ManyLinux2014 *and*
+# latest that supports NumPy 1.x (Lambda wheels stay on 1.x for now)
+onnxruntime==1.23.*
 
-# OpenCV 4.12 jumps to NumPy ≥ 2.3 - stay below it for now
-opencv-python-headless>=4.10,<4.12
-
+opencv-python-headless>=4.10,<4.12  # avoid NumPy 2 ABI jump
 numpy<2
 pillow>=11.3
 pillow-avif-plugin>=1.4
 
-# Visualisation / analysis helpers
-matplotlib
+# Viz / helpers
+matplotlib>=3.9
 scipy>=1.11
-pandas
-redis>=5.0             # (optional) heatmap accumulation
+pandas>=2.2
+redis>=5.0                 # optional – heat-map accumulator
 
 # Misc
 typer[all]>=0.12
-thop
+thop>=0.1.2
 
-# ───────── Test-time & local -stack ─────────
-boto3
+# ───────── Local / test stack ─────────
+boto3>=1.34
 moto[all]~=4.2
+pytest>=8
+pytest-cov>=6

@@ -7,10 +7,12 @@ __pycache__/
 *.pyd
 *.so
 *.egg-info/
+
 # Virtual environments
 .venv/
 env/
 venv/
+
 # Notebooks & checkpoints
 .ipynb_checkpoints/
 
@@ -40,7 +42,10 @@ cdk.out/
 .DS_Store
 Thumbs.db
 
-yolov8nx.pt
+# Test artefacts that change every run
+projects/drone-vision/tests/results/*.geojson
+
+# Keep committed model weights
 !projects/drone-vision/model/
 !projects/drone-vision/model/*.pt
 !projects/drone-vision/model/*.onnx

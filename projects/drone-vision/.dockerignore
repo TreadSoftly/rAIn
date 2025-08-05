@@ -1,0 +1,18 @@
+# ░░░ Files to KEEP OUT of the Docker build context ░░░
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+**/.vscode/
+**/.git/
+**/.gitignore
+cdk.out/
+web/
+
+# media / raw assets the Lambda image never needs
+*.jpg
+*.png
+*.mp4
+*.csv
+
+# ░░░ BUT keep the model weights ░░░
+!model/**
