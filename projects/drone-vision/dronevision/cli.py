@@ -1,3 +1,10 @@
+"""
+dronevision.cli – one unified front-end (“target”)
+
+* Detect / heat-map / geojson for images **and** videos.
+* Weight selection (including defaults) is driven entirely by the central
+  ``WEIGHT_PRIORITY`` tables and the files present in *projects/drone-vision/model/*.
+"""
 from __future__ import annotations
 
 import re
@@ -8,44 +15,43 @@ from typing import Any, List, Literal, Mapping, Optional, cast
 
 import typer
 
-from . import lambda_like as ll
-from .lambda_like import (
-    MODELS,  # type: ignore[import]
-    run_single,
-)
+from dronevision import MODEL_DIR, MODELS, WEIGHT_PRIORITY
+from .lambda_like import run_single
 
-# ────────────────────────── CLI scaffolding ────────────────────────────────
+# ─────────────────────────── scaffolding ────────────────────────────────
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 
-_TASK_ALIAS = {
-    "d": "detect", "detect": "detect", "-d": "detect", "-detect": "detect",
-    "hm": "heatmap", "heatmap": "heatmap",
-    "gj": "geojson", "geojson": "geojson", "-gj": "geojson", "-geojson": "geojson",
+_ALIAS = {
+    "d": "detect",
+    "-d": "detect",
+    "detect": "detect",
+    "hm": "heatmap",
+    "heatmap": "heatmap",
+    "gj": "geojson",
+    "-gj": "geojson",
+    "geojson": "geojson",
 }
-_VALID_TASKS = {"detect", "heatmap", "geojson"}
+_VALID = {"detect", "heatmap", "geojson"}
 
 _URL_RE = re.compile(r"^(https?://.+|data:image/[^;]+;base64,.+)$", re.I)
 
-_AVAILABLE_MODELS = [k.lower() for k in cast(Mapping[str, Any], MODELS).keys()]
-_DEFAULT_MODEL = (
-    "drone"
-    if "drone" in _AVAILABLE_MODELS
-    else (_AVAILABLE_MODELS[0] if _AVAILABLE_MODELS else "drone")
-)
+_AVAILABLE_MODELS = [m.lower() for m in cast(Mapping[str, Any], MODELS).keys()]
+_DEFAULT_MODEL = _AVAILABLE_MODELS[0] if _AVAILABLE_MODELS else "primary"
 
 
 def _is_url(text: str) -> bool:
     return urllib.parse.urlparse(text).scheme in {"http", "https"} or bool(_URL_RE.match(text))
 
 
-def _extract_token(tokens: List[str]) -> tuple[str, List[str]]:
-    hits = [(i, _TASK_ALIAS[t.lower()]) for i, t in enumerate(tokens) if t.lower() in _TASK_ALIAS]
+def _extract_task(tokens: List[str]) -> tuple[str, List[str]]:
+    """Return *(task, remaining_tokens)* — defaults to *detect* if none found."""
+    hits = [(i, _ALIAS[t.lower()]) for i, t in enumerate(tokens) if t.lower() in _ALIAS]
     if not hits:
         return "detect", tokens
     if len(hits) > 1:
         typer.secho(
             f"[bold red]✖  more than one task alias supplied "
-            f"({', '.join(alias for _, alias in hits)})",
+            f"({', '.join(a for _, a in hits)})",
             err=True,
         )
         raise typer.Exit(2)
@@ -53,47 +59,69 @@ def _extract_token(tokens: List[str]) -> tuple[str, List[str]]:
     return task, tokens[:idx] + tokens[idx + 1:]
 
 
-# ────────────────────────────── CLI command ────────────────────────────────
+def _first_existing(paths: list[Path]) -> Path | None:
+    return next((p for p in paths if p.exists()), None)
+
+
+def _pick_weights(task: Literal["detect", "heatmap"], *, small: bool) -> Path | None:
+    """
+    First existing weight file according to `WEIGHT_PRIORITY`.
+    Heat-maps favour segmentation → detection fallback.
+    """
+    key = f"{task}_small" if small else task
+    cand: list[Path] = list(WEIGHT_PRIORITY.get(key, []))
+
+    if task == "heatmap":
+        # Any *-seg.* file lying around also counts
+        for d in {MODEL_DIR, MODEL_DIR / "../lambda/model"}:
+            cand += sorted(d.glob("*-seg.pt")) + sorted(d.glob("*-seg.onnx"))
+        # If still nothing, fall back to detector list
+        det_key = "detect_small" if small else "detect"
+        cand += WEIGHT_PRIORITY.get(det_key, [])
+
+    return _first_existing(cand)
+
+
+# ───────────────────────────── command ───────────────────────────────────
 @app.command()
-def target(  # noqa: C901 (complexity - CLI parsing logic)
+def target(  # noqa: C901 – CLI parsing is inherently verbose
     inputs: List[str] = typer.Argument(..., metavar="INPUT… [d|hm|gj]"),
-    task_flag: Optional[str] = typer.Option(None, "--task", "-t"),
+    *,
+    task: Optional[str] = typer.Option(None, "--task", "-t"),
     model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
     # heat-map tuning
-    alpha: float = typer.Option(0.4, help="Heat-map blend 0-1"),
+    alpha: float = typer.Option(0.40, help="Heat-map blend 0-1"),
     cmap: str = typer.Option("COLORMAP_JET", help="OpenCV / Matplotlib colour-map"),
     kernel_scale: float = typer.Option(
-        5.0, "--k", "-k", help="σ ∝ √area / kernel_scale  (smaller → blurrier)"
+        5.0, "--k", "-k", help="σ ∝ √area / kernel_scale (smaller → blurrier)"
     ),
-    conf: float = typer.Option(
-        0.40, "--conf", help="[detect / heat-map] confidence threshold 0-1"
-    ),
-    small: bool = typer.Option(False, "--small", "--fast", help="use nano models (live video)"),
+    conf: float = typer.Option(0.40, help="[detect / heat-map] confidence threshold 0-1"),
+    small: bool = typer.Option(False, "--small", "--fast", help="use nano models for live video"),
 ) -> None:
-    """Batch-process one or more image / video inputs."""
+    """Batch-process images and videos with zero manual weight fiddling."""
     if not inputs:
         typer.secho("[bold red]✖  no inputs given", err=True)
         raise typer.Exit(2)
 
-    token_task, positional = _extract_token(inputs)
+    token_task, positional = _extract_task(inputs)
 
-    # ── resolve task ───────────────────────────────────────────────────────
-    if task_flag:
-        task_flag = task_flag.lower()
-        if task_flag not in _VALID_TASKS:
-            typer.secho(f"[bold red]✖  invalid --task {task_flag}", err=True)
+    # ── final task resolution ────────────────────────────────────────────
+    if task:
+        task = task.lower()
+        if task not in _VALID:
+            typer.secho(f"[bold red]✖  invalid --task {task}", err=True)
             raise typer.Exit(2)
-        if token_task != "detect" and task_flag != token_task:
+        if token_task != "detect" and task != token_task:
             typer.secho(
-                f"[bold red]✖  conflicting task: flag={task_flag!r}  token={token_task!r}",
+                f"[bold red]✖  conflicting task: flag={task!r}  token={token_task!r}",
                 err=True,
             )
             raise typer.Exit(2)
-        task = task_flag
+        task_final = task
     else:
-        task = token_task
+        task_final = token_task
 
-    # ── validate model ────────────────────────────────────────────────────
+    # validate image-mode model name
     model = model.lower()
     if model not in _AVAILABLE_MODELS:
         typer.secho(
@@ -103,71 +131,29 @@ def target(  # noqa: C901 (complexity - CLI parsing logic)
         )
         raise typer.Exit(2)
 
-    if not positional:
-        typer.secho("[bold red]✖  no image / video inputs found", err=True)
-        raise typer.Exit(2)
-
     hm_kwargs: dict[str, Any] = dict(alpha=alpha, cmap=cmap, kernel_scale=kernel_scale, conf=conf)
 
-    # ───────────────────── iterate inputs ────────────────────────────────
+    # ───────────────────── loop over user inputs ────────────────────────
     for item in positional:
         low = item.lower()
 
-        # ──────── video inputs ────────────────────────────────────────────
+        # ── videos ───────────────────────────────────────────────────────
         if low.endswith((".mp4", ".mov", ".avi", ".mkv")):
-            if task == "geojson":
-                typer.secho(f"[bold yellow]⚠  skipping video for geojson: {item}", err=True)
+            if task_final == "geojson":
+                typer.secho(f"[bold yellow]⚠ skipping video for geojson: {item}", err=True)
                 continue
 
-            # Select matching .pt weights (for video processing)
-            if model in {"drone", "airplane"}:
-                model_dir = getattr(ll, "MODEL_DIR", None) or Path(str(MODELS[model])).parent  # type: ignore[union-attr]
-                if task == "heatmap":
-                    if small:
-                        weight_path = model_dir / "yolov8n-seg.pt"
-                        if not weight_path.exists():
-                            weight_path = model_dir / "yolo11n-seg.pt"
-                            if not weight_path.exists():
-                                weight_path = model_dir / "yolo11x-seg.pt"
-                                if not weight_path.exists():
-                                    weight_path = model_dir / "yolo11m-seg.pt"
-                    else:
-                        weight_path = model_dir / "yolo11x-seg.pt"
-                        if not weight_path.exists():
-                            weight_path = model_dir / "yolo11m-seg.pt"
-                            if not weight_path.exists():
-                                weight_path = model_dir / "yolov8n-seg.pt"
-                                if not weight_path.exists():
-                                    weight_path = model_dir / f"{model}.pt"
-                else:  # detect
-                    if small:
-                        weight_path = model_dir / "yolov8n.pt"
-                        if not weight_path.exists():
-                            weight_path = model_dir / "yolo11n.pt"
-                    else:
-                        weight_path = model_dir / "yolov8x.pt"
-                        if not weight_path.exists():
-                            weight_path = model_dir / "yolo11x.pt"
-                            if not weight_path.exists():
-                                weight_path = model_dir / f"{model}.pt"
+            weight = _pick_weights(cast(Literal["detect", "heatmap"], task_final), small=small)
 
-                if task == "heatmap":
-                    from . import predict_heatmap_mp4 as _heat_mod
-                    if hasattr(_heat_mod, "DEF_WEIGHTS"):
-                        setattr(_heat_mod, "DEF_WEIGHTS", weight_path)
-                else:  # detect
-                    from . import predict_mp4 as _detect_mod
-                    setattr(_detect_mod, "YOLO_WEIGHTS", weight_path)
-
-            if task == "heatmap":
+            if task_final == "heatmap":
                 from .predict_heatmap_mp4 import main as _heat_vid
-                _heat_vid(item, **hm_kwargs)
-            else:
+                _heat_vid(item, weights=weight, **hm_kwargs)
+            else:  # detect
                 from .predict_mp4 import main as _detect_vid
-                _detect_vid(item, conf=conf)
+                _detect_vid(item, conf=conf, weights=weight)
             continue
 
-        # ──────── image (file / http / data-URI) ──────────────────────────
+        # ── images / URLs ────────────────────────────────────────────────
         if low.endswith(
             (
                 ".jpg",
@@ -185,17 +171,17 @@ def target(  # noqa: C901 (complexity - CLI parsing logic)
         ) or _is_url(item):
             run_single(
                 item,
-                model=cast(Literal["drone", "airplane"], model),
-                task=cast(Literal["detect", "heatmap", "geojson"], task),
+                model=model,                      # ← no legacy literals
+                task=cast(Literal["detect", "heatmap", "geojson"], task_final),
                 **hm_kwargs,
             )
             continue
 
-        typer.secho(f"[bold red]✖  unsupported input: {item}", err=True)
+        typer.secho(f"[bold red]✖ unsupported input: {item}", err=True)
         raise typer.Exit(2)
 
 
-# ───────────────────────────── entry-point ────────────────────────────────
+# ────────────────────────── entry-point glue ─────────────────────────────
 def main() -> None:  # pragma: no cover
     try:
         app()
@@ -204,5 +190,5 @@ def main() -> None:  # pragma: no cover
         sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

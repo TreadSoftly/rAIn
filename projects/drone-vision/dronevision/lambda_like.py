@@ -10,14 +10,19 @@ import urllib.parse
 import urllib.request
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Literal, Optional, Union
+from typing import Any
+from typing import Literal
+from typing import Optional
+from typing import Union
 
 import numpy as np
 from numpy.typing import NDArray
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
+from PIL import ImageDraw
+from PIL import ImageFont
 
 from .geo_sink import to_geojson
-from .heatmap import heatmap_overlay  # segmentation overlay for heatmap tasks
+from .heatmap import heatmap_overlay
 
 # ─────────────────────────── paths & model initialization ──────────────────────
 _BASE = Path(__file__).resolve().parent           # …/dronevision
@@ -31,29 +36,77 @@ except ImportError:
     _has_yolo = False
 
 MODEL_DIR = Path(os.getenv("DRONEVISION_MODEL_PATH", ROOT / "model"))
-# Define model references (drone and airplane both use YOLOv8x)
+# Define model references
 MODELS = {
-    "drone": MODEL_DIR / "yolov8x.pt",
-    "airplane": MODEL_DIR / "yolov8x.pt",
+    "primary": MODEL_DIR / "yolov8x.pt",
 }
 
 _det_model = None
 _seg_model = None
 
 if _has_yolo and YOLO is not None:
-    # Load detection model (YOLOv8x or fallback)
-    for cand in (MODEL_DIR / "yolov8x.pt", MODEL_DIR / "yolo11x.pt", MODEL_DIR / "yolov8n.pt", MODEL_DIR / "yolo11n.pt"):
-        if cand.exists():
-            _det_model = YOLO(str(cand))
-            break
-    # Load segmentation model (YOLOv8-seg or fallback)
-    for cand in (MODEL_DIR / "yolo11x-seg.pt", MODEL_DIR / "yolo11m-seg.pt", MODEL_DIR / "yolov8x-seg.pt", MODEL_DIR / "yolov8s-seg.pt", MODEL_DIR / "yolov8n-seg.pt"):
-        if cand.exists():
-            _seg_model = YOLO(str(cand))
-            break
+    # Environment override weight (if provided)
+    env_weight = os.getenv("DRONEVISION_TEST_WEIGHTS")
+    loaded_env = False
+    if env_weight:
+        env_path = Path(env_weight).expanduser()
+        if env_path.exists():
+            try:
+                env_model = YOLO(str(env_path))
+                loaded_env = True
+            except Exception:
+                loaded_env = False
+            else:
+                _det_model = env_model
+                if "-seg" in env_path.name:
+                    _seg_model = env_model
+                    try:
+                        hm = import_module("dronevision.heatmap")
+                        setattr(hm, "_seg_model", env_model)
+                    except ImportError:
+                        pass
+    if not loaded_env:
+        # Load detection model (YOLOv8x or fallback)
+        for cand in (
+            MODEL_DIR / "yolov8x.pt",
+            MODEL_DIR / "yolo11x.pt",
+            MODEL_DIR / "yolov12x.pt",
+            MODEL_DIR / "yolov8x.onnx",
+            MODEL_DIR / "yolo11x.onnx",
+            MODEL_DIR / "yolov12x.onnx",
+            MODEL_DIR / "yolov8n.pt",
+            MODEL_DIR / "yolo11n.pt",
+            MODEL_DIR / "yolov12n.pt",
+            MODEL_DIR / "yolov8n.onnx",
+            MODEL_DIR / "yolo11n.onnx",
+            MODEL_DIR / "yolov12n.onnx",
+        ):
+            if cand.exists():
+                _det_model = YOLO(str(cand))
+                break
+        # Load segmentation model (YOLOv8-seg or fallback)
+        for cand in (
+            MODEL_DIR / "yolo11x-seg.pt",
+            MODEL_DIR / "yolo11m-seg.pt",
+            MODEL_DIR / "yolov8x-seg.pt",
+            MODEL_DIR / "yolov8s-seg.pt",
+            MODEL_DIR / "yolov8n-seg.pt",
+            MODEL_DIR / "yolo11x-seg.onnx",
+            MODEL_DIR / "yolo11m-seg.onnx",
+            MODEL_DIR / "yolov8x-seg.onnx",
+            MODEL_DIR / "yolov8s-seg.onnx",
+            MODEL_DIR / "yolov8n-seg.onnx",
+            MODEL_DIR / "yolov12x-seg.pt",
+            MODEL_DIR / "yolov12n-seg.pt",
+            MODEL_DIR / "yolov12x-seg.onnx",
+            MODEL_DIR / "yolov12n-seg.onnx",
+        ):
+            if cand.exists():
+                _seg_model = YOLO(str(cand))
+                break
 
 # ─────────────────────────── inference and drawing helpers ─────────────────────
-def run_inference(img: Image.Image, model: str = "drone", *, conf_thr: float = 0.40) -> NDArray[np.float32]:
+def run_inference(img: Image.Image, model: str = "primary", *, conf_thr: float = 0.40) -> NDArray[np.float32]:
     """Run object detection using the YOLO model (if available).
     Returns ndarray [N,6] -> [x1, y1, x2, y2, conf, class_idx]."""
     if not _has_yolo or _det_model is None:
@@ -127,7 +180,7 @@ def _is_remote(src: str) -> bool:
 def run_single(
     src: Union[str, os.PathLike[str]],
     *,
-    model: Literal["drone", "airplane"] = "drone",
+    model: str = "primary",  # <-- Accept any string
     task: Literal["detect", "heatmap", "geojson"] = "detect",
     **hm_kwargs: Any,
 ) -> None:
@@ -211,9 +264,9 @@ def run_single(
         out_img = Image.fromarray(out_img.astype(np.uint8))
     if _is_remote(src_str):
         buf = io.BytesIO()
-        out_img.save(buf, format="JPEG")  # type: ignore
+        out_img.save(buf, format="JPEG")
         sys.stdout.write(base64.b64encode(buf.getvalue()).decode() + "\n")
     else:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_img.save(out_path)  # type: ignore
+        out_img.save(out_path)
         print(f"★ wrote {out_path}")

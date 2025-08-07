@@ -6,14 +6,29 @@
       "geometry": {
         "type": "Point",
         "coordinates": [
-          -74.0445,
-          40.6892
+          -74.04533848452569,
+          40.663422657203675
         ]
       },
       "properties": {
-        "id": "40771bec30034301a149d84b58aa77a1"
+        "conf": 0.5582924485206604,
+        "id": "064f627526264e3388034a6a40b481ab"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -74.04272262096406,
+          40.663415259552
+        ]
+      },
+      "properties": {
+        "conf": 0.45328488945961,
+        "id": "d0fcb03ebcd143089c5f6f2dc1debe2c"
       }
     }
   ],
-  "timestamp": "2025-08-05T08:55:24+00:00"
+  "timestamp": "2025-08-07T01:07:47+00:00"
 }

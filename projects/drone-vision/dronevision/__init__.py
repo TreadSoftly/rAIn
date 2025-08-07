@@ -1,53 +1,96 @@
-"""dronevision – package initialisation
-Centralises model discovery so every module uses *one* source of truth.
-"""
 from __future__ import annotations
 
+import importlib.util as _iu
 import os
+import sys as _sys
 from pathlib import Path
 
-# ── canonical project locations ──────────────────────────────────────────
-_BASE = Path(__file__).resolve().parent           # …/dronevision
-ROOT  = _BASE.parent                              # …/projects/drone-vision
+from . import geo_sink as geo_sink  # re-export
+from .heatmap import heatmap_overlay
 
-# single, authoritative model directory (env-var overrideable)
+# ────────────────────────────────────────────────────────────
+#  Canonical project locations
+# ────────────────────────────────────────────────────────────
+_BASE = Path(__file__).resolve().parent          # …/dronevision
+ROOT = _BASE.parent                              # …/projects/drone-vision
+
+# Single, authoritative model directory (env-var overrideable)
 MODEL_DIR: Path = Path(os.getenv("DRONEVISION_MODEL_PATH", ROOT / "model")).resolve()
-os.environ.setdefault("DRONEVISION_MODEL_PATH", str(MODEL_DIR))  # propagate downstream
+os.environ.setdefault("DRONEVISION_MODEL_PATH", str(MODEL_DIR))      # propagate downstream
 
-# primary checkpoints: unified YOLOv8 models for detection and segmentation
+# Primary checkpoints: unified YOLOv8 models for detection & segmentation
 MODELS = {
-    "drone":    MODEL_DIR / "yolov8x.pt",   # unified detection model (YOLOv8x)
-    "airplane": MODEL_DIR / "yolov8x.pt",   # alias to unified detection model
+    "primary": MODEL_DIR / "yolov8x.pt",
 }
 
-# weight-selection priority tables (first existing file wins)
+# Weight-selection tables (first existing file wins)
 WEIGHT_PRIORITY: dict[str, list[Path]] = {
-    # full-scale object detection (images/videos)
+    # ── DETECTION ─────────────────────────────────────────────
     "detect": [
-        MODEL_DIR / "yolov8x.pt",    # main unified detector
-        MODEL_DIR / "yolo11x.pt",    # backup custom detector (if available)
-        # (Legacy ONNX models removed)
+        MODEL_DIR / "yolov8x.pt",
+        MODEL_DIR / "yolo11x.pt",
+        MODEL_DIR / "yolov12x.pt",
+        MODEL_DIR / "yolov8x.onnx",
+        MODEL_DIR / "yolo11x.onnx",
+        MODEL_DIR / "yolov12x.onnx",
+        MODEL_DIR / "yolov12n.pt",
+        MODEL_DIR / "yolov12n.onnx",
     ],
-    # segmentation-based overlays (heatmaps via instance masks)
+    # ── SEGMENTATION / HEAT-MAP ───────────────────────────────
     "heatmap": [
-        MODEL_DIR / "yolo11x-seg.pt",  # main segmentation model
-        MODEL_DIR / "yolo11m-seg.pt",  # backup segmentation model
-        MODEL_DIR / "yolov8n-seg.pt",  # alternative lightweight model
+        MODEL_DIR / "yolov8x-seg.pt",
+        MODEL_DIR / "yolov8x-seg.onnx",
+        MODEL_DIR / "yolo11x-seg.pt",
+        MODEL_DIR / "yolo11x-seg.onnx",
+        MODEL_DIR / "yolo11m-seg.pt",
+        MODEL_DIR / "yolo11m-seg.onnx",
+        MODEL_DIR / "yolov12x-seg.pt",
+        MODEL_DIR / "yolov12x-seg.onnx",
+        MODEL_DIR / "yolov8n-seg.pt",
+        MODEL_DIR / "yolov8n-seg.onnx",
+        MODEL_DIR / "yolo11n-seg.pt",
+        MODEL_DIR / "yolo11n-seg.onnx",
+        MODEL_DIR / "yolov12n-seg.pt",
+        MODEL_DIR / "yolov12n-seg.onnx",
     ],
-    # geojson detection (uses same unified detector)
     "geojson": [
-        MODEL_DIR / "yolov8x.pt",    # main unified detector
-        MODEL_DIR / "yolo11x.pt",    # backup custom detector
+        MODEL_DIR / "yolov8x.pt",
+        MODEL_DIR / "yolo11x.pt",
     ],
-    # small / fast variants for live video & IoT
+    # ── SMALL / FAST VARIANTS ─────────────────────────────────
     "detect_small": [
-        MODEL_DIR / "yolov8n.pt",    # main small detector
-        MODEL_DIR / "yolo11n.pt",    # backup small detector
+        MODEL_DIR / "yolov8n.pt",
+        MODEL_DIR / "yolo11n.pt",
+        MODEL_DIR / "yolov12n.pt",
+        MODEL_DIR / "yolov8n.onnx",
+        MODEL_DIR / "yolo11n.onnx",
+        MODEL_DIR / "yolov12n.onnx",
     ],
     "heatmap_small": [
-        MODEL_DIR / "yolov8n-seg.pt",  # main small segmentation model
-        MODEL_DIR / "yolo11n-seg.pt",  # backup small segmentation model
+        MODEL_DIR / "yolov8n-seg.pt",
+        MODEL_DIR / "yolov8n-seg.onnx",
+        MODEL_DIR / "yolo11n-seg.pt",
+        MODEL_DIR / "yolo11n-seg.onnx",
+        MODEL_DIR / "yolov12n-seg.pt",
+        MODEL_DIR / "yolov12n-seg.onnx",
     ],
 }
+# ────────────────────────────────────────────────────────────
 
-__all__ = ["MODEL_DIR", "MODELS", "WEIGHT_PRIORITY"]
+
+__all__ = [
+    "MODEL_DIR",
+    "MODELS",
+    "WEIGHT_PRIORITY",
+    "geo_sink",
+    "heatmap_overlay",
+]
+
+_tests_path = ROOT / "tests" / "unit-tests" / "test_tasks.py"
+
+if _tests_path.exists():
+    _spec = _iu.spec_from_file_location("dronevision.test_tasks", _tests_path)
+    if _spec and _spec.loader:
+        _mod = _iu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sys.modules["dronevision.test_tasks"] = _mod

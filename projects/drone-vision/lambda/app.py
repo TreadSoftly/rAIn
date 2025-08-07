@@ -1,8 +1,4 @@
 # projects/drone-vision/lambda/app.py
-"""
-Standalone version of the production Lambda. This mirrors the dronevision package
-logic without requiring ONNX weights.
-"""
 from __future__ import annotations
 
 import base64
@@ -15,179 +11,144 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Sequence
 
-import boto3  # AWS SDK for S3 interactions
+import boto3                       # AWS SDK
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
-# Import YOLO model class if available
 try:
-    from ultralytics import YOLO  # type: ignore
+    from ultralytics import YOLO   # type: ignore
     _has_yolo = True
-except ImportError:  # pragma: no cover
-    YOLO = None  # type: ignore
+except ImportError:                # pragma: no cover
+    YOLO      = None               # type: ignore
     _has_yolo = False
 
-from dronevision.heatmap import heatmap_overlay  # type: ignore[import]
-
-# Local modules (packaged with Lambda)
-from .geo_sink import to_geojson  # type: ignore[import]
-
-# ───────────────────────── Load models once (cold start) ─────────────────────
-_BASE = Path(__file__).resolve().parent
-MODEL_DIR = Path(os.getenv("DRONEVISION_MODEL_PATH", _BASE / "model"))
+# ───────────────────────── paths / model init ────────────────────────────
+_BASE      = Path(__file__).resolve().parent
+MODEL_DIR  = Path(os.getenv("DRONEVISION_MODEL_PATH", _BASE / "model"))
 
 _det_model = None
 _seg_model = None
+
 if _has_yolo and YOLO is not None:
-    # Load primary detection model (preferring YOLOv8x, fallback to others)
+    # ── detection candidates (pt → onnx fallback) ───────────────────────
     for cand in (
-        MODEL_DIR / "yolov8x.pt",
-        MODEL_DIR / "yolo11x.pt",
-        MODEL_DIR / "yolov8n.pt",
-        MODEL_DIR / "yolo11n.pt",
+        "yolov8x.pt", "yolov8x.onnx",
+        "yolo11x.pt", "yolo11x.onnx",
+        "yolov12x.pt", "yolov12x.onnx",
+        "yolov8n.pt", "yolov8n.onnx",
+        "yolo11n.pt", "yolo11n.onnx",
+        "yolov12n.pt", "yolov12n.onnx",
     ):
-        if cand.exists():
-            _det_model = YOLO(str(cand))
-            break
-    # Load primary segmentation model if available
-    for cand in (
-        MODEL_DIR / "yolo11x-seg.pt",
-        MODEL_DIR / "yolo11m-seg.pt",
-        MODEL_DIR / "yolov8x-seg.pt",
-        MODEL_DIR / "yolov8s-seg.pt",
-        MODEL_DIR / "yolov8n-seg.pt",
-    ):
-        if cand.exists():
-            _seg_model = YOLO(str(cand))
+        p = MODEL_DIR / cand
+        if p.exists():
+            _det_model = YOLO(str(p))
             break
 
+    # ── segmentation candidates (first “*-seg.*” wins) ──────────────────
+    for p in sorted(MODEL_DIR.glob("*-seg.*")):
+        if p.suffix.lower() in {".pt", ".onnx"}:
+            _seg_model = YOLO(str(p))
+            break
 
-# ───────────────────────── Inference and drawing helpers ────────────────────
-def _fetch_image(url: str, timeout: int = 10) -> Image.Image:
-    """Fetch an image from URL or data URI and return as PIL Image."""
-    if url.startswith("data:"):
-        _, b64data = url.split(",", 1)
-        return Image.open(io.BytesIO(base64.b64decode(b64data))).convert("RGB")
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return Image.open(io.BytesIO(resp.read())).convert("RGB")
+# ───────────────────────── helpers ───────────────────────────────────────
+def _fetch_image(src: str, timeout: int = 10) -> Image.Image:
+    if src.startswith("data:"):
+        _, b64 = src.split(",", 1)
+        return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    req = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return Image.open(io.BytesIO(r.read())).convert("RGB")
 
 
-def run_inference(img: Image.Image, model: str = "drone") -> NDArray[np.float32]:
-    """
-    Run object detection on the image using the YOLO model.
-    Returns an array of detections [N,6] -> [x1, y1, x2, y2, conf, class_idx].
-    """
+def run_inference(img: Image.Image, model: str = "yolov8x") -> NDArray[np.float32]:
     if not _has_yolo or _det_model is None:
         return np.empty((0, 6), dtype=np.float32)
-    res = _det_model.predict(img, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore
-    boxes_data = getattr(getattr(res, "boxes", None), "data", None)
-    if boxes_data is None:
+
+    res = _det_model.predict(img, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
+    data = getattr(getattr(res, "boxes", None), "data", None)
+    if data is None:
         return np.empty((0, 6), dtype=np.float32)
+
     try:
         import torch  # type: ignore
-
-        if isinstance(boxes_data, torch.Tensor):
-            arr: NDArray[np.float32] = boxes_data.cpu().numpy().astype(np.float32)  # type: ignore
-        else:
-            arr: NDArray[np.float32] = np.asarray(boxes_data, dtype=np.float32)
-    except ImportError:  # pragma: no cover
-        arr = np.asarray(boxes_data, dtype=np.float32)
-    return arr.reshape(-1, 6) if arr.size else np.empty((0, 6), dtype=np.float32)
+        arr: NDArray[np.float32] = data.cpu().numpy() if isinstance(data, torch.Tensor) else np.asarray(data)
+    except ImportError:
+        arr = np.asarray(data)
+    return arr.astype(np.float32).reshape(-1, 6)
 
 
 def _draw_boxes(img: Image.Image, boxes: Sequence[Sequence[Any]]) -> Image.Image:
-    """Draw red bounding boxes with class labels and confidence on the image."""
-    draw = ImageDraw.Draw(img)
-    for det in boxes:
-        x1, y1, x2, y2, *rest = det
-        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        conf = rest[0] if rest else None
-        draw.rectangle((x1, y1, x2, y2), outline="red", width=3)
-        if conf is not None:
+    drw = ImageDraw.Draw(img)
+    for x1, y1, x2, y2, *rest in boxes:
+        x1, y1, x2, y2 = map(int, (x1, y1, x2, y2))
+        drw.rectangle((x1, y1, x2, y2), outline="red", width=3)
+        if rest:
+            conf = rest[0]
             label = f"{float(conf):.2f}"
             if len(rest) > 1 and _det_model is not None:
-                class_id = int(rest[1])
-                class_name = _det_model.names.get(class_id, "")
-                if class_name:
-                    label = f"{class_name} {float(conf):.2f}"
+                cls   = int(rest[1])
+                cname = _det_model.names.get(cls, "")
+                label = f"{cname} {conf:.2f}" if cname else label
             font = ImageFont.load_default()
-            text_bbox = draw.textbbox((0, 0), label, font=font)
-            text_w = text_bbox[2] - text_bbox[0]
-            text_h = text_bbox[3] - text_bbox[1]
-            tx = max(0, x1)
-            ty = max(0, y1 - text_h - 2)
-            draw.rectangle((tx, ty, tx + text_w + 2, ty + text_h + 2), fill="black")
-            draw.text((tx + 1, ty + 1), label, fill="red", font=font)
+            tw, th = drw.textbbox((0, 0), label, font=font)[2:]
+            ty = max(0, y1 - th - 2)
+            drw.rectangle((x1, ty, x1 + tw + 2, ty + th + 2), fill="black")
+            drw.text((x1 + 1, ty + 1), label, fill="red", font=font)
     return img
 
+# import late to avoid circulars
+from .geo_sink import to_geojson  # type: ignore
+from dronevision.heatmap import heatmap_overlay  # type: ignore
 
-# ───────────────────────── Lambda handler ─────────────────────────────────
-def handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
-    """AWS Lambda entry-point compatible with the unit-tests."""
+# ───────────────────────── Lambda entry‑point ────────────────────────────
+def handler(event: Dict[str, Any], _ctx: Any) -> Dict[str, Any]:
     try:
         body = json.loads(event["body"])
-        image_url = body["image_url"]
+        src  = body["image_url"]
         task = body.get("task", "detect").lower()
-        model = body.get("model", "drone").lower()
+        mdl  = body.get("model", "yolov8x").lower()
 
-        # ── GeoJSON: no need to download or infer ────────────────────────
+        # ── GeoJSON only --------------------------------------------------
         if task == "geojson":
-            geo = to_geojson(image_url, None)  # no boxes necessary
-            geo["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat(
-                timespec="seconds"
-            )
-
-            s3_bucket = os.getenv("GEO_BUCKET", "out")
+            geo = to_geojson(src, None)
+            geo["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
             key = f"detections/{_dt.date.today()}/{uuid.uuid4()}.geojson"
-
-            # Explicitly type the S3 client for better type checking
-            s3_client = boto3.client("s3") # type: ignore
-            s3_client.put_object(
-                Bucket=s3_bucket,
-                Key=key,
-                Body=json.dumps(geo).encode(),
+            boto3.client("s3").put_object(                      # type: ignore[attr-defined]
+                Bucket=os.getenv("GEO_BUCKET", "out"),
+                Key=key, Body=json.dumps(geo).encode(),
                 ContentType="application/geo+json",
             )
             return {"statusCode": 201, "body": json.dumps({"s3_key": key})}
 
-        # ── Detect / Heatmap: need the image (and maybe boxes) ───────────
-        img = _fetch_image(image_url)
-
-        # Allow tests to stub run_inference(img) (single-arg)
+        # ── fetch + infer -------------------------------------------------
+        img = _fetch_image(src)
         try:
-            boxes = run_inference(img, model)
-        except TypeError:
-            boxes = run_inference(img)
+            boxes = run_inference(img, mdl)        # normal path
+        except TypeError:                          # ← stub has only 1 param
+            boxes = run_inference(img)             # fallback for tests
 
+
+        # ── heat‑map ------------------------------------------------------
         if task == "heatmap":
-            overlay = heatmap_overlay(img, boxes=boxes if boxes.size else None)
-            out_img = (
-                overlay
-                if isinstance(overlay, Image.Image)
-                else Image.fromarray(np.uint8(overlay))
-            )
+            if _seg_model is not None:
+                try:
+                    res = _seg_model.predict(img, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
+                    if getattr(getattr(res, "masks", None), "data", None) is not None:
+                        img = Image.fromarray(heatmap_overlay(img))
+                except Exception:
+                    pass
             buf = io.BytesIO()
-            out_img.save(buf, format="JPEG")
-            return {
-                "statusCode": 200,
-                "isBase64Encoded": True,
-                "headers": {"Content-Type": "image/jpeg"},
-                "body": base64.b64encode(buf.getvalue()).decode(),
-            }
+            img.save(buf, format="JPEG")
+            return {"statusCode": 200, "body": base64.b64encode(buf.getvalue()).decode(),
+                    "isBase64Encoded": True}
 
-        # Default: task == "detect"
-        boxes_list = boxes.tolist() if hasattr(boxes, "tolist") else list(boxes or [])
-        annotated_img = _draw_boxes(img.copy(), boxes_list)
+        # ── detect (default) ---------------------------------------------
+        out = _draw_boxes(img.copy(), boxes.tolist())
         buf = io.BytesIO()
-        annotated_img.save(buf, format="JPEG")
-        return {
-            "statusCode": 200,
-            "isBase64Encoded": True,
-            "headers": {"Content-Type": "image/jpeg"},
-            "body": base64.b64encode(buf.getvalue()).decode(),
-        }
+        out.save(buf, format="JPEG")
+        return {"statusCode": 200, "body": base64.b64encode(buf.getvalue()).decode(),
+                "isBase64Encoded": True}
 
-    except Exception as exc:  # pragma: no cover
-        return {"statusCode": 500, "body": f"{exc.__class__.__name__}: {exc}"}
+    except Exception as exc:         # pragma: no cover
+        return {"statusCode": 500, "body": str(exc)}
