@@ -1,4 +1,3 @@
-
 """
 S3 ➜ Lambda (container image) ➜ API Gateway (binary JPEG)
 
@@ -45,8 +44,8 @@ class ArgosStack(Stack):
             self,
             "DetectorFn",
             code=_lambda.DockerImageCode.from_image_asset(
-                directory="../lambda",      # path to the lambda folder from cdk/
-                file="Dockerfile",
+                directory="..",             # build context = projects/argos
+                file="lambda/Dockerfile",   # Dockerfile within that context
                 exclude=[
                     ".git",
                     ".venv",

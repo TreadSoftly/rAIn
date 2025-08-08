@@ -1,15 +1,14 @@
-
 # panoptes/lambda_like.py
 """
-Lock‑down (2025‑08‑07)
+Lock-down (2025-08-07)
 ────────────────────────────────────────────────────────────────────
-* Uses the hard‑coded weights declared in *panoptes.model_registry*
-  only – **no** environment‑variable or directory scanning.
-* One detector + one segmenter are initialised at import‑time; if either
+* Uses the hard-coded weights declared in *panoptes.model_registry*
+  only – **no** environment-variable or directory scanning.
+* One detector + one segmenter are initialised at import-time; if either
   weight is missing the module raises *RuntimeError* immediately.
 * The optional *override=* path exposed by `load_detector/segmenter`
-  remains available for unit‑tests, but this file no longer tries to
-  read any env‑vars on its own.
+  remains available for unit-tests, but this file no longer tries to
+  read any env-vars on its own.
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
-# ── third‑party ──────────────────────────────────────────────────────────
+# ── third-party ──────────────────────────────────────────────────────────
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
@@ -35,7 +34,7 @@ from PIL import Image, ImageDraw, ImageFont
 # ── internal project imports ─────────────────────────────────────────────
 from .geo_sink import to_geojson
 from .heatmap import heatmap_overlay
-from .model_registry import load_detector, load_segmenter  # strict, hard‑coded
+from .model_registry import load_detector, load_segmenter  # strict, hard-coded
 
 # ─────────────────────────── paths & helpers ─────────────────────────────
 _BASE = Path(__file__).resolve().parent          # …/panoptes
@@ -50,12 +49,12 @@ except ImportError:                # pragma: no cover
     _has_yolo = False
 
 # ─────────────────────────── model initialisation ────────────────────────
-# NOTE: absolutely NO env‑var reads – weights come solely from model_registry
+# NOTE: absolutely NO env-var reads – weights come solely from model_registry
 _det_model = load_detector()       # may raise RuntimeError if missing
-_seg_model = load_segmenter()      # may raise RuntimeError if missing
+_seg_model = load_segmenter(small=True)      # may raise RuntimeError if missing  ← ONNX-first for seg
 
-# Expose the segmenter instance to the heat‑map helper so subsequent calls
-# avoid re‑loading the weight over and over.
+# Expose the segmenter instance to the heat-map helper so subsequent calls
+# avoid re-loading the weight over and over.
 try:
     import panoptes.heatmap as _hm
     setattr(_hm, "_seg_model", _seg_model)       # type: ignore[attr-defined]
@@ -78,7 +77,7 @@ def run_inference(
     """
     if not _has_yolo:
         raise RuntimeError("Ultralytics YOLO is not installed in this environment.")
-    # _det_model cannot be None – load_detector() hard‑fails when missing
+    # _det_model cannot be None – load_detector() hard-fails when missing
     res_list = _det_model.predict(img, imgsz=640, conf=conf_thr, verbose=False)  # type: ignore
     if not res_list:
         return np.empty((0, 6), dtype=np.float32)
@@ -159,7 +158,7 @@ def _is_remote(src: str) -> bool:
     return src.startswith(("http://", "https://", "data:"))
 
 
-# ─────────────────────────── public entry‑point ─────────────────────────
+# ─────────────────────────── public entry-point ─────────────────────────
 def run_single(                          # noqa: C901 – core worker
     src: Union[str, os.PathLike[str]],
     *,
@@ -222,7 +221,7 @@ def run_single(                          # noqa: C901 – core worker
             print(f"★ wrote {out_path}")
         return
 
-    # ── HEAT‑MAP mode ────────────────────────────────────────────────────────
+    # ── HEAT-MAP mode ────────────────────────────────────────────────────────
     if task == "heatmap":
         alpha_val = float(hm_kwargs.get("alpha", 0.4))
         overlay_result = heatmap_overlay(

@@ -5,7 +5,7 @@ on:
     paths:
       - "projects/argos/**"
       - "installers/**"
-      - ".github/workflows/argos-ci.yml"
+      - ".github/workflows/argos-ci.yaml" # ← fixed
   pull_request:
     paths:
       - "projects/argos/**"
@@ -45,13 +45,13 @@ jobs:
       - name: Install ffmpeg
         run: choco install ffmpeg -y
 
-      # Run the same style of checks you do locally (PS1 wrappers)
-      - name: Run Argos checks
+      # Run the checks via the module entrypoint (no private venv)
+      - name: Run Argos checks (direct CLI)
         run: |
-          ./installers/detect.ps1 whereischair.jpg
-          ./installers/hm.ps1 camo.webp
-          ./installers/geojson.ps1 fuji.jpg
-          ./installers/d.ps1 bunny.mp4
+          python -m panoptes.cli whereischair.jpg d
+          python -m panoptes.cli camo.webp hm
+          python -m panoptes.cli fuji.jpg gj
+          python -m panoptes.cli bunny.mp4 d
 
       - name: Upload results
         uses: actions/upload-artifact@v4

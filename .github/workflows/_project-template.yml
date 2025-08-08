@@ -1,3 +1,4 @@
+# .github/workflows/_project-template.yml
 name: Deploy Monorepo Project
 
 on:
@@ -10,7 +11,7 @@ on:
 
 permissions:
   id-token: write # OIDC → AWS
-  contents: read # repo checkout
+  contents: read  # repo checkout
 
 env:
   AWS_REGION: us-east-1 # change if you deploy elsewhere
@@ -44,39 +45,7 @@ jobs:
         run: npm install -g aws-cdk@2
 
       # ────────────────────────────────────────────────────────────────
-      # 3) Build & push Lambda image
-      # ────────────────────────────────────────────────────────────────
-      - name: Build & push Lambda image
-        env:
-          IMAGE_NAME: ${{ github.run_id }}-${{ github.sha }}
-        run: |
-          PROJECT_DIR="${{ inputs.project-dir }}"            # e.g. projects/argos
-          PROJECT=$(basename "$PROJECT_DIR")                 # → argos
-          REPO_NAME="${PROJECT}-lambda"
-
-          # ensure ECR repo exists
-          aws ecr describe-repositories --repository-names "$REPO_NAME" \
-            || aws ecr create-repository --repository-name "$REPO_NAME"
-
-          AWS_ID=$(aws sts get-caller-identity --query Account --output text)
-          REGISTRY="$AWS_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
-
-          # 🚨 build context is the PROJECT DIR, not lambda/
-          docker build -t "$REPO_NAME" \
-            -f "$PROJECT_DIR/lambda/Dockerfile" \
-            "$PROJECT_DIR"
-
-          docker tag "$REPO_NAME:latest" "$REGISTRY/$REPO_NAME:latest"
-
-          # login & push
-          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
-          docker push "$REGISTRY/$REPO_NAME:latest"
-
-          echo "IMAGE_URI=$REGISTRY/$REPO_NAME:latest" >> $GITHUB_ENV
-        shell: bash
-
-      # ────────────────────────────────────────────────────────────────
-      # 4) CDK deploy using that image
+      # 3) CDK deploy (CDK builds the Docker asset itself)
       # ────────────────────────────────────────────────────────────────
       - name: Install Python deps for CDK app
         working-directory: ${{ inputs.project-dir }}
@@ -88,6 +57,4 @@ jobs:
 
       - name: CDK deploy
         working-directory: ${{ inputs.project-dir }}
-        env:
-          IMAGE_URI: ${{ env.IMAGE_URI }}
         run: cdk deploy --require-approval never

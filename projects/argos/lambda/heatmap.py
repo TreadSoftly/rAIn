@@ -1,16 +1,15 @@
-
 # projects/argos/lambda/heatmap.py
 """
-lambda.heatmap  – server‑side segmentation overlay helper
+lambda.heatmap  – server-side segmentation overlay helper
 =========================================================
 
-Lock‑down (2025‑08‑07)
+Lock-down (2025-08-07)
 ────────────────────────────────────────────────────────────────────────
 * **Strict weights** – only the path(s) declared in
   `panoptes.model_registry.WEIGHT_PRIORITY["heatmap"]` are consulted.
-* A segmentation model is loaded once, at import‑time, via
+* A segmentation model is loaded once, at import-time, via
   `load_segmenter()`; if the weight is missing the **module import aborts**
-  with *RuntimeError*, surfacing a clear cold‑start error in Lambda.
+  with *RuntimeError*, surfacing a clear cold-start error in Lambda.
 * Public API is unchanged:
 
       heatmap_overlay(img, *, boxes=None, masks=None, **kw) → np.ndarray[BGR]
@@ -30,7 +29,7 @@ from panoptes.model_registry import load_segmenter
 
 # ───────────────────────── single, authoritative model ──────────────────────────
 # Any weight issue will raise *RuntimeError* here, stopping import immediately.
-_seg_model = load_segmenter()          # ← hard‑fails if weight/YOLO missing
+_seg_model = load_segmenter(small=True)          # ← ONNX-first in Lambda; hard-fail if missing
 
 __all__ = ["heatmap_overlay"]
 
@@ -43,21 +42,21 @@ def heatmap_overlay(
     **kw: Any,
 ) -> np.ndarray[Any, Any]:
     """
-    Overlay YOLO‑Seg instance masks + labels on *img* and return a **BGR**
+    Overlay YOLO-Seg instance masks + labels on *img* and return a **BGR**
     ndarray ready for OpenCV / video encoding.
 
     Parameters
     ----------
     img
         • `PIL.Image.Image`
-        • path‑like object
+        • path-like object
         • raw **BGR** `np.ndarray`
-        • placeholder *(w, h)* tuple (creates a blank canvas – useful in tests)
+        • placeholder *(w, h)* tuple (creates a blank canvas – useful in tests)
     boxes, masks
-        Accepted for forward‑compatibility but ignored – the segmentation model
+        Accepted for forward-compatibility but ignored – the segmentation model
         is fully responsible for mask generation.
     **kw
-        Ignored; accepted to preserve call‑sites that may pass extra kwargs.
+        Ignored; accepted to preserve call-sites that may pass extra kwargs.
 
     Notes
     -----

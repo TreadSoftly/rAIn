@@ -1,17 +1,16 @@
-
 # projects/argos/lambda/app.py
 """
-AWS‑Lambda entry‑point for the Argos demo
+AWS-Lambda entry-point for the Argos demo
 ===============================================
 
-Lock‑down (2025‑08‑07)
+Lock-down (2025-08-07)
 ────────────────────────────────────────────────────────────────────
 * **Strict weights** – the only files ever consulted are those
   referenced in `panoptes.model_registry.WEIGHT_PRIORITY`.
 * No `panoptes_*` environment variables, no directory walks.
-* One detector + one segmenter are initialised at import‑time; if either
+* One detector + one segmenter are initialised at import-time; if either
   weight is missing **module import fails** (raises *RuntimeError*),
-  surfacing a clear cold‑start error in the Lambda logs.
+  surfacing a clear cold-start error in the Lambda logs.
 * Public request/response JSON schema remains unchanged.
 """
 
@@ -27,28 +26,28 @@ import urllib.request
 import uuid
 from typing import Any, Dict, Sequence
 
-# ── third‑party ────────────────────────────────────────────────────────
+# ── third-party ────────────────────────────────────────────────────────
 import boto3  # AWS SDK
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
-from panoptes.heatmap import heatmap_overlay  # type: ignore
+from .heatmap import heatmap_overlay  # local helper tied to ONNX/“small”
 
 # ── internal project imports ──────────────────────────────────────────
 from panoptes.model_registry import (
-    load_detector,  # single source‑of‑truth
+    load_detector,  # single source-of-truth
     load_segmenter,
 )
 from .geo_sink import to_geojson  # type: ignore
 
-# ───────────────────────── hard‑fail model initialisation ─────────────
-_det_model = load_detector()    # raises RuntimeError if weight missing
-_seg_model = load_segmenter()   # raises RuntimeError if weight missing
+# ───────────────────────── hard-fail model initialisation ─────────────
+_det_model = load_detector(small=True)    # raises RuntimeError if weight missing
+_seg_model = load_segmenter(small=True)   # raises RuntimeError if weight missing
 
 # ───────────────────────── helpers ────────────────────────────────────
 def _fetch_image(src: str, timeout: int = 10) -> Image.Image:
-    """Download data‑URI or remote image → RGB Pillow image."""
+    """Download data-URI or remote image → RGB Pillow image."""
     if src.startswith("data:"):
         _, b64 = src.split(",", 1)
         return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
@@ -80,7 +79,7 @@ def _run_inference(img: Image.Image) -> NDArray[np.float32]:
     return arr.astype(np.float32).reshape(-1, 6)
 
 
-# ✨ PUBLIC alias – unit‑tests monkey‑patch this symbol directly
+# ✨ PUBLIC alias – unit-tests monkey-patch this symbol directly
 run_inference = _run_inference  # noqa: E305
 
 def _draw_boxes(img: Image.Image, boxes: Sequence[Sequence[Any]]) -> Image.Image:
@@ -132,7 +131,7 @@ def handler(event: Dict[str, Any], _ctx: Any) -> Dict[str, Any]:
         img   = _fetch_image(src)
         boxes = run_inference(img)
 
-        # ── heat‑map (true masks) ─────────────────────────────────────
+        # ── heat-map (true masks) ─────────────────────────────────────
         if task == "heatmap":
             try:
                 res = _seg_model.predict(img, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]

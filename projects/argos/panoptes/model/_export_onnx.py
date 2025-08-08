@@ -1,5 +1,8 @@
-from ultralytics import YOLO
-import os, sys, glob, shutil
+from ultralytics import YOLO # type: ignore
+import os
+import sys
+import glob
+import shutil
 targets = [p for p in sys.argv[1:] if os.path.exists(p)]
 print('Exporting to ONNX:', targets)
 for p in targets:
