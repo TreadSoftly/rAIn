@@ -1,5 +1,0 @@
-# projects/drone-vision/lambda/requirements.txt
-onnxruntime==1.16.3
-numpy==1.26.4
-pillow==11.3.0
-opencv-python-headless==4.10.0.82

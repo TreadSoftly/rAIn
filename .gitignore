@@ -25,18 +25,18 @@ projects/**/model/*.onnx
 *.onnx                 # catch any stray upload
 
 #     ··· KEEP THESE WEIGHTS ···
-!projects/drone-vision/lambda/model/
-!projects/drone-vision/lambda/model/*.onnx
-!projects/drone-vision/model/
-!projects/drone-vision/model/*.pt
-!projects/drone-vision/model/*.onnx
-!projects/drone-vision/model/*.yml
+!projects/argos/lambda/model/
+!projects/argos/lambda/model/*.onnx
+!projects/argos/panoptes/model/
+!projects/argos/panoptes/model/*.pt
+!projects/argos/panoptes/model/*.onnx
+!projects/argos/panoptes/model/*.yml
 
 # ── Test / coverage artefacts ───────────────────────────────────────────────
 .pytest_cache/
 .coverage
 htmlcov/
-projects/drone-vision/tests/results/         # per-run outputs only
+projects/argos/tests/results/         # per-run outputs only
 
 # ── Build / packaging outputs ───────────────────────────────────────────────
 build/
@@ -63,5 +63,5 @@ projects/**/.vscode/
 Thumbs.db
 
 # ── Historical artefacts we no longer need ──────────────────────────────────
-projects/drone-vision/requirements-py39.txt
+projects/argos/requirements-py39.txt
 ###############################################################################

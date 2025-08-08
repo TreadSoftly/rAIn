@@ -1,7 +1,0 @@
-# projects/drone-vision/lambda/.dockerignore
-**/__pycache__
-**/*.pt
-**/.git
-**/.gitignore
-*.jpg
-*.png

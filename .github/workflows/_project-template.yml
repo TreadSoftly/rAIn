@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       project-dir:
-        description: "Path like projects/drone-vision"
+        description: "Path like projects/argos"
         required: true
         type: string
 
@@ -50,8 +50,8 @@ jobs:
         env:
           IMAGE_NAME: ${{ github.run_id }}-${{ github.sha }}
         run: |
-          PROJECT_DIR="${{ inputs.project-dir }}"            # e.g. projects/drone-vision
-          PROJECT=$(basename "$PROJECT_DIR")                 # → drone-vision
+          PROJECT_DIR="${{ inputs.project-dir }}"            # e.g. projects/argos
+          PROJECT=$(basename "$PROJECT_DIR")                 # → argos
           REPO_NAME="${PROJECT}-lambda"
 
           # ensure ECR repo exists

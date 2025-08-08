@@ -1,7 +1,15 @@
 * text=auto
 .gitattributes text eol=lf
 
-# all models go through Git LFS
+# Force LF for POSIX launchers so CRLF never sneaks in
+installers/run   text eol=lf
+installers/argos text eol=lf
+*.sh             text eol=lf
+
+# Windows launchers keep CRLF
+*.ps1            text eol=crlf
+*.cmd            text eol=crlf
+
+# All models go through Git LFS
 *.pt   filter=lfs diff=lfs merge=lfs -text
 *.onnx filter=lfs diff=lfs merge=lfs -text
-*.pt filter=lfs diff=lfs merge=lfs -text

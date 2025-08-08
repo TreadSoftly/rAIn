@@ -1,4 +1,4 @@
-name: Drone-Vision CI
+name: Argos CI
 
 on: [push, pull_request]
 
@@ -23,12 +23,12 @@ jobs:
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          pip install -e "projects/drone-vision[dev]"
+          pip install -e "projects/argos[dev]"
 
       # ─────────────────────────────────────────────────────
       - name: Unit tests
-        run: pytest -q projects/drone-vision/tests
+        run: pytest -q projects/argos/tests
 
       - name: Show tree (debug)
         run: |
-          tree -L 2 projects/drone-vision || true
+          tree -L 2 projects/argos || true

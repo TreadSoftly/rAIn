@@ -1,0 +1,176 @@
+"""
+panoptes.model_registry
+--------------------------
+*Single* source-of-truth for every weight-selection decision.
+
+Hard-locking rules (2025-08-07)
+────────────────────────────────────────────────────────────────────────
+1. **Only** the paths listed in ``WEIGHT_PRIORITY`` are ever considered.
+2. No directory scans, no implicit “-seg” discovery, no env-variable
+   overrides (`panoptes_*`).  The *override=* argument in
+   ``load_detector/segmenter`` is retained exclusively for unit-tests or
+   ad-hoc scripts that call those helpers **directly**.
+3. If a required weight is missing we raise **RuntimeError** immediately
+   – downstream code must catch or let the program abort.
+"""
+
+from __future__ import annotations
+
+import functools
+from pathlib import Path
+from typing import Final, Literal, Optional
+
+# ────────────────────────────────────────────────────────────────
+#  Ultralytics import (kept soft so linting works without it)
+# ────────────────────────────────────────────────────────────────
+try:
+    from ultralytics import YOLO  # type: ignore
+except ImportError:  # pragma: no cover
+    YOLO = None  # type: ignore[assignment]
+
+# ────────────────────────────────────────────────────────────────
+#  Canonical model folders
+# ────────────────────────────────────────────────────────────────
+_ROOT: Final[Path] = Path(__file__).resolve().parent           # …/panoptes
+_MODEL_DIR_A = _ROOT / "model"                                 # packaged weights (preferred)
+_MODEL_DIR_B = _ROOT.parent / "model"                          # legacy path (fallback)
+
+MODEL_DIR: Final[Path] = _MODEL_DIR_A if _MODEL_DIR_A.exists() else _MODEL_DIR_B
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+# ────────────────────────────────────────────────────────────────
+#  *** WEIGHT SELECTION TABLE ***
+#  Edit this ONE place if you add/rename checkpoints
+#
+#  Only list **real** upstream files you actually keep in panoptes/model.
+#  (No placeholders. No names that don’t exist.)
+# ────────────────────────────────────────────────────────────────
+WEIGHT_PRIORITY: dict[str, list[Path]] = {
+    # ── Object-detection (YOLO-v8/v11/v12 subset) ───────────────────────────
+    # Prefer newest/largest when available; fall back through real tiny models.
+    "detect": [
+        MODEL_DIR / "yolov12x.pt",
+        MODEL_DIR / "yolo11x.pt",
+        MODEL_DIR / "yolov8x.pt",
+        MODEL_DIR / "yolov12n.pt",
+        MODEL_DIR / "yolo11n.pt",
+        MODEL_DIR / "yolov8n.pt",
+    ],
+    # "geojson" uses same detector priority
+    "geojson": [
+        MODEL_DIR / "yolov12x.pt",
+        MODEL_DIR / "yolo11x.pt",
+        MODEL_DIR / "yolov8x.pt",
+        MODEL_DIR / "yolov12n.pt",
+        MODEL_DIR / "yolo11n.pt",
+        MODEL_DIR / "yolov8n.pt",
+    ],
+
+    # ── Instance-segmentation (YOLO-Seg) ───────────────────────────────────
+    # Prefer v12 seg (s) you actually have, then v11, then v8.
+    "heatmap": [
+        MODEL_DIR / "yolov12s-seg.pt",
+        MODEL_DIR / "yolo11x-seg.pt",
+        MODEL_DIR / "yolo11s-seg.pt",
+        MODEL_DIR / "yolo11n-seg.pt",
+        MODEL_DIR / "yolov8x-seg.pt",
+        MODEL_DIR / "yolov8n-seg.pt",
+    ],
+
+    # ── “--small / --fast” CLI flags (optional) ────────────────────────────
+    # Keep small variants CPU-friendly: prefer tiny .onnx where present.
+    "detect_small": [
+        MODEL_DIR / "yolov12n.onnx",
+        MODEL_DIR / "yolo11n.onnx",
+        MODEL_DIR / "yolov8n.onnx",
+        MODEL_DIR / "yolov12n.pt",
+        MODEL_DIR / "yolo11n.pt",
+        MODEL_DIR / "yolov8n.pt",
+    ],
+    "heatmap_small": [
+        MODEL_DIR / "yolov12s-seg.onnx",
+        MODEL_DIR / "yolo11n-seg.onnx",
+        MODEL_DIR / "yolov8n-seg.onnx",
+        MODEL_DIR / "yolov12s-seg.pt",
+        MODEL_DIR / "yolo11n-seg.pt",
+        MODEL_DIR / "yolov8n-seg.pt",
+    ],
+}
+
+# ────────────────────────────────────────────────────────────────
+#  Internal helpers
+# ────────────────────────────────────────────────────────────────
+def _first_existing(paths: list[Path]) -> Optional[Path]:
+    """Return the first path that exists on disk or *None*."""
+    return next((p for p in paths if p.exists()), None)
+
+
+@functools.lru_cache(maxsize=None)
+def _load(weight: Optional[Path]):
+    """
+    Cached wrapper around ``YOLO(path)``
+
+    Returns
+    -------
+    YOLO | None
+        *None* when either Ultralytics is unavailable **or** *weight* is
+        ``None`` (i.e. no candidate file exists).
+    """
+    if YOLO is None or weight is None:
+        return None
+    return YOLO(str(weight))  # type: ignore[arg-type]
+
+
+def _require(model: object | None, task: str):
+    """
+    Abort loudly when the chosen weight is missing.
+
+    The whole code-base relies on this hard failure to surface configuration
+    mistakes at import-time rather than during inference.
+    """
+    if model is None:
+        raise RuntimeError(f"[model_registry] no weight configured for task “{task}”")
+    return model
+
+# ────────────────────────────────────────────────────────────────
+#  Public helpers
+# ────────────────────────────────────────────────────────────────
+def pick_weight(task: Literal["detect", "heatmap", "geojson"], *, small: bool = False) -> Optional[Path]:
+    """
+    Return the path to the **first** existing weight for *task* or *None*.
+
+    When *small=True* the *_small* key is used (falls back to normal key
+    if not defined).
+    """
+    key = f"{task}_small" if small else task
+    return _first_existing(WEIGHT_PRIORITY.get(key, []))
+
+
+def load_detector(*, small: bool = False, override: str | Path | None = None):
+    """Return a *YOLO* detector – honouring the override when provided."""
+    model = (
+        _load(Path(override).expanduser())
+        if override is not None
+        else _load(pick_weight("detect", small=small))
+    )
+    return _require(model, "detect")
+
+
+def load_segmenter(*, small: bool = False, override: str | Path | None = None):
+    """Return a *YOLO-Seg* model – abort if no suitable weight is found."""
+    model = (
+        _load(Path(override).expanduser())
+        if override is not None
+        else _load(pick_weight("heatmap", small=small))
+    )
+    return _require(model, "heatmap")
+
+
+# Re-export for “from panoptes import *”
+__all__ = [
+    "MODEL_DIR",
+    "WEIGHT_PRIORITY",
+    "pick_weight",
+    "load_detector",
+    "load_segmenter",
+]
