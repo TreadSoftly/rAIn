@@ -13,3 +13,9 @@ installers/argos text eol=lf
 # All models go through Git LFS
 *.pt   filter=lfs diff=lfs merge=lfs -text
 *.onnx filter=lfs diff=lfs merge=lfs -text
+
+# POSIX launchers must be LF
+/run text eol=lf
+/argos text eol=lf
+/projects/argos/run text eol=lf
+/projects/argos/argos text eol=lf
