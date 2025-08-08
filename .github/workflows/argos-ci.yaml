@@ -1,0 +1,60 @@
+name: Argos Smoke (Windows)
+
+on:
+  push:
+    paths:
+      - "projects/argos/**"
+      - "installers/**"
+      - ".github/workflows/argos-ci.yml"
+  pull_request:
+    paths:
+      - "projects/argos/**"
+      - "installers/**"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout (with LFS)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            projects/argos/requirements.txt
+            projects/argos/pyproject.toml
+
+      - name: Install project (editable)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "projects/argos[dev]"
+
+      # Optional but nice: clean MP4 re-encode in video steps
+      - name: Install ffmpeg
+        run: choco install ffmpeg -y
+
+      # Run the same style of checks you do locally (PS1 wrappers)
+      - name: Run Argos checks
+        run: |
+          ./installers/detect.ps1 whereischair.jpg
+          ./installers/hm.ps1 camo.webp
+          ./installers/geojson.ps1 fuji.jpg
+          ./installers/d.ps1 bunny.mp4
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: argos-results
+          path: projects/argos/tests/results/**
