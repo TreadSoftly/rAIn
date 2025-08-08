@@ -8,6 +8,19 @@ PROJ_DIR="$ROOT/projects"
 
 lower(){ tr '[:upper:]' '[:lower:]'; }
 
+ensure_git_lfs() {
+  if command -v git >/dev/null 2>&1; then
+    if git lfs version >/dev/null 2>&1; then
+      # Initialize LFS in this repo and fetch large files
+      git -C "$ROOT" lfs install --local >/dev/null 2>&1 || true
+      GIT_LFS_SKIP_SMUDGE=0 git -C "$ROOT" lfs pull >/dev/null 2>&1 || true
+    else
+      echo "⚠️  Git LFS not installed. Large files (models) may be missing."
+      echo "    Install Git LFS and re-run this command."
+    fi
+  fi
+}
+
 # Collect args → infer project + pass-through tokens
 proj=""
 tokens=()
@@ -36,6 +49,9 @@ if [[ -z "${proj:-}" ]]; then
     exit 2
   fi
 fi
+
+# Always make sure LFS content is present before bootstrapping
+ensure_git_lfs
 
 # Dispatch to project bootstrap + CLI
 if [[ "$proj" == "argos" ]]; then
