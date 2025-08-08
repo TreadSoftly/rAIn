@@ -44,7 +44,7 @@ class ArgosStack(Stack):
             self,
             "DetectorFn",
             code=_lambda.DockerImageCode.from_image_asset(
-                directory="..",             # build context = projects/argos
+                directory=".",              # build context = projects/argos  ✅ fixed
                 file="lambda/Dockerfile",   # Dockerfile within that context
                 exclude=[
                     ".git",

@@ -1,4 +1,3 @@
-
 # ───────── Inference / CLI (desktop, CI, ECS, etc.) ─────────
 torch==2.3.*                # 2.3 is current LTS (2025-05) – pins CUDA & CPU wheels
 torchvision==0.18.*         # must match torch major.minor
@@ -7,6 +6,7 @@ ultralytics==8.*            # model zoo & CLI – 8.x series is still active
 # ONNX Runtime – oldest wheel that still supports ManyLinux2014 *and*
 # latest that supports NumPy 1.x (Lambda wheels stay on 1.x for now)
 onnxruntime==1.23.*
+onnx>=1.18
 
 opencv-python-headless>=4.10,<4.12  # avoid NumPy 2 ABI jump
 numpy<2

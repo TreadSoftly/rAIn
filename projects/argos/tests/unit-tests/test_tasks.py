@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
-# ── third‑party ─────────────────────────────────────────────────────
+# ── third-party ─────────────────────────────────────────────────────
 import boto3
 import cv2
 import numpy as np
@@ -22,14 +22,14 @@ from ultralytics import YOLO  # type: ignore
 from lambda_function import app as lam  # type: ignore
 
 try:
-    from moto import mock_s3  # Moto 4 / 5
+    from moto import mock_s3  # Moto 4 / 5
 except ImportError:  # pragma: no cover
     from moto import mock_s3  # type: ignore
 
-from panoptes.model_registry import MODEL_DIR as _MODEL_DIR      # ← single source‑of‑truth
+from panoptes.model_registry import MODEL_DIR as _MODEL_DIR      # ← single source-of-truth
 
 # ────────────────────────────────────────────────────────────────────
-# ❶  Lambda‑handler unit tests
+# ❶  Lambda-handler unit tests
 # ────────────────────────────────────────────────────────────────────
 def _evt(img: Image.Image, task: str = "detect") -> Dict[str, str]:
     buf = io.BytesIO()
@@ -171,7 +171,7 @@ def main() -> None:  # pragma: no cover
             continue
 
         if src.suffix.lower() == ".avif":
-            print(f"  {src.name}  (heat‑map only)", end="")
+            print(f"  {src.name}  (heat-map only)", end="")
             _run_cli(str(src), task="heatmap"); print("")
             continue
 
@@ -184,7 +184,7 @@ def main() -> None:  # pragma: no cover
         else:
             print("")
 
-    print("\n→ GeoJSON sanity‑checks…\n")
+    print("\n→ GeoJSON sanity-checks…\n")
     for url in _GEO_URLS:
         print(f"  {url.split('#')[0].rsplit('/',1)[-1]}", end="")
         _run_cli(url, task="geojson"); print("")
@@ -192,11 +192,9 @@ def main() -> None:  # pragma: no cover
     print(f"\nAll done → outputs in {RES}")
 
 # pytest hook
+@pytest.mark.skipif(not RAW.exists(), reason="tests/raw is absent; skipping bulk annotation")
 def test_bulk_annotation() -> None:
-    try:
-        main()
-    except Exception as exc:
-        pytest.fail(f"bulk annotation helper failed: {exc}")
+    main()
 
 if __name__ == "__main__":  # pragma: no cover
     main()
