@@ -11,7 +11,6 @@ lower(){ tr '[:upper:]' '[:lower:]'; }
 ensure_git_lfs() {
   if command -v git >/dev/null 2>&1; then
     if git lfs version >/dev/null 2>&1; then
-      # Initialize LFS in this repo and fetch large files
       git -C "$ROOT" lfs install --local >/dev/null 2>&1 || true
       GIT_LFS_SKIP_SMUDGE=0 git -C "$ROOT" lfs pull >/dev/null 2>&1 || true
     else
@@ -28,7 +27,7 @@ while (($#)); do
   t="$1"; shift
   lt="$(printf '%s' "$t" | lower)"
   case "$lt" in
-    run|me) ;;                                         # ignore fluff words
+    run|me) ;;  # ignore fluff words
     argos|argos:run|run:argos) proj="argos" ;;
     *) tokens+=("$t") ;;
   esac
