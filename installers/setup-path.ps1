@@ -1,4 +1,5 @@
-﻿[CmdletBinding()] param()
+﻿[CmdletBinding()]
+param()
 $ErrorActionPreference = "Stop"
 
 $HERE = Split-Path -Parent $MyInvocation.MyCommand.Path

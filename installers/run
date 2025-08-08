@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-# Absolute paths
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 PROJ_DIR="$ROOT/projects"
 
-lower(){ tr '[:upper:]' '[:lower:]'; }
-
+# Ensure Git LFS is set up
 ensure_git_lfs() {
   if command -v git >/dev/null 2>&1; then
     if git lfs version >/dev/null 2>&1; then
       git -C "$ROOT" lfs install --local >/dev/null 2>&1 || true
       GIT_LFS_SKIP_SMUDGE=0 git -C "$ROOT" lfs pull >/dev/null 2>&1 || true
     else
-      echo "⚠️  Git LFS not installed. Large files (models) may be missing."
+      echo "⚠️ Git LFS not installed. Large files (models) may be missing."
       echo "    Install Git LFS and re-run this command."
     fi
   fi
