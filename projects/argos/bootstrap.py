@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Argos bootstrap – zero‑touch, idempotent, fast.
+Argos bootstrap – zero-touch, idempotent, fast.
 
 What it does (one-time on first run):
   • creates a private venv OUTSIDE the repo (no .venv mess)
   • auto-selects CPU-only Torch when CUDA isn’t present
   • installs your project in editable mode (+dev extras)
-  • fetches ONLY the detector + segmenter weights via Ultralytics (no git/LFS)
+  • fetches model weights via Ultralytics (no git/LFS)
+    - preset: all | default | nano (ARGOS_WEIGHT_PRESET)
+    - or interactively: pick specific files from a list
+    - exports missing .onnx from matching .pt when needed
   • writes portable launchers:  argos  |  argos.ps1  |  argos.cmd
     (they call this file to --ensure, then run the CLI with the venv python)
   • relocates pytest cache outside the repo
@@ -192,74 +195,138 @@ def _pip_install_editable_if_needed() -> None:
     _run([str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + "[dev]"], check=True, capture=False)
 
 # ──────────────────────────────────────────────────────────────
-# Models – Ultralytics-only download of EXACT files you list
+# Weights helpers
 # ──────────────────────────────────────────────────────────────
-def _ensure_weights_ultralytics() -> None:
-    """
-    Ensures the top detector + segmenter in panoptes/model_registry exist.
-    Never touches Git/LFS; downloads by official Ultralytics names only.
-    """
+def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str]]:
+    """Return (model_dir, all_names, default_names, nano_names) from registry."""
     probe = r"""
 import json
 from pathlib import Path
-from panoptes.model_registry import MODEL_DIR, pick_weight, WEIGHT_PRIORITY
-det = pick_weight('detect')  or (WEIGHT_PRIORITY.get('detect')  or [None])[0]
-seg = pick_weight('heatmap') or (WEIGHT_PRIORITY.get('heatmap') or [None])[0]
+from panoptes.model_registry import MODEL_DIR, WEIGHT_PRIORITY
+
+def uniq(xs):
+    seen=set(); out=[]
+    for x in xs:
+        if x and x not in seen:
+            seen.add(x); out.append(x)
+    return out
+
+all_names=[]
+for _, paths in WEIGHT_PRIORITY.items():
+    for p in paths: all_names.append(Path(p).name)
+
+def first_or_none(lst): return lst[0] if lst else None
+detect_first  = first_or_none(WEIGHT_PRIORITY.get('detect', []))
+heatmap_first = first_or_none(WEIGHT_PRIORITY.get('heatmap', []))
+
+default_names = [Path(detect_first).name if detect_first else None,
+                 Path(heatmap_first).name if heatmap_first else None]
+
+nano_names = [Path(p).name for p in WEIGHT_PRIORITY.get('detect_small', []) +
+                               WEIGHT_PRIORITY.get('heatmap_small', [])]
+
 print(json.dumps({'model_dir': str(MODEL_DIR),
-                'det': str(det) if det else None,
-                'seg': str(seg) if seg else None}))
+                  'all': uniq(all_names),
+                  'default': uniq(default_names),
+                  'nano': uniq(nano_names)}))
 """
     cp = _run([str(VPY), "-c", probe], check=True, capture=True)
-    info: str = cp.stdout.strip()
-    meta: dict[str, Optional[str]] = json.loads(info)
-    model_dir = Path(meta["model_dir"] or ".").resolve()
-    det_s = meta.get("det")
-    seg_s = meta.get("seg")
-    want_det: Optional[Path] = Path(det_s) if det_s is not None else None
-    want_seg: Optional[Path] = Path(seg_s) if seg_s is not None else None
+    meta = json.loads(cp.stdout.strip())
+    return Path(meta["model_dir"]).resolve(), list(meta["all"]), list(meta["default"]), list(meta["nano"])
 
-    missing: list[Path] = [p for p in (want_det, want_seg) if p is not None and not p.exists()]  # type: ignore[arg-type]
-    if not missing:
+def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names: Optional[list[str]] = None) -> None:
+    """
+    Ensure weights exist under panoptes.model_registry.WEIGHT_PRIORITY.
+
+    Preset (env or arg):
+      - "all"     → everything listed (default)
+      - "default" → first detect + first heatmap
+      - "nano"    → detect_small + heatmap_small
+
+    • Downloads *.pt via Ultralytics
+    • Builds missing *.onnx by exporting from the matching *.pt
+    """
+    model_dir, all_names, default_names, nano_names = _probe_weight_presets()
+
+    # choose names
+    env_preset = (os.getenv("ARGOS_WEIGHT_PRESET") or "").strip().lower()
+    choice = (preset or env_preset or "all").lower()
+    if explicit_names is not None:
+        want_names = [n for n in explicit_names if n]
+    else:
+        if choice not in {"all", "default", "nano"}:
+            choice = "all"
+        want_names = {"all": all_names, "default": default_names, "nano": nano_names}[choice]
+
+    need = [n for n in want_names if n and not (model_dir / n).exists()]
+    if not need:
         _print("→ model weights present.")
         return
 
+    # Ultralytics for fetching/exporting
     if not _module_present("ultralytics"):
-        # last-resort safety – should already be installed by -e .[dev]
         _run([str(VPY), "-m", "pip", "install", "ultralytics>=8.0"], check=True, capture=False)
 
-    _print("→ fetching weights via Ultralytics (selected only) …")
-    dl = r"""
+    pt_missing   = [n for n in need if n.lower().endswith(".pt")]
+    onnx_missing = [n for n in need if n.lower().endswith(".onnx")]
+
+    # fetch *.pt
+    if pt_missing:
+        _print(f"→ fetching {len(pt_missing)} *.pt via Ultralytics …")
+        dl_pt = r"""
 import sys, shutil
 from pathlib import Path
 from ultralytics import YOLO
-names   = sys.argv[1:-1]
-dst_dir = Path(sys.argv[-1]).expanduser().resolve(); dst_dir.mkdir(parents=True, exist_ok=True)
-ok = 0
-for nm in names:
+dst = Path(sys.argv[-1]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
+ok=0
+for nm in sys.argv[1:-1]:
     try:
-        m = YOLO(nm)      # recognised names ("yolov12s-seg.pt", "yolo11x.pt") → download
-        p = Path(getattr(m, 'ckpt_path', nm)).expanduser()
-        if not p.exists(): p = Path(nm).expanduser()
+        m=YOLO(nm)
+        p=Path(getattr(m,'ckpt_path',nm)).expanduser()
+        if not p.exists(): p=Path(nm).expanduser()
         if p.exists():
-            shutil.copy2(p, dst_dir / p.name)
-            ok += 1
+            shutil.copy2(p, dst / p.name)
+            ok+=1
     except Exception:
         pass
 print(ok)
 """
-    names = [p.name for p in missing]
-    got_cp = _run([str(VPY), "-c", dl, *names, str(model_dir)], check=True, capture=True)
-    got_s: str = (got_cp.stdout.strip() or "0")
-    try:
-        got = int(got_s)
-    except ValueError:
-        got = 0
+        got = int((_run([str(VPY), "-c", dl_pt, *pt_missing, str(model_dir)],
+                        check=True, capture=True).stdout.strip() or "0"))
+        if got < len(pt_missing):
+            _print("⚠️  Some *.pt weights could not be fetched.")
 
-    if got < len(names):
-        _print("⚠️  Some weights could not be fetched automatically.")
-        _print(f"    Place files manually under: {model_dir}")
-    else:
-        _print("→ weights downloaded.")
+    # export *.onnx from matching *.pt
+    if onnx_missing:
+        _print(f"→ exporting {len(onnx_missing)} *.onnx from matching *.pt …")
+        exp = r"""
+import sys, shutil
+from pathlib import Path
+from ultralytics import YOLO
+dst = Path(sys.argv[-1]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
+ok=0
+for onnx_name in sys.argv[1:-1]:
+    try:
+        pt_name = Path(onnx_name).with_suffix(".pt").name
+        src_pt  = dst / pt_name
+        if not src_pt.exists():
+            m_fetch = YOLO(pt_name)
+            p = Path(getattr(m_fetch,'ckpt_path',pt_name)).expanduser()
+            if p.exists(): shutil.copy2(p, dst / p.name)
+        m = YOLO(str(dst / pt_name))
+        outp = Path(m.export(format='onnx', dynamic=True, simplify=True, imgsz=640, device='cpu'))
+        shutil.copy2(outp, dst / onnx_name)
+        ok += 1
+    except Exception:
+        pass
+print(ok)
+"""
+        got2 = int((_run([str(VPY), "-c", exp, *onnx_missing, str(model_dir)],
+                         check=True, capture=True).stdout.strip() or "0"))
+        if got2 < len(onnx_missing):
+            _print("⚠️  Some *.onnx could not be exported.")
+
+    _print("→ weights ensured.")
 
 # ──────────────────────────────────────────────────────────────
 # Keep repo clean: pytest cache outside; pycache outside via launchers
@@ -348,7 +415,7 @@ def _print_help(cpu_only: bool) -> None:
 Environment
   • Venv:   {py.parent}
   • Torch:  {'CPU-only' if cpu_only else 'auto'}
-  • Models: panoptes/model/  (detector + segmenter)
+  • Models: panoptes/model/  (Ultralytics fetched; preset={os.getenv('ARGOS_WEIGHT_PRESET','all')})
 
 Quick start (no venv activation)
   Windows PowerShell:
@@ -372,12 +439,55 @@ Power users
   • Direct module:
       {py} -m panoptes.cli tests/assets/shibuya.jpg heatmap
 
-Lambda / API bits (local context)
-  • Code + Dockerfile: projects/argos/lambda/
-  • Handler name:      app.handler
-  • Image expects weights under panoptes/model/.
+CI / CD
+  • Use ARGOS_WEIGHT_PRESET=[all|default|nano] and run:
+      python projects/argos/bootstrap.py --ensure --yes
 """
     _print(textwrap.dedent(msg).rstrip())
+
+# ──────────────────────────────────────────────────────────────
+# Interactive first-run menu
+# ──────────────────────────────────────────────────────────────
+def _first_run_menu() -> tuple[Optional[str], Optional[list[str]], bool]:
+    """
+    Ask the user which weights to fetch.
+    Returns (preset, explicit_names, skip_weights)
+    """
+    model_dir, all_names = _probe_weight_presets()[:2]
+    _print("\nModel weights will be placed under: " + str(model_dir))
+    _print("\nChoose what to fetch now:")
+    _print("  [1] All listed weights (recommended)")
+    _print("  [2] Default pair (first detect + first heatmap)")
+    _print("  [3] Nano pair (fastest for laptops & CI)")
+    _print("  [4] Pick from list")
+    _print("  [5] Skip for now")
+    while True:
+        ans = input("Selection [1-5, default 1]: ").strip()
+        if not ans or ans == "1":
+            return ("all", None, False)
+        if ans == "2":
+            return ("default", None, False)
+        if ans == "3":
+            return ("nano", None, False)
+        if ans == "5":
+            return (None, None, True)
+        if ans == "4":
+            _print("\nAvailable files:")
+            for i, n in enumerate(all_names, 1):
+                _print(f"  {i:>2}. {n}")
+            sel = input("Enter numbers (comma-separated): ").strip()
+            if not sel:
+                continue
+            try:
+                idxs = [int(x) for x in sel.replace(" ", "").split(",") if x]
+                chosen = [all_names[i - 1] for i in idxs if 1 <= i <= len(all_names)]
+                if chosen:
+                    return (None, chosen, False)
+            except Exception:
+                pass
+            _print("Invalid selection. Try again.")
+        else:
+            _print("Please enter 1, 2, 3, 4 or 5.")
 
 # ──────────────────────────────────────────────────────────────
 # Driver
@@ -387,7 +497,7 @@ def _first_run() -> bool:
 
 def _write_sentinel() -> None:
     SENTINEL.parent.mkdir(parents=True, exist_ok=True)
-    SENTINEL.write_text(json.dumps({"version": 3}, indent=2))
+    SENTINEL.write_text(json.dumps({"version": 4}, indent=2))
 
 def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
     d = "Y/n" if default_yes else "y/N"
@@ -400,12 +510,19 @@ def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
         if ans in {"n", "no"}:
             return False
 
-def _ensure(cpu_only: bool) -> None:
+def _ensure(
+    cpu_only: bool,
+    *,
+    preset: Optional[str] = None,
+    weight_names: Optional[list[str]] = None,
+    skip_weights: bool = False,
+) -> None:
     if not VENV.exists():
         _create_venv()
     _install_torch_if_needed(cpu_only)
     _pip_install_editable_if_needed()
-    _ensure_weights_ultralytics()
+    if not skip_weights:
+        _ensure_weights_ultralytics(preset=preset, explicit_names=weight_names)
     _move_pytest_cache_out_of_repo()
     _ensure_sitecustomize()
 
@@ -414,7 +531,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--ensure", action="store_true", help="Ensure env non-interactively (fast, idempotent)")
     p.add_argument("--print-venv", action="store_true", help="Print venv python path")
     p.add_argument("--cpu", dest="cpu_only", action="store_true", help="Force CPU-only Torch")
-    p.add_argument("--force-ultralytics", action="store_true", help="Always download weights via Ultralytics (default behavior)")
+    p.add_argument("--weights-preset", choices=["all", "default", "nano"], help="Preset for weights (overrides env)")
     p.add_argument("--yes", action="store_true", help="Assume Yes to prompts (non-interactive)")
     args, _ = p.parse_known_args(argv)
 
@@ -428,7 +545,7 @@ def main(argv: list[str]) -> int:
 
     if args.ensure:
         try:
-            _ensure(cpu_only)
+            _ensure(cpu_only, preset=args.weights_preset)
         except Exception as e:
             _print(f"ensure failed: {e}")
             return 1
@@ -437,7 +554,18 @@ def main(argv: list[str]) -> int:
     if _first_run():
         _print("First run detected for Argos.")
         if args.yes or _ask_yes_no("Install dependencies and set up now?", default_yes=True):
-            _ensure(cpu_only)
+            # interactive weights choice unless --yes was used
+            preset = args.weights_preset
+            picks: Optional[list[str]] = None
+            skip = False
+            if not args.yes and preset is None:
+                preset, picks, skip = _first_run_menu()
+                if preset:
+                    os.environ["ARGOS_WEIGHT_PRESET"] = preset
+            elif preset:
+                os.environ["ARGOS_WEIGHT_PRESET"] = preset
+
+            _ensure(cpu_only, preset=preset, weight_names=picks, skip_weights=skip)
             _create_launchers()
             _write_sentinel()
             _print_help(cpu_only)
@@ -446,7 +574,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     # Subsequent manual invocations: still idempotent
-    _ensure(cpu_only)
+    _ensure(cpu_only, preset=args.weights_preset)
     return 0
 
 if __name__ == "__main__":

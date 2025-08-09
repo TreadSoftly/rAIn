@@ -10,10 +10,6 @@ installers/argos text eol=lf
 *.ps1            text eol=crlf
 *.cmd            text eol=crlf
 
-# All models go through Git LFS
-*.pt   filter=lfs diff=lfs merge=lfs -text
-*.onnx filter=lfs diff=lfs merge=lfs -text
-
 # POSIX launchers must be LF
 /run text eol=lf
 /argos text eol=lf

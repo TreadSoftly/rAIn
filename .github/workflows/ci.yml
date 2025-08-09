@@ -1,5 +1,4 @@
 name: Argos CI
-
 on: [push, pull_request]
 
 jobs:
@@ -12,26 +11,28 @@ jobs:
         python: ["3.9", "3.12"]
 
     steps:
-      - name: Checkout
+      - name: Checkout (no LFS)
         uses: actions/checkout@v4
         with:
-          lfs: true
-
-      - name: Pull Git LFS
-        run: git lfs pull
+          lfs: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Upgrade pip & install
+      - name: Install project (editable)
         run: |
           python -m pip install --upgrade pip
           pip install -e "projects/argos[dev]"
 
-      - name: Run tests (fast weights)
+      - name: Warm models (nano)
+        env:
+          ARGOS_WEIGHT_PRESET: nano
+        run: python projects/argos/bootstrap.py --ensure --yes
+
+      - name: Run tests
         env:
           panoptes_TEST_DET_WEIGHTS: projects/argos/panoptes/model/yolov8n.onnx
           panoptes_TEST_SEG_WEIGHTS: projects/argos/panoptes/model/yolov8n-seg.onnx
-        run: pytest -q projects/argos/tests
+        run: pytest -q projects/argos/tests -vv

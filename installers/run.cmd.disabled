@@ -1,33 +1,53 @@
 @echo off
 setlocal enabledelayedexpansion
-
 set "HERE=%~dp0"
-for %%I in ("%HERE%..") do set "ROOT=%%~fI"
+for %%I in ("%HERE%\..") do set "ROOT=%%~fI"
+set "PROJ_DIR=%ROOT%\projects"
 
-rem --- Ensure Git LFS ---
-where git >nul 2>&1
-if not errorlevel 1 (
-  git lfs version >nul 2>&1
-  if not errorlevel 1 (
-    git -C "%ROOT%" lfs install --local >nul 2>&1
-    set GIT_LFS_SKIP_SMUDGE=0
-    git -C "%ROOT%" lfs pull >nul 2>&1
-  ) else (
-    echo ⚠️  Git LFS not installed. Large files (models) may be missing.
-    echo     Install Git LFS and re-run this command.
+set "proj="
+set "tokens="
+
+:parse
+if "%~1"=="" goto afterparse
+set "t=%~1"
+if /I "%t%"=="run"      (shift & goto parse)
+if /I "%t%"=="me"       (shift & goto parse)
+if /I "%t%"=="argos"    (set "proj=argos" & shift & goto parse)
+if /I "%t%"=="argos:run" (set "proj=argos" & shift & goto parse)
+if /I "%t%"=="run:argos" (set "proj=argos" & shift & goto parse)
+set "tokens=%tokens% %t%"
+shift
+goto parse
+
+:afterparse
+if not defined proj (
+  echo %cd% | findstr /I /C:"\projects\argos" >nul && set "proj=argos"
+)
+
+if not defined proj (
+  if /I "%cd%"=="%ROOT%"  (
+    echo Specify the project:  run argos  ^|  argos [args]
+    exit /b 2
+  )
+  if /I "%cd%"=="%PROJ_DIR%" (
+    echo Specify the project:  run argos  ^|  argos [args]
+    exit /b 2
   )
 )
 
-rem --- Find Python ---
-for %%P in (python3.exe python.exe) do (
-  where %%P >nul 2>&1 && set "PY=%%P" && goto :gotpy
+where python >NUL 2>&1
+if %ERRORLEVEL% NEQ 0 (
+  echo Python 3 not found. 1>&2
+  exit /b 1
 )
-echo Python 3 not found.
-exit /b 1
 
-:gotpy
-"%PY%" "%ROOT%\projects\argos\bootstrap.py" --ensure --yes >nul 2>&1
-for /f "usebackq delims=" %%V in (`"%PY%" "%ROOT%\projects\argos\bootstrap.py" --print-venv`) do set "VPY=%%V"
-set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
-"%VPY%" -m panoptes.cli %*
-exit /b %ERRORLEVEL%
+if /I "%proj%"=="argos" (
+  python "%ROOT%\projects\argos\bootstrap.py" --ensure --yes >NUL 2>&1
+  for /f "usebackq delims=" %%i in (`python "%ROOT%\projects\argos\bootstrap.py" --print-venv`) do set "VPY=%%i"
+  set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
+  "%VPY%" -m panoptes.cli %tokens%
+  exit /b %ERRORLEVEL%
+)
+
+echo Unknown project: %proj% 1>&2
+exit /b 2

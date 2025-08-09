@@ -22,15 +22,24 @@ jobs:
 
     steps:
       # ────────────────────────────────────────────────────────────────
-      # 0) Checkout – WITH Git-LFS model weights
+      # 0) Checkout (no LFS)
       # ────────────────────────────────────────────────────────────────
       - name: Check out source
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
 
       # ────────────────────────────────────────────────────────────────
-      # 1) AWS creds via OIDC
+      # 1) Warm weights into repo folder so Docker can COPY them
+      # ────────────────────────────────────────────────────────────────
+      - name: Warm models (bootstrap)
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          ARGOS_WEIGHT_PRESET: all
+        run: python bootstrap.py --ensure --yes
+
+      # ────────────────────────────────────────────────────────────────
+      # 2) AWS creds via OIDC
       # ────────────────────────────────────────────────────────────────
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -39,13 +48,13 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # ────────────────────────────────────────────────────────────────
-      # 2) CDK CLI
+      # 3) CDK CLI
       # ────────────────────────────────────────────────────────────────
       - name: Install CDK CLI
         run: npm install -g aws-cdk@2
 
       # ────────────────────────────────────────────────────────────────
-      # 3) CDK deploy (CDK builds the Docker asset itself)
+      # 4) CDK synth/deploy (Docker asset is built by CDK)
       # ────────────────────────────────────────────────────────────────
       - name: Install Python deps for CDK app
         working-directory: ${{ inputs.project-dir }}

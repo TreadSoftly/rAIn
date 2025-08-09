@@ -22,16 +22,9 @@ projects/**/.venv/
 node_modules/
 
 # ── Models & other large binaries ───────────────────────────────────────────
-projects/**/model/*.onnx
-*.onnx                 # catch any stray upload
-
-#     ··· KEEP THESE WEIGHTS ···
-!projects/argos/lambda/model/
-!projects/argos/lambda/model/*.onnx
-!projects/argos/panoptes/model/
-!projects/argos/panoptes/model/*.pt
-!projects/argos/panoptes/model/*.onnx
-!projects/argos/panoptes/model/*.yml
+# Keep model binaries out of Git; bootstrap fetches them as-needed
+projects/argos/panoptes/model/*.onnx
+projects/argos/panoptes/model/*.pt
 
 # ── Test / coverage artefacts ───────────────────────────────────────────────
 .pytest_cache/

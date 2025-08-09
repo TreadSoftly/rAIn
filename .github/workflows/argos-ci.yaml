@@ -5,7 +5,7 @@ on:
     paths:
       - "projects/argos/**"
       - "installers/**"
-      - ".github/workflows/argos-ci.yaml" # ← fixed
+      - ".github/workflows/argos-ci.yaml"
   pull_request:
     paths:
       - "projects/argos/**"
@@ -22,10 +22,10 @@ jobs:
         shell: pwsh
 
     steps:
-      - name: Checkout (with LFS)
+      - name: Checkout (no LFS)
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -41,21 +41,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e "projects/argos[dev]"
 
-      # Optional but nice: clean MP4 re-encode in video steps
+      - name: Warm models (nano)
+        env:
+          ARGOS_WEIGHT_PRESET: nano
+        run: python projects/argos/bootstrap.py --ensure --yes
+
       - name: Install ffmpeg
         run: choco install ffmpeg -y
 
-      # Run the checks via the module entrypoint (no private venv)
       - name: Run Argos checks (direct CLI)
         run: |
-          # 1) Heatmap on a repo asset that actually exists
           python -m panoptes.cli camo.webp hm
-
-          # 2) Create a tiny dummy MP4 and run detection on it
           python -c "import cv2, numpy as np; out=cv2.VideoWriter('bunny.mp4', cv2.VideoWriter_fourcc(*'mp4v'),5,(64,64)); [out.write(np.zeros((64,64,3), np.uint8)) for _ in range(10)]; out.release()"
           python -m panoptes.cli bunny.mp4 d
-
-          # 3) GeoJSON from a remote image with #lat/_lon in the URL
           python -m panoptes.cli "https://upload.wikimedia.org/wikipedia/commons/0/0c/GoldenGateBridge-001.jpg#lat37.8199_lon-122.4783" gj
 
       - name: Upload results
