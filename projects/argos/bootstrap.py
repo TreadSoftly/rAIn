@@ -80,7 +80,21 @@ VENV: Path = VENVS / f"py{sys.version_info.major}{sys.version_info.minor}-argos"
 VPY: Path = VENV / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
 
 def _print(msg: object = "") -> None:
-    sys.stdout.write(str(msg) + ("" if str(msg).endswith("\n") else "\n"))
+    """
+    Robust print that won't crash on Windows legacy codepages when emitting
+    Unicode (e.g., ★, →). Falls back to UTF-8 bytes with replacement.
+    """
+    s = str(msg)
+    if not s.endswith("\n"):
+        s += "\n"
+    try:
+        sys.stdout.write(s)
+    except UnicodeEncodeError:
+        try:
+            sys.stdout.buffer.write(s.encode("utf-8", "replace"))
+        except Exception:
+            # Last resort: strip to ASCII replacements
+            sys.stdout.write(s.encode("ascii", "replace").decode("ascii"))
 
 @overload
 def _run(
@@ -338,7 +352,7 @@ def _move_pytest_cache_out_of_repo() -> None:
         ini.write_text(textwrap.dedent(f"""\
             [pytest]
             cache_dir = {cache}
-        """))
+        """), encoding="utf-8")
 
 # Optional extra: sitecustomize fallback to keep pycache outside even if someone runs VPY directly
 def _ensure_sitecustomize() -> None:
@@ -349,7 +363,8 @@ def _ensure_sitecustomize() -> None:
         sp.mkdir(parents=True, exist_ok=True)
         sc.write_text(
             "import os\n"
-            f"os.environ.setdefault('PYTHONPYCACHEPREFIX', r'{(DATA / 'pycache')}'.replace('\\\\','/'))\n"
+            f"os.environ.setdefault('PYTHONPYCACHEPREFIX', r'{(DATA / 'pycache')}'.replace('\\\\','/'))\n",
+            encoding="utf-8",
         )
 
 # ──────────────────────────────────────────────────────────────
@@ -368,7 +383,7 @@ def _create_launchers() -> None:
         # keep *.pyc out of the repo
         export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
         exec "$VPY" -m panoptes.cli "$@"
-    """))
+    """), encoding="utf-8")
     os.chmod(sh, 0o755)
 
     # PowerShell
@@ -383,7 +398,7 @@ def _create_launchers() -> None:
         $vpy = & $py "$HERE\bootstrap.py" --print-venv
         $env:PYTHONPYCACHEPREFIX = Join-Path $env:LOCALAPPDATA "rAIn\pycache"
         & $vpy -m panoptes.cli @Args
-    """))
+    """), encoding="utf-8")
 
     # Windows CMD (double-click)
     cmd = HERE / "argos.cmd"
@@ -402,7 +417,7 @@ def _create_launchers() -> None:
         for /f "usebackq delims=" %%i in (`%PY% "%HERE%bootstrap.py" --print-venv`) do set "VPY=%%i"
         set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
         "%VPY%" -m panoptes.cli %*
-    """))
+    """), encoding="utf-8")
 
 # ──────────────────────────────────────────────────────────────
 # First-run cheatsheet
@@ -497,7 +512,7 @@ def _first_run() -> bool:
 
 def _write_sentinel() -> None:
     SENTINEL.parent.mkdir(parents=True, exist_ok=True)
-    SENTINEL.write_text(json.dumps({"version": 4}, indent=2))
+    SENTINEL.write_text(json.dumps({"version": 4}, indent=2), encoding="utf-8")
 
 def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
     d = "Y/n" if default_yes else "y/N"

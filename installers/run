@@ -1,18 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 PROJ_DIR="$ROOT/projects"
 
-<<<<<<< HEAD
-# Collect args → infer project + pass-through tokens
-proj=""
-tokens=()
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-while (($#)); do
-  t="$1"; shift
-  lt="$(lower "$t")"
-=======
 ensure_git_lfs() {
   if command -v git >/dev/null 2>&1; then
     if git lfs version >/dev/null 2>&1; then
@@ -20,18 +12,19 @@ ensure_git_lfs() {
       GIT_LFS_SKIP_SMUDGE=0 git -C "$ROOT" lfs pull >/dev/null 2>&1 || true
     else
       echo "⚠️ Git LFS not installed. Large files (models) may be missing."
-      echo "    Install Git LFS and re-run this command."
+      echo "   Install Git LFS and re-run this command."
     fi
   fi
 }
 
+# Collect args → infer project + pass-through tokens
 proj=""
 tokens=()
 saw_build=0
+
 while (($#)); do
   t="$1"; shift
   lt="${t,,}"
->>>>>>> c55090c (Argos: Interactive model setup, build command, and model updates)
   case "$lt" in
     run|me) ;;                              # ignore fluff
     build|package|pack) saw_build=1 ;;
@@ -52,9 +45,6 @@ if [[ -z "${proj:-}" ]]; then
   fi
 fi
 
-<<<<<<< HEAD
-# Dispatch to project bootstrap + CLI (no Git LFS dependency)
-=======
 ensure_git_lfs
 
 # Build hand-off
@@ -62,7 +52,7 @@ if [[ "$saw_build" -eq 1 ]]; then
   exec "$ROOT/installers/build" "$proj" "${tokens[@]}"
 fi
 
->>>>>>> c55090c (Argos: Interactive model setup, build command, and model updates)
+# Project dispatch
 if [[ "$proj" == "argos" ]]; then
   PY="$(command -v python3 || command -v python)"
   "$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes >/dev/null 2>&1 || true

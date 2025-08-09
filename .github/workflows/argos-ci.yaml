@@ -44,12 +44,15 @@ jobs:
       - name: Warm models (nano)
         env:
           ARGOS_WEIGHT_PRESET: nano
+          PYTHONUTF8: "1" # ← fixes the charmap/arrow crash
         run: python projects/argos/bootstrap.py --ensure --yes
 
       - name: Install ffmpeg
         run: choco install ffmpeg -y
 
       - name: Run Argos checks (direct CLI)
+        env:
+          PYTHONUTF8: "1"
         run: |
           python -m panoptes.cli camo.webp hm
           python -c "import cv2, numpy as np; out=cv2.VideoWriter('bunny.mp4', cv2.VideoWriter_fourcc(*'mp4v'),5,(64,64)); [out.write(np.zeros((64,64,3), np.uint8)) for _ in range(10)]; out.release()"

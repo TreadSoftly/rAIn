@@ -29,6 +29,7 @@ jobs:
       - name: Warm models (nano)
         env:
           ARGOS_WEIGHT_PRESET: nano
+          PYTHONUTF8: "1" # safe cross-OS, fixes Windows charmap
         run: python projects/argos/bootstrap.py --ensure --yes
 
       - name: Run tests
