@@ -1,4 +1,5 @@
 name: Argos CI/CD
+
 on:
   push:
     paths:

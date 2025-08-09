@@ -4,10 +4,6 @@ $ErrorActionPreference = "Stop"
 $HERE = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ROOT = Split-Path -Parent $HERE
 
-<<<<<<< HEAD
-# Parse tokens
-$proj   = $null
-=======
 function Ensure-GitLFS {
   if (Get-Command git -ErrorAction SilentlyContinue) {
     & git lfs version *> $null
@@ -23,8 +19,8 @@ function Ensure-GitLFS {
   }
 }
 
+# Parse args
 $proj = $null
->>>>>>> c55090c (Argos: Interactive model setup, build command, and model updates)
 $tokens = @()
 $sawBuild = $false
 foreach ($a in $Args) {
@@ -35,6 +31,7 @@ foreach ($a in $Args) {
   else { $tokens += $a }
 }
 
+# Infer project from CWD
 $cwd = (Get-Location).Path
 if (-not $proj) {
   if ($cwd -like "*\projects\argos*") { $proj = 'argos' }
@@ -47,24 +44,32 @@ if (-not $proj) {
   }
 }
 
-<<<<<<< HEAD
-=======
 Ensure-GitLFS
 
 # Build hand-off
 if ($sawBuild) {
-  & (Join-Path $ROOT 'installers\build.ps1') $proj @tokens
-  exit $LASTEXITCODE
+  $build = Join-Path $ROOT 'installers\build.ps1'
+  if (Test-Path $build) {
+    & $build $proj @tokens
+    exit $LASTEXITCODE
+  }
+  else {
+    Write-Error "Build script not found: installers\build.ps1"
+    exit 1
+  }
 }
 
->>>>>>> c55090c (Argos: Interactive model setup, build command, and model updates)
 if ($proj -eq 'argos') {
-  $py = (Get-Command python3 -ErrorAction SilentlyContinue)?.Source
-  if (-not $py) { $py = (Get-Command python -ErrorAction SilentlyContinue)?.Source }
-  if (-not $py) { Write-Error "Python 3 not found."; exit 1 }
+  # Find Python (prefer py -3, then python3/python)
+  $pyExe = (Get-Command py -ErrorAction SilentlyContinue)?.Source
+  $pyArgs = @()
+  if ($pyExe) { $pyArgs = @('-3') }
+  if (-not $pyExe) { $pyExe = (Get-Command python3 -ErrorAction SilentlyContinue)?.Source }
+  if (-not $pyExe) { $pyExe = (Get-Command python  -ErrorAction SilentlyContinue)?.Source }
+  if (-not $pyExe) { Write-Error "Python 3 not found."; exit 1 }
 
-  & $py "$ROOT\projects\argos\bootstrap.py" --ensure --yes *> $null
-  $vpy = & $py "$ROOT\projects\argos\bootstrap.py" --print-venv
+  & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes *> $null
+  $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
   $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
   & $vpy -m panoptes.cli @tokens
   exit $LASTEXITCODE

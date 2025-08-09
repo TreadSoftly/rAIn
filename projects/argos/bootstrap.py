@@ -28,10 +28,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from os import PathLike
 from pathlib import Path
 from typing import (
+    Any,  # added
+    Dict,  # added
     Literal,  # pyright: ignore[reportUnusedImport]
     Mapping,
     MutableMapping,
@@ -39,8 +42,11 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    cast,  # added
     overload,
 )
+
+JSONDict = Dict[str, Any]
 
 APP = "rAIn"
 
@@ -274,14 +280,58 @@ out_path.write_text(json.dumps({
         out_path = Path(tf.name)
     try:
         _run([str(VPY), "-c", probe, str(out_path)], check=True, capture=False)
-        meta = json.loads(out_path.read_text(encoding="utf-8"))
+        txt = out_path.read_text(encoding="utf-8")
+        meta: JSONDict = {}
+        try:
+            obj = json.loads(txt)
+            if isinstance(obj, dict):
+                meta = cast(JSONDict, obj)
+        except Exception:
+            meta = {}
     finally:
         try:
             out_path.unlink(missing_ok=True)
         except Exception:
             pass
 
-    return Path(meta["model_dir"]).resolve(), list(meta["all"]), list(meta["default"]), list(meta["nano"])
+    def _to_str_list(v: Any) -> list[str]:
+        if isinstance(v, list):
+            vv: list[object | None] = cast(list[object | None], v)
+            return [str(x) for x in vv if x is not None]
+        return []
+
+    model_dir_str = str(meta.get("model_dir", ""))
+    return (
+        Path(model_dir_str).resolve(),
+        _to_str_list(meta.get("all")),
+        _to_str_list(meta.get("default")),
+        _to_str_list(meta.get("nano")),
+    )
+
+def _child_json(code: str, args: list[str]) -> Dict[str, Any]:
+    """
+    Run a small Python snippet in the venv interpreter and read a JSON file
+    it writes as its last arg. This avoids noisy stdout (Ultralytics logs).
+    """
+    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tf:
+        out_path = Path(tf.name)
+    try:
+        _run([str(VPY), "-c", code, *args, str(out_path)], check=True, capture=False)
+        txt = out_path.read_text(encoding="utf-8")
+        result: JSONDict = {}
+        if txt.trim() if False else txt.strip():  # ...existing code...
+            try:
+                obj = json.loads(txt)
+                if isinstance(obj, dict):
+                    result = cast(JSONDict, obj)
+            except Exception:
+                result = {}
+        return result
+    finally:
+        try:
+            out_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names: Optional[list[str]] = None) -> None:
     """
@@ -323,55 +373,80 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
     if pt_missing:
         _print(f"→ fetching {len(pt_missing)} *.pt via Ultralytics …")
         dl_pt = r"""
-import sys, shutil
+import json, sys, shutil, logging, os
 from pathlib import Path
+# Reduce Ultralytics/chatty logs
+try:
+    from ultralytics.utils import LOGGER
+    LOGGER.remove()
+except Exception:
+    pass
+logging.getLogger().handlers.clear()
+logging.getLogger().setLevel(logging.ERROR)
 from ultralytics import YOLO
-dst = Path(sys.argv[-1]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
+dst = Path(sys.argv[-2]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
 ok=0
-for nm in sys.argv[1:-1]:
+for nm in sys.argv[1:-2]:
     try:
         m=YOLO(nm)
         p=Path(getattr(m,'ckpt_path',nm)).expanduser()
-        if not p.exists(): p=Path(nm).expanduser()
+        if not p.exists():
+            p=Path(nm).expanduser()
         if p.exists():
             shutil.copy2(p, dst / p.name)
             ok+=1
     except Exception:
+        # swallow; count only successful copies
         pass
-print(ok)
+out_path = Path(sys.argv[-1])
+out_path.write_text(json.dumps({'ok': ok}), encoding='utf-8')
 """
-        got = int((_run([str(VPY), "-c", dl_pt, *pt_missing, str(model_dir)],
-                        check=True, capture=True).stdout.strip() or "0"))
+        data: JSONDict = _child_json(dl_pt, [*pt_missing, str(model_dir)])
+        got = int(data.get("ok", 0))
         if got < len(pt_missing):
-            _print("⚠️  Some *.pt weights could not be fetched.")
+            _print("⚠️  Some *.pt weights could not be fetched (network/rate-limit?).")
 
     # export *.onnx from matching *.pt
     if onnx_missing:
         _print(f"→ exporting {len(onnx_missing)} *.onnx from matching *.pt …")
         exp = r"""
-import sys, shutil
+import json, sys, shutil, logging
 from pathlib import Path
+# Reduce Ultralytics/chatty logs
+try:
+    from ultralytics.utils import LOGGER
+    LOGGER.remove()
+except Exception:
+    pass
+logging.getLogger().handlers.clear()
+logging.getLogger().setLevel(logging.ERROR)
 from ultralytics import YOLO
-dst = Path(sys.argv[-1]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
+dst = Path(sys.argv[-2]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
 ok=0
-for onnx_name in sys.argv[1:-1]:
+for onnx_name in sys.argv[1:-2]:
     try:
         pt_name = Path(onnx_name).with_suffix(".pt").name
         src_pt  = dst / pt_name
+        # Ensure the .pt exists alongside the model dir; if not, YOLO will try to resolve it
         if not src_pt.exists():
             m_fetch = YOLO(pt_name)
             p = Path(getattr(m_fetch,'ckpt_path',pt_name)).expanduser()
-            if p.exists(): shutil.copy2(p, dst / p.name)
+            if p.exists():
+                shutil.copy2(p, dst / p.name)
+        # Export ONNX from the .pt within our dst directory
         m = YOLO(str(dst / pt_name))
         outp = Path(m.export(format='onnx', dynamic=True, simplify=True, imgsz=640, device='cpu'))
+        # Place it exactly where Argos expects it/name it
         shutil.copy2(outp, dst / onnx_name)
         ok += 1
     except Exception:
+        # swallow; we'll report a warning in the parent
         pass
-print(ok)
+out_path = Path(sys.argv[-1])
+out_path.write_text(json.dumps({'ok': ok}), encoding='utf-8')
 """
-        got2 = int((_run([str(VPY), "-c", exp, *onnx_missing, str(model_dir)],
-                         check=True, capture=True).stdout.strip() or "0"))
+        data2: JSONDict = _child_json(exp, [*onnx_missing, str(model_dir)])
+        got2 = int(data2.get("ok", 0))
         if got2 < len(onnx_missing):
             _print("⚠️  Some *.onnx could not be exported.")
 
