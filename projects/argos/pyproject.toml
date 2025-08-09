@@ -31,8 +31,7 @@ dependencies = [
   "redis>=5.0",
 
   "typer[all]>=0.12",
-  "thop>=0.1.2",
-]
+  "thop==0.1.1.post2209072238",
 
 [project.optional-dependencies]
 dev = [
