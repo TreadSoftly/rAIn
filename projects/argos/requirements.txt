@@ -15,7 +15,7 @@ onnxslim>=0.1.59
 opencv-python-headless>=4.10,<4.12
 
 # Loosen so Torch wheels on CI can use NumPy 2.x where applicable
-numpy>=1.26,<2.2
+numpy>=1.26.*
 
 pillow>=10.0,<12.0
 pillow-avif-plugin>=1.4
