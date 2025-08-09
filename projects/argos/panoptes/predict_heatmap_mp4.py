@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\predict_heatmap_mp4.py
+# \rAIn\projects\argos\panoptes\predict_heatmap_mp4.py
 """
 predict_heatmap_mp4.py – per-frame segmentation / heat-map overlay for videos.
 
@@ -29,10 +29,10 @@ import cv2
 import numpy as np
 from PIL import Image
 
-import panoptes.heatmap as _hm # type: ignore
-from panoptes import ROOT # type: ignore
-from panoptes.heatmap import heatmap_overlay # type: ignore
-from panoptes.model_registry import load_segmenter # type: ignore
+import panoptes.heatmap as _hm  # type: ignore
+from panoptes import ROOT  # type: ignore
+from panoptes.heatmap import heatmap_overlay  # type: ignore
+from panoptes.model_registry import load_segmenter  # type: ignore
 
 # Ultralytics may be absent in some minimal environments
 try:
@@ -47,8 +47,11 @@ if not _LOG.handlers:
     h.setFormatter(logging.Formatter("%(message)s"))
     _LOG.addHandler(h)
 _LOG.setLevel(logging.INFO)
+
+
 def _say(msg: str) -> None:
     _LOG.info(f"[panoptes] {msg}")
+
 
 # ───────────────────────── helpers ──────────────────────────
 def _auto(v: str) -> object:
@@ -61,6 +64,7 @@ def _auto(v: str) -> object:
     except ValueError:
         return v
 
+
 def _avi_writer(path: Path, fps: float, size: Tuple[int, int]) -> cv2.VideoWriter:
     vw = cv2.VideoWriter(
         str(path.with_suffix(".avi")),
@@ -71,6 +75,7 @@ def _avi_writer(path: Path, fps: float, size: Tuple[int, int]) -> cv2.VideoWrite
     if not vw.isOpened():
         raise RuntimeError("❌  OpenCV cannot open any MJPG writer on this system.")
     return vw
+
 
 # ───────────────────────── main worker ─────────────────────
 def main(  # noqa: C901 – unavoidable CLI glue
@@ -183,6 +188,7 @@ def main(  # noqa: C901 – unavoidable CLI glue
     shutil.rmtree(tmp_dir, ignore_errors=True)
     _say(f"Saved → {final}")
     return final
+
 
 # ───────────────────────── CLI entry-point ──────────────────
 if __name__ == "__main__":

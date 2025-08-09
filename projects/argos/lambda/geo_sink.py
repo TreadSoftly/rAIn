@@ -1,4 +1,4 @@
-# projects/argos/lambda/geo_sink.py
+# \rAIn\projects\argos\lambda\geo_sink.py
 """
 Helper that converts an *image URL* containing “…lat…_lon…” plus optional
 YOLO-style boxes into a GeoJSON FeatureCollection.

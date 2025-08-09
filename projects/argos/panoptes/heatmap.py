@@ -1,4 +1,3 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\heatmap.py
 """
 panoptes.heatmap
 ───────────────────

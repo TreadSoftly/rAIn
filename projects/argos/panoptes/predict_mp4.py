@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\predict_mp4.py
+# \rAIn\projects\argos\panoptes\predict_mp4.py
 """
 predict_mp4.py – per-frame object-detection overlay for videos.
 
@@ -28,8 +28,8 @@ from typing import Any
 import cv2
 import numpy as np
 
-from panoptes import ROOT # type: ignore
-from panoptes.model_registry import load_detector # type: ignore
+from panoptes import ROOT  # type: ignore
+from panoptes.model_registry import load_detector  # type: ignore
 
 # Ultralytics may be absent in some minimal environments
 try:
@@ -44,8 +44,11 @@ if not _LOG.handlers:
     h.setFormatter(logging.Formatter("%(message)s"))
     _LOG.addHandler(h)
 _LOG.setLevel(logging.INFO)
+
+
 def _say(msg: str) -> None:
     _LOG.info(f"[panoptes] {msg}")
+
 
 # ───────────────────────── helpers ──────────────────────────
 def _auto(v: str) -> object:
@@ -58,6 +61,7 @@ def _auto(v: str) -> object:
     except ValueError:
         return v
 
+
 def _avi_writer(path: Path, fps: float, size: tuple[int, int]) -> cv2.VideoWriter:
     vw = cv2.VideoWriter(
         str(path.with_suffix(".avi")),
@@ -68,6 +72,7 @@ def _avi_writer(path: Path, fps: float, size: tuple[int, int]) -> cv2.VideoWrite
     if not vw.isOpened():
         raise RuntimeError("❌  OpenCV cannot open any MJPG writer on this system.")
     return vw
+
 
 # ───────────────────────── main worker ─────────────────────
 def main(  # noqa: C901 – CLI glue
@@ -118,7 +123,7 @@ def main(  # noqa: C901 – CLI glue
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="dv_det_"))
     avi = tmp_dir / f"{src.stem}.avi"
-    vw = _avi_writer(avi, fps, (w, h))
+    vw = _avi_writer(avi, float(fps), (w, h))
 
     # ── frame loop ───────────────────────────────────────────────────
     while True:
@@ -170,6 +175,7 @@ def main(  # noqa: C901 – CLI glue
     shutil.rmtree(tmp_dir, ignore_errors=True)
     _say(f"Saved → {final}")
     return final
+
 
 # ───────────────────────── CLI entry-point ──────────────────
 if __name__ == "__main__":

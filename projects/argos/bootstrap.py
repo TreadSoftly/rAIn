@@ -81,6 +81,7 @@ def _cfg_dir() -> Path:
         return Path.home() / "Library" / "Application Support" / APP
     return Path(os.getenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / APP
 
+
 def _data_dir() -> Path:
     if os.name == "nt":
         base = Path(os.getenv("LOCALAPPDATA") or os.getenv("APPDATA") or (Path.home() / "AppData" / "Local"))
@@ -89,6 +90,7 @@ def _data_dir() -> Path:
         return Path.home() / "Library" / "Application Support" / APP
     return Path(os.getenv("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / APP
 
+
 CFG: Path = _cfg_dir()
 DATA: Path = _data_dir()
 VENVS: Path = DATA / "venvs"
@@ -96,6 +98,7 @@ SENTINEL: Path = CFG / "first_run.json"
 
 VENV: Path = VENVS / f"py{sys.version_info.major}{sys.version_info.minor}-argos"
 VPY: Path = VENV / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+
 
 def _print(msg: object = "") -> None:
     """
@@ -113,6 +116,7 @@ def _print(msg: object = "") -> None:
         except Exception:
             # Last resort: strip to ASCII replacements
             sys.stdout.write(s.encode("ascii", "replace").decode("ascii"))
+
 
 @overload
 def _run(
@@ -158,9 +162,11 @@ def _run(
     subprocess.run(list(cmd), check=check, cwd=cwd, env=dict(env) if isinstance(env, MutableMapping) else env)
     return None
 
+
 def _ensure_dirs() -> None:
     for p in (CFG, DATA, VENVS):
         p.mkdir(parents=True, exist_ok=True)
+
 
 # ──────────────────────────────────────────────────────────────
 # Fast checks
@@ -173,6 +179,7 @@ def _module_present(mod: str) -> bool:
     except Exception:
         return False
 
+
 def _has_cuda() -> bool:
     smi = shutil.which("nvidia-smi")
     if not smi:
@@ -183,6 +190,7 @@ def _has_cuda() -> bool:
     except Exception:
         return False
 
+
 # ──────────────────────────────────────────────────────────────
 # Venv + pip
 # ──────────────────────────────────────────────────────────────
@@ -191,10 +199,11 @@ def _create_venv() -> None:
     _run([sys.executable, "-m", "venv", str(VENV)], check=True, capture=False)
     _run([str(VPY), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], check=True, capture=False)
 
+
 def _torch_pins_from_requirements() -> Tuple[str, str]:
     req = ARGOS / "requirements.txt"
     torch_spec = "torch==2.3.*"
-    tv_spec    = "torchvision==0.18.*"
+    tv_spec = "torchvision==0.18.*"
     if req.exists():
         for line in req.read_text(encoding="utf-8").splitlines():
             s = line.strip()
@@ -206,6 +215,7 @@ def _torch_pins_from_requirements() -> Tuple[str, str]:
             if low.startswith(("torchvision==", "torchvision>", "torchvision<")):
                 tv_spec = s
     return torch_spec, tv_spec
+
 
 def _install_torch_if_needed(cpu_only: bool) -> None:
     """
@@ -223,6 +233,7 @@ def _install_torch_if_needed(cpu_only: bool) -> None:
     _print(f"→ installing Torch ({'CPU-only' if cpu_only else 'auto'}) …")
     _run([str(VPY), "-m", "pip", "install", *idx, torch_spec, tv_spec], check=True, capture=False)
 
+
 def _pip_install_editable_if_needed() -> None:
     # Also ensure Ultralytics is there (weight fetch relies on it)
     need = (not _module_present("panoptes")) or (not _module_present("ultralytics"))
@@ -231,12 +242,17 @@ def _pip_install_editable_if_needed() -> None:
     _print("→ installing Argos package (editable) + dev extras …")
     _run([str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + "[dev]"], check=True, capture=False)
 
+
 # ──────────────────────────────────────────────────────────────
 # Weights helpers
 # ──────────────────────────────────────────────────────────────
 def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str]]:
     """Return (model_dir, all_names, default_names, nano_names) from registry.
     Robust against noisy stdout on CI by writing JSON to a temp file.
+
+    Works on *first run* even before the venv exists by:
+      • falling back to the current interpreter when VPY is missing
+      • injecting PYTHONPATH so the in-repo `panoptes/` is importable
     """
     import tempfile
 
@@ -279,7 +295,14 @@ out_path.write_text(json.dumps({
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tf:
         out_path = Path(tf.name)
     try:
-        _run([str(VPY), "-c", probe, str(out_path)], check=True, capture=False)
+        # Interpreter: prefer venv Python if present, else current Python
+        py = str(VPY) if VENV.exists() and VPY.exists() else sys.executable
+        # Ensure the repo source is importable inside the child
+        env = os.environ.copy()
+        env_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (str(ARGOS) + (os.pathsep + env_pp if env_pp else ""))
+
+        _run([py, "-c", probe, str(out_path)], check=True, capture=False, env=env)
         txt = out_path.read_text(encoding="utf-8")
         meta: JSONDict = {}
         try:
@@ -308,6 +331,7 @@ out_path.write_text(json.dumps({
         _to_str_list(meta.get("nano")),
     )
 
+
 def _child_json(code: str, args: list[str]) -> Dict[str, Any]:
     """
     Run a small Python snippet in the venv interpreter and read a JSON file
@@ -319,7 +343,7 @@ def _child_json(code: str, args: list[str]) -> Dict[str, Any]:
         _run([str(VPY), "-c", code, *args, str(out_path)], check=True, capture=False)
         txt = out_path.read_text(encoding="utf-8")
         result: JSONDict = {}
-        if txt.trim() if False else txt.strip():  # ...existing code...
+        if txt.strip():
             try:
                 obj = json.loads(txt)
                 if isinstance(obj, dict):
@@ -332,6 +356,7 @@ def _child_json(code: str, args: list[str]) -> Dict[str, Any]:
             out_path.unlink(missing_ok=True)
         except Exception:
             pass
+
 
 def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names: Optional[list[str]] = None) -> None:
     """
@@ -366,7 +391,7 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
     if not _module_present("ultralytics"):
         _run([str(VPY), "-m", "pip", "install", "ultralytics>=8.0"], check=True, capture=False)
 
-    pt_missing   = [n for n in need if n.lower().endswith(".pt")]
+    pt_missing = [n for n in need if n.lower().endswith(".pt")]
     onnx_missing = [n for n in need if n.lower().endswith(".onnx")]
 
     # fetch *.pt
@@ -452,6 +477,7 @@ out_path.write_text(json.dumps({'ok': ok}), encoding='utf-8')
 
     _print("→ weights ensured.")
 
+
 # ──────────────────────────────────────────────────────────────
 # Keep repo clean: pytest cache outside; pycache outside via launchers
 # ──────────────────────────────────────────────────────────────
@@ -459,10 +485,16 @@ def _move_pytest_cache_out_of_repo() -> None:
     ini = HERE / "pytest.ini"
     if not ini.exists():
         cache = (DATA / "pytest_cache").as_posix()
-        ini.write_text(textwrap.dedent(f"""\
+        ini.write_text(
+            textwrap.dedent(
+                f"""\
             [pytest]
             cache_dir = {cache}
-        """), encoding="utf-8")
+        """
+            ),
+            encoding="utf-8",
+        )
+
 
 # Optional extra: sitecustomize fallback to keep pycache outside even if someone runs VPY directly
 def _ensure_sitecustomize() -> None:
@@ -477,13 +509,16 @@ def _ensure_sitecustomize() -> None:
             encoding="utf-8",
         )
 
+
 # ──────────────────────────────────────────────────────────────
 # Portable launchers that work BEFORE the venv exists
 # ──────────────────────────────────────────────────────────────
 def _create_launchers() -> None:
     # POSIX
     sh = HERE / "argos"
-    sh.write_text(textwrap.dedent("""\
+    sh.write_text(
+        textwrap.dedent(
+            """\
         #!/usr/bin/env bash
         set -euo pipefail
         HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -493,12 +528,17 @@ def _create_launchers() -> None:
         # keep *.pyc out of the repo
         export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
         exec "$VPY" -m panoptes.cli "$@"
-    """), encoding="utf-8")
+    """
+        ),
+        encoding="utf-8",
+    )
     os.chmod(sh, 0o755)
 
     # PowerShell
     ps1 = HERE / "argos.ps1"
-    ps1.write_text(textwrap.dedent(r"""\
+    ps1.write_text(
+        textwrap.dedent(
+            r"""\
         [CmdletBinding()] param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
         $ErrorActionPreference = "Stop"
         $HERE = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -508,11 +548,16 @@ def _create_launchers() -> None:
         $vpy = & $py "$HERE\bootstrap.py" --print-venv
         $env:PYTHONPYCACHEPREFIX = Join-Path $env:LOCALAPPDATA "rAIn\pycache"
         & $vpy -m panoptes.cli @Args
-    """), encoding="utf-8")
+    """
+        ),
+        encoding="utf-8",
+    )
 
     # Windows CMD (double-click)
     cmd = HERE / "argos.cmd"
-    cmd.write_text(textwrap.dedent(r"""\
+    cmd.write_text(
+        textwrap.dedent(
+            r"""\
         @echo off
         setlocal
         set HERE=%~dp0
@@ -527,7 +572,11 @@ def _create_launchers() -> None:
         for /f "usebackq delims=" %%i in (`%PY% "%HERE%bootstrap.py" --print-venv`) do set "VPY=%%i"
         set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
         "%VPY%" -m panoptes.cli %*
-    """), encoding="utf-8")
+    """
+        ),
+        encoding="utf-8",
+    )
+
 
 # ──────────────────────────────────────────────────────────────
 # First-run cheatsheet
@@ -569,6 +618,7 @@ CI / CD
       python projects/argos/bootstrap.py --ensure --yes
 """
     _print(textwrap.dedent(msg).rstrip())
+
 
 # ──────────────────────────────────────────────────────────────
 # Interactive first-run menu
@@ -614,15 +664,18 @@ def _first_run_menu() -> tuple[Optional[str], Optional[list[str]], bool]:
         else:
             _print("Please enter 1, 2, 3, 4 or 5.")
 
+
 # ──────────────────────────────────────────────────────────────
 # Driver
 # ──────────────────────────────────────────────────────────────
 def _first_run() -> bool:
     return not SENTINEL.exists()
 
+
 def _write_sentinel() -> None:
     SENTINEL.parent.mkdir(parents=True, exist_ok=True)
     SENTINEL.write_text(json.dumps({"version": 4}, indent=2), encoding="utf-8")
+
 
 def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
     d = "Y/n" if default_yes else "y/N"
@@ -634,6 +687,7 @@ def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
             return True
         if ans in {"n", "no"}:
             return False
+
 
 def _ensure(
     cpu_only: bool,
@@ -650,6 +704,7 @@ def _ensure(
         _ensure_weights_ultralytics(preset=preset, explicit_names=weight_names)
     _move_pytest_cache_out_of_repo()
     _ensure_sitecustomize()
+
 
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(add_help=True)
@@ -683,6 +738,8 @@ def main(argv: list[str]) -> int:
             preset = args.weights_preset
             picks: Optional[list[str]] = None
             skip = False
+
+            # Menu can run *before* venv exists thanks to _probe_weight_presets() fallback.
             if not args.yes and preset is None:
                 preset, picks, skip = _first_run_menu()
                 if preset:
@@ -701,6 +758,7 @@ def main(argv: list[str]) -> int:
     # Subsequent manual invocations: still idempotent
     _ensure(cpu_only, preset=args.weights_preset)
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
