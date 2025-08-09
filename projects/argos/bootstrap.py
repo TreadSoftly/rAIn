@@ -29,10 +29,18 @@ import shutil
 import subprocess
 import sys
 import textwrap
-from pathlib import Path
-from typing import Mapping, MutableMapping, Optional, Sequence, Tuple, Union, overload
-from typing import Literal  # pyright: ignore[reportUnusedImport]
 from os import PathLike
+from pathlib import Path
+from typing import (
+    Literal,  # pyright: ignore[reportUnusedImport]
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    overload,
+)
 
 APP = "rAIn"
 
@@ -212,9 +220,13 @@ def _pip_install_editable_if_needed() -> None:
 # Weights helpers
 # ──────────────────────────────────────────────────────────────
 def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str]]:
-    """Return (model_dir, all_names, default_names, nano_names) from registry."""
+    """Return (model_dir, all_names, default_names, nano_names) from registry.
+    Robust against noisy stdout on CI by writing JSON to a temp file.
+    """
+    import tempfile
+
     probe = r"""
-import json
+import json, sys
 from pathlib import Path
 from panoptes.model_registry import MODEL_DIR, WEIGHT_PRIORITY
 
@@ -227,7 +239,8 @@ def uniq(xs):
 
 all_names=[]
 for _, paths in WEIGHT_PRIORITY.items():
-    for p in paths: all_names.append(Path(p).name)
+    for p in paths:
+        all_names.append(Path(p).name)
 
 def first_or_none(lst): return lst[0] if lst else None
 detect_first  = first_or_none(WEIGHT_PRIORITY.get('detect', []))
@@ -239,13 +252,26 @@ default_names = [Path(detect_first).name if detect_first else None,
 nano_names = [Path(p).name for p in WEIGHT_PRIORITY.get('detect_small', []) +
                                WEIGHT_PRIORITY.get('heatmap_small', [])]
 
-print(json.dumps({'model_dir': str(MODEL_DIR),
-                  'all': uniq(all_names),
-                  'default': uniq(default_names),
-                  'nano': uniq(nano_names)}))
+out_path = Path(sys.argv[-1])
+out_path.write_text(json.dumps({
+    'model_dir': str(MODEL_DIR),
+    'all': uniq(all_names),
+    'default': uniq(default_names),
+    'nano': uniq(nano_names),
+}), encoding='utf-8')
 """
-    cp = _run([str(VPY), "-c", probe], check=True, capture=True)
-    meta = json.loads(cp.stdout.strip())
+    # Use a named temp file (closed) so Windows can reopen it in the child.
+    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tf:
+        out_path = Path(tf.name)
+    try:
+        _run([str(VPY), "-c", probe, str(out_path)], check=True, capture=False)
+        meta = json.loads(out_path.read_text(encoding="utf-8"))
+    finally:
+        try:
+            out_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     return Path(meta["model_dir"]).resolve(), list(meta["all"]), list(meta["default"]), list(meta["nano"])
 
 def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names: Optional[list[str]] = None) -> None:
