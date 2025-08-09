@@ -1,32 +1,59 @@
-# projects/argos/tests/conftest.py
-"""
-Shared pytest configuration.
-
-• Silences the noisy botocore UTC-deprecation warning that now fires under
-  Python 3.12+ / botocore 1.34+.
-• Creates the results folder up-front so subprocess tests never fail on a race
-  to `mkdir -p`.
-"""
+# projects/argos/tests/unit-tests/conftest.py
 from __future__ import annotations
 
-import os
-import warnings
+import importlib.util
+import shutil
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, List
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Silence botocore warning spam
-# ─────────────────────────────────────────────────────────────────────────────
-warnings.filterwarnings(
-    "ignore",
-    message=r"datetime\.datetime\.utcnow\(\) is deprecated",
-    category=DeprecationWarning,
-    module=r".*botocore",
-)
+import pytest
+from PIL import Image
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Ensure tests/results exists (helps when parallelising)
-# ─────────────────────────────────────────────────────────────────────────────
-# Use the shared results folder one level up to avoid creating
-# an unused tests/unit-tests/results directory.
-_RESULTS = Path(__file__).resolve().parents[1] / "results"
-os.makedirs(_RESULTS, exist_ok=True)
+# Type-only imports so static analyzers know what these are
+if TYPE_CHECKING:
+    from _pytest.config import Config
+    from _pytest.nodes import Item
+
+
+def _has_avif() -> bool:
+    try:
+        return (
+            ".avif" in Image.registered_extensions()
+            or importlib.util.find_spec("pillow_avif") is not None
+        )
+    except Exception:
+        return False
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_results_dir() -> None: # type: ignore[no-untyped-def]
+    """Always have projects/argos/tests/results ready (pytest autouse fixture)."""
+    out = Path("projects/argos/tests/results")
+    out.mkdir(parents=True, exist_ok=True)
+
+
+@pytest.fixture(scope="session")
+def cli_base_cmd() -> List[str]:
+    """
+    Helper for any future tests that want a robust way to invoke the CLI:
+    returns ["target"] if it's on PATH, otherwise falls back to
+    [python, -m, panoptes.cli].
+    """
+    exe = shutil.which("target")
+    if exe:
+        return ["target"]
+    return [sys.executable, "-m", "panoptes.cli"]
+
+
+def pytest_collection_modifyitems(config: "Config", items: List["Item"]) -> None:
+    """
+    If the AVIF plugin isn't present, automatically skip any tests whose nodeid
+    mentions 'avif' (covers functions/files with 'avif' in their names).
+    """
+    if _has_avif():
+        return
+    skip = pytest.mark.skip(reason="AVIF plugin missing (pip install pillow-avif-plugin)")
+    for item in items:
+        if "avif" in item.nodeid.lower():
+            item.add_marker(skip)

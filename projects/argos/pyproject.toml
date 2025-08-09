@@ -3,12 +3,12 @@ requires      = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name            = "panoptes"
-version         = "0.1.0"
-description     = "One-step JPEG / video inference for small-object detection."
-authors         = [{ name = "YOUR NAME", email = "you@example.com" }]
+name            = "Argos"
+version         = "1.2.0"
+description     = "The Many Eyed Sentinel"
+authors         = [{ name = "Dr4gnf1y", email = "shadowburner@protonmail.com" }]
 readme          = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.13"
 
 # ───────────────────────── runtime ─────────────────────────
 dependencies = [
@@ -23,7 +23,7 @@ dependencies = [
   "onnx>=1.18",
 
   # CV / numeric
-  "opencv-python-headless>=4.10,<4.12",   # avoid NumPy 2 ABI jump
+  "opencv-python-headless>=4.10,<4.12",
   "numpy<2",
   "pillow>=11.3",
   "pillow-avif-plugin>=1.4",
@@ -35,7 +35,7 @@ dependencies = [
   "redis>=5.0",            # optional - used for heatmap accumulation id
 
   # CLI
-  "typer[all]>=0.12",
+  "typer>=0.12",
 ]
 
 [project.optional-dependencies]
@@ -54,7 +54,18 @@ dev = [
 ]
 
 [project.scripts]
-target = "panoptes.cli:main"   # installs the `target` shell command
+# Primary entrypoints
+target  = "panoptes.cli:main"
+argos   = "panoptes.cli:main"
+
+# Convenience shorthands / aliases
+d       = "panoptes.cli:main_detect"
+detect  = "panoptes.cli:main_detect"
+hm      = "panoptes.cli:main_heatmap"
+heatmap = "panoptes.cli:main_heatmap"
+gj      = "panoptes.cli:main_geojson"
+geojson = "panoptes.cli:main_geojson"
+all     = "panoptes.cli:main_all"
 
 [tool.hatch.build]
 include = [
@@ -68,14 +79,14 @@ addopts   = "-q"
 testpaths = ["tests"]
 
 # ---------------------------------------------------------------------------
-#  Ruff / Black / Isort unified style-config (minimal - tweak as you like)
+#  Ruff / Black / Isort unified style-config
 # ---------------------------------------------------------------------------
 [tool.black]
 line-length = 100
 
 [tool.isort]
-profile      = "black"
-line_length  = 100
+profile           = "black"
+line_length       = 100
 force_single_line = true
 
 [tool.ruff]

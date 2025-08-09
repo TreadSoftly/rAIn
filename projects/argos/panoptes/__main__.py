@@ -1,3 +1,4 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\__main__.py
 
 """
 `python -m panoptes …` is merely a convenience wrapper that forwards
@@ -9,7 +10,7 @@ from __future__ import annotations
 import sys
 import typer
 
-from panoptes.cli import target as _target  # same command callable
+from panoptes.cli import target as _target # type: ignore
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 app.command()(_target)                         # expose under same name

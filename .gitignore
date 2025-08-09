@@ -9,6 +9,7 @@ __pycache__/
 *.pyd
 *.so
 *.egg-info/
+*.bak
 
 # ── Virtual-envs (top-level **and** inside sub-projects) ────────────────────
 .venv/

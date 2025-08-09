@@ -1,4 +1,4 @@
-# projects/argos/tests/unit-tests/test_heatmap.py
+# projects/argos/tests/unit-tests/test_heatmap_jpg_mp4.py
 """
 Pure-python unit test for the Gaussian-blur compositor that powers heat-maps.
 """
@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 
 from panoptes.heatmap import heatmap_overlay  # type: ignore[import-untyped]
+
 
 def test_basic_gaussian() -> None:
     size = (256, 256)

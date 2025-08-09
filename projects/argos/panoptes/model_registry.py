@@ -17,6 +17,8 @@ Hard-locking rules (2025-08-07)
 from __future__ import annotations
 
 import functools
+import logging
+import sys
 from pathlib import Path
 from typing import Final, Literal, Optional
 
@@ -27,6 +29,18 @@ try:
     from ultralytics import YOLO  # type: ignore
 except ImportError:  # pragma: no cover
     YOLO = None  # type: ignore[assignment]
+
+# ────────────────────────────────────────────────────────────────
+#  logging (explicit, human-friendly, no stack noise)
+# ────────────────────────────────────────────────────────────────
+_LOG = logging.getLogger("panoptes.model_registry")
+if not _LOG.handlers:
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(logging.Formatter("%(message)s"))
+    _LOG.addHandler(h)
+_LOG.setLevel(logging.INFO)
+def _say(msg: str) -> None:
+    _LOG.info(f"[panoptes] {msg}")
 
 # ────────────────────────────────────────────────────────────────
 #  Canonical model folders
@@ -46,46 +60,69 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 #  (No placeholders. No names that don’t exist.)
 # ────────────────────────────────────────────────────────────────
 WEIGHT_PRIORITY: dict[str, list[Path]] = {
-    # ── Object-detection (YOLO-v8/v11/v12 subset) ───────────────────────────
-    # Prefer newest/largest when available; fall back through real tiny models.
+    # ── Object detection ─────────────────────────────────────────────
     "detect": [
+        MODEL_DIR / "yolov8x.pt",        # MAIN
+        MODEL_DIR / "yolo11x.pt",        # BACKUP
+        MODEL_DIR / "yolov12x.onnx",     # light/fast dev
         MODEL_DIR / "yolov12x.pt",
-        MODEL_DIR / "yolo11x.pt",
-        MODEL_DIR / "yolov8x.pt",
+        MODEL_DIR / "yolo11x.onnx",
+        MODEL_DIR / "yolov8x.onnx",
+        MODEL_DIR / "yolo11s.pt",
+        MODEL_DIR / "yolo11s.onnx",
+        MODEL_DIR / "yolov8s.pt",
+        MODEL_DIR / "yolov8s.onnx",
+        MODEL_DIR / "yolov12n.onnx",
         MODEL_DIR / "yolov12n.pt",
         MODEL_DIR / "yolo11n.pt",
+        MODEL_DIR / "yolo11n.onnx",
         MODEL_DIR / "yolov8n.pt",
+        MODEL_DIR / "yolov8n.onnx",
     ],
-    # "geojson" uses same detector priority
+
+    # GeoJSON uses detection picks
     "geojson": [
-        MODEL_DIR / "yolov12x.pt",
-        MODEL_DIR / "yolo11x.pt",
         MODEL_DIR / "yolov8x.pt",
+        MODEL_DIR / "yolo11x.pt",
+        MODEL_DIR / "yolov12x.onnx",
+        MODEL_DIR / "yolov12x.pt",
+        MODEL_DIR / "yolo11x.onnx",
+        MODEL_DIR / "yolov8x.onnx",
+        MODEL_DIR / "yolo11s.pt",
+        MODEL_DIR / "yolo11s.onnx",
+        MODEL_DIR / "yolov8s.pt",
+        MODEL_DIR / "yolov8s.onnx",
+        MODEL_DIR / "yolov12n.onnx",
         MODEL_DIR / "yolov12n.pt",
         MODEL_DIR / "yolo11n.pt",
+        MODEL_DIR / "yolo11n.onnx",
         MODEL_DIR / "yolov8n.pt",
+        MODEL_DIR / "yolov8n.onnx",
     ],
 
-    # ── Instance-segmentation (YOLO-Seg) ───────────────────────────────────
-    # Prefer v12 seg (s) you actually have, then v11, then v8.
+    # ── Instance segmentation (heatmaps) ────────────────────────────
     "heatmap": [
-        MODEL_DIR / "yolov12s-seg.pt",
-        MODEL_DIR / "yolo11x-seg.pt",
+        MODEL_DIR / "yolo11x-seg.pt",    # MAIN
+        MODEL_DIR / "yolo11x-seg.onnx",
         MODEL_DIR / "yolo11s-seg.pt",
-        MODEL_DIR / "yolo11n-seg.pt",
+        MODEL_DIR / "yolo11s-seg.onnx",
         MODEL_DIR / "yolov8x-seg.pt",
+        MODEL_DIR / "yolov8x-seg.onnx",
+        MODEL_DIR / "yolov12s-seg.onnx",
+        MODEL_DIR / "yolov12s-seg.pt",
+        MODEL_DIR / "yolo11n-seg.pt",
+        MODEL_DIR / "yolo11n-seg.onnx",
         MODEL_DIR / "yolov8n-seg.pt",
+        MODEL_DIR / "yolov8n-seg.onnx",
     ],
 
-    # ── “--small / --fast” CLI flags (optional) ────────────────────────────
-    # Keep small variants CPU-friendly: prefer tiny .onnx where present.
+    # ── “small / fast” (live video / tiny devices) ──────────────────
     "detect_small": [
         MODEL_DIR / "yolov12n.onnx",
-        MODEL_DIR / "yolo11n.onnx",
-        MODEL_DIR / "yolov8n.onnx",
-        MODEL_DIR / "yolov12n.pt",
-        MODEL_DIR / "yolo11n.pt",
         MODEL_DIR / "yolov8n.pt",
+        MODEL_DIR / "yolo11n.pt",
+        MODEL_DIR / "yolov8n.onnx",
+        MODEL_DIR / "yolo11n.onnx",
     ],
     "heatmap_small": [
         MODEL_DIR / "yolov12s-seg.onnx",
@@ -97,6 +134,7 @@ WEIGHT_PRIORITY: dict[str, list[Path]] = {
     ],
 }
 
+
 # ────────────────────────────────────────────────────────────────
 #  Internal helpers
 # ────────────────────────────────────────────────────────────────
@@ -104,30 +142,19 @@ def _first_existing(paths: list[Path]) -> Optional[Path]:
     """Return the first path that exists on disk or *None*."""
     return next((p for p in paths if p.exists()), None)
 
-
 @functools.lru_cache(maxsize=None)
-def _load(weight: Optional[Path]):
+def _load(weight: Optional[Path], *, task: Literal["detect", "segment"]) -> object | None:
     """
-    Cached wrapper around ``YOLO(path)``
-
-    Returns
-    -------
-    YOLO | None
-        *None* when either Ultralytics is unavailable **or** *weight* is
-        ``None`` (i.e. no candidate file exists).
+    Cached wrapper around ``YOLO(path, task=...)`` to avoid re-inits,
+    and to kill the “Unable to automatically guess model task” warning.
     """
     if YOLO is None or weight is None:
         return None
-    return YOLO(str(weight))  # type: ignore[arg-type]
-
+    _say(f"init YOLO: task={task} path={weight}")
+    return YOLO(str(weight), task=task)  # type: ignore[arg-type]
 
 def _require(model: object | None, task: str):
-    """
-    Abort loudly when the chosen weight is missing.
-
-    The whole code-base relies on this hard failure to surface configuration
-    mistakes at import-time rather than during inference.
-    """
+    """Abort loudly when the chosen weight is missing."""
     if model is None:
         raise RuntimeError(f"[model_registry] no weight configured for task “{task}”")
     return model
@@ -145,26 +172,29 @@ def pick_weight(task: Literal["detect", "heatmap", "geojson"], *, small: bool = 
     key = f"{task}_small" if small else task
     return _first_existing(WEIGHT_PRIORITY.get(key, []))
 
-
 def load_detector(*, small: bool = False, override: str | Path | None = None):
     """Return a *YOLO* detector – honouring the override when provided."""
-    model = (
-        _load(Path(override).expanduser())
-        if override is not None
-        else _load(pick_weight("detect", small=small))
-    )
+    chosen: Optional[Path]
+    if override is not None:
+        chosen = Path(override).expanduser()
+        _say(f"task=detect small={small} override={chosen}")
+    else:
+        chosen = pick_weight("detect", small=small)
+        _say(f"task=detect small={small} weight={chosen}")
+    model = _load(chosen, task="detect")
     return _require(model, "detect")
-
 
 def load_segmenter(*, small: bool = False, override: str | Path | None = None):
     """Return a *YOLO-Seg* model – abort if no suitable weight is found."""
-    model = (
-        _load(Path(override).expanduser())
-        if override is not None
-        else _load(pick_weight("heatmap", small=small))
-    )
+    chosen: Optional[Path]
+    if override is not None:
+        chosen = Path(override).expanduser()
+        _say(f"task=heatmap small={small} override={chosen}")
+    else:
+        chosen = pick_weight("heatmap", small=small)
+        _say(f"task=heatmap small={small} weight={chosen}")
+    model = _load(chosen, task="segment")
     return _require(model, "heatmap")
-
 
 # Re-export for “from panoptes import *”
 __all__ = [

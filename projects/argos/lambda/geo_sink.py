@@ -1,7 +1,5 @@
-
+# projects/argos/lambda/geo_sink.py
 """
-projects/argos/lambda/geo_sink.py
-
 Helper that converts an *image URL* containing “…lat…_lon…” plus optional
 YOLO-style boxes into a GeoJSON FeatureCollection.
 
@@ -15,12 +13,8 @@ from __future__ import annotations
 import re
 import urllib.parse
 import uuid
-from datetime import datetime
-from datetime import timezone
-from typing import Any
-from typing import Dict
-from typing import Sequence
-from typing import Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, Sequence, Tuple
 
 # Accept “lat<N>_lon<M>” anywhere in the (decoded) URL / file-name
 _COORD_RE = re.compile(
@@ -34,6 +28,18 @@ def _latlon(url: str) -> Tuple[float, float]:
     if m is None:
         raise ValueError("lat/lon not found in URL")
     return float(m["lat"]), float(m["lon"])
+
+
+def _norm_conf(c: float | int | str | None) -> float | None:
+    if c is None:
+        return None
+    try:
+        v = float(c)
+    except Exception:
+        return None
+    if v > 1.0:
+        v = v / 100.0 if v <= 100 else v / 255.0
+    return round(max(0.0, min(1.0, v)), 4)
 
 
 def to_geojson(
@@ -59,22 +65,23 @@ def to_geojson(
 
     features: list[Dict[str, Any]] = []
     if boxes:  # detections → offset points
-        for x1, y1, x2, y2, conf in boxes:
+        for x1, y1, x2, y2, *rest in boxes:
+            conf = _norm_conf(rest[0] if rest else None)
             relx = ((x1 + x2) / 2 - 320) / 320  # centre-normalised
             rely = ((y1 + y2) / 2 - 320) / 320
-            features.append(
-                {
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [lon0 + relx * 0.005, lat0 - rely * 0.005],
-                    },
-                    "properties": {
-                        "conf": float(conf),
-                        "id": uuid.uuid4().hex,
-                    },
-                }
-            )
+            feat: Dict[str, Any] = {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [lon0 + relx * 0.005, lat0 - rely * 0.005],
+                },
+                "properties": {
+                    "id": uuid.uuid4().hex,
+                },
+            }
+            if conf is not None:
+                feat["properties"]["conf"] = conf
+            features.append(feat)
     else:  # no detections → just the centre
         features.append(
             {
@@ -86,6 +93,7 @@ def to_geojson(
 
     return {
         "type": "FeatureCollection",
+        "source": image_url,
         "features": features,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }

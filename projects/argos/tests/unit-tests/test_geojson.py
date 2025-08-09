@@ -5,7 +5,7 @@ public-domain photos whose URLs embed a ‘#lat…_lon…’ fragment.
 
 For every URL we:
 1. call the CLI with ``--task geojson``;
-2. load the JSON it prints to *stdout*;
+2. load the JSON it prints to *stdout* (even if warnings precede it);
 3. write that JSON to tests/results/<name>.geojson for manual inspection;
 4. assert that basic structure & coordinate accuracy are correct.
 """
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
@@ -49,9 +50,6 @@ RES_DIR = Path("projects/argos/tests/results")
 RES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ──────────────────────────────────────────────────────────────
-#  Helpers
-# ──────────────────────────────────────────────────────────────
 def _basename(url: str) -> str:
     """
     Return the stem of the final path component **without** any #fragment.
@@ -61,13 +59,32 @@ def _basename(url: str) -> str:
     >>> _basename('…/GoldenGateBridge-001.jpg#lat37_lon-122')
     'GoldenGateBridge-001'
     """
-    tail = urlparse(url).path.split("/")[-1]       # e.g. GoldenGateBridge-001.jpg
-    return Path(tail).stem                         # → GoldenGateBridge-001
+    tail = urlparse(url).path.split("/")[-1]  # e.g. GoldenGateBridge-001.jpg
+    return Path(tail).stem                     # → GoldenGateBridge-001
 
 
-# ──────────────────────────────────────────────────────────────
-#  Parametrised test
-# ──────────────────────────────────────────────────────────────
+def _extract_trailing_json(text: str) -> str:
+    """
+    Given CLI output that may have warnings or logs before the JSON,
+    return the final JSON object found at the end of the string.
+
+    We match the last '{ ... }' block anchored to the end to avoid
+    accidentally grabbing brace-like characters from warnings.
+    """
+    # Try a robust regex first
+    m = re.search(r"\{(?:.|\n|\r)*\}\s*$", text, re.MULTILINE)
+    if m:
+        return m.group(0)
+
+    # Fallback: slice from the first '{' to the last '}' if present
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+
+    raise AssertionError(f"CLI did not output valid JSON.\n--- raw ---\n{text}\n------------")
+
+
 @pytest.mark.parametrize(
     "url,exp_lat,exp_lon",
     CASES,
@@ -75,10 +92,16 @@ def _basename(url: str) -> str:
 )
 def test_remote_geojson(url: str, exp_lat: float, exp_lon: float) -> None:
     """Ensure CLI returns valid GeoJSON and write it to tests/results/."""
-
-    # target prints raw GeoJSON to stdout for remote URLs
-    raw = subprocess.check_output(["target", url, "--task", "geojson"])
-    geo = json.loads(raw)
+    # Capture output as text; some warnings may appear on stdout
+    proc = subprocess.run(
+        ["target", url, "--task", "geojson"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    txt = (proc.stdout or "").strip()
+    json_text = _extract_trailing_json(txt)
+    geo = json.loads(json_text)
 
     # 1️⃣  basic structure + mandatory fields ------------------------------
     assert geo["type"] == "FeatureCollection"

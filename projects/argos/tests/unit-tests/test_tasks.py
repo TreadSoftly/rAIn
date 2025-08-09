@@ -26,7 +26,8 @@ try:
 except ImportError:  # pragma: no cover
     from moto import mock_s3  # type: ignore
 
-from panoptes.model_registry import MODEL_DIR as _MODEL_DIR      # ← single source-of-truth
+from panoptes.model_registry import MODEL_DIR as _MODEL_DIR  # type: ignore
+from panoptes.model_registry import pick_weight  # type: ignore
 
 # ────────────────────────────────────────────────────────────────────
 # ❶  Lambda-handler unit tests
@@ -40,12 +41,14 @@ def _evt(img: Image.Image, task: str = "detect") -> Dict[str, str]:
     }
     return {"body": json.dumps(body)}
 
+
 def _stub_boxes(monkeypatch: Any, *boxes: Sequence[float]) -> None:
     monkeypatch.setattr(
         lam,
         "run_inference",
         lambda _img: np.array(boxes, dtype=float) if boxes else np.empty((0, 5), float),  # type: ignore
     )
+
 
 def test_detect_draws_rectangle(monkeypatch: Any) -> None:
     img = Image.new("RGB", (640, 640), "white")
@@ -58,6 +61,7 @@ def test_detect_draws_rectangle(monkeypatch: Any) -> None:
     assert rsp["isBase64Encoded"] is True
     assert body.startswith(b"\xFF\xD8")  # JPEG magic bytes
 
+
 def test_heatmap_200(monkeypatch: Any) -> None:
     img = Image.new("RGB", (640, 640), "white")
     _stub_boxes(monkeypatch, [320, 320, 330, 330, 0.8])
@@ -66,10 +70,11 @@ def test_heatmap_200(monkeypatch: Any) -> None:
     assert rsp["statusCode"] == 200
     assert rsp["isBase64Encoded"] is True
 
+
 def test_geojson_puts_to_s3(monkeypatch: Any) -> None:
     with mock_s3():
         s3 = boto3.client("s3", region_name="us-east-1")  # type: ignore[attr-defined]
-        s3.create_bucket(Bucket="out")                    # type: ignore[attr-defined]
+        s3.create_bucket(Bucket="out")  # type: ignore[attr-defined]
 
         url = "https://example/#lat37.0_lon-122.0.jpg"
         evt = {"body": json.dumps({"image_url": url, "task": "geojson"})}
@@ -88,17 +93,17 @@ def test_geojson_puts_to_s3(monkeypatch: Any) -> None:
 # ❷  Bulk helper – local samples  +  remote GeoJSON URLs
 # ────────────────────────────────────────────────────────────────────
 
-
-ROOT = Path(__file__).resolve().parents[2]                 # …/projects/argos
-RAW  = ROOT / "tests" / "raw"
-RES  = ROOT / "tests" / "results"
+ROOT = Path(__file__).resolve().parents[2]  # …/projects/argos
+RAW = ROOT / "tests" / "raw"
+RES = ROOT / "tests" / "results"
 RES.mkdir(parents=True, exist_ok=True)
 
-# You can override the weight file with:
-#    panoptes_TEST_WEIGHTS=path/to/weights.pt  pytest
-YOLO_WEIGHTS = Path(
-    os.getenv("panoptes_TEST_WEIGHTS", _MODEL_DIR / "yolo11x.pt")
-).expanduser()
+# Prefer separate hardcodes/envs for DETECT vs HEATMAP
+_det_default = pick_weight("detect") or (_MODEL_DIR / "yolov8n.pt")
+_seg_default = pick_weight("heatmap") or (_MODEL_DIR / "yolo11x-seg.pt")
+
+DETECT_WEIGHTS = Path(os.getenv("panoptes_TEST_DET_WEIGHTS", str(_det_default))).expanduser()
+SEG_WEIGHTS    = Path(os.getenv("panoptes_TEST_SEG_WEIGHTS", str(_seg_default))).expanduser()
 
 YOLO_KW: dict[str, object] = dict(conf=0.30, imgsz=640)
 
@@ -116,19 +121,24 @@ _GEO_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/4/40/Sydney_Opera_House_Sails.jpg#lat-33.8568_lon151.2153.jpg",
 ]
 
+
 def _is_video(p: Path) -> bool:
     return p.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"}
 
+
 def _annotate_image(img_path: Path) -> None:
     """Detect objects on *img_path* and write a JPEG preview to tests/results/."""
-    model = YOLO(str(YOLO_WEIGHTS))
+    # Pass task='detect' to avoid the "guess model task" warning
+    model = YOLO(str(DETECT_WEIGHTS), task="detect")  # type: ignore[arg-type]
     if img_path.suffix.lower() == ".avif":
-        rgb = np.asarray(Image.open(img_path).convert("RGB"))
-        res: List = model.predict(rgb, **YOLO_KW, save=False)  # type: ignore[arg-type]
+        from PIL import Image as _PILImage
+        rgb = np.asarray(_PILImage.open(img_path).convert("RGB"))
+        res: List = model.predict(rgb, **YOLO_KW, save=False, verbose=False)  # type: ignore[arg-type]
     else:
-        res = model.predict(str(img_path), **YOLO_KW, save=False)  # type: ignore[arg-type]
+        res = model.predict(str(img_path), **YOLO_KW, save=False, verbose=False)  # type: ignore[arg-type]
     out = RES / img_path.with_suffix(".jpg").name
     cv2.imwrite(str(out), res[0].plot())  # type: ignore[index]
+
 
 def _annotate_video(vid_path: Path) -> None:
     cmd = [
@@ -138,9 +148,10 @@ def _annotate_video(vid_path: Path) -> None:
         str(vid_path),
         f"out_dir={RES}",
         *(f"{k}={v}" for k, v in YOLO_KW.items()),
-        f"weights={YOLO_WEIGHTS}",
+        f"weights={DETECT_WEIGHTS}",
     ]
     subprocess.check_call(cmd)
+
 
 def _run_cli(inp: str, *, task: str, model: str = "primary") -> None:
     """Invoke the public CLI (`target`) for *heatmap* / *geojson* work."""
@@ -153,9 +164,16 @@ def _run_cli(inp: str, *, task: str, model: str = "primary") -> None:
         model,
         "--conf",
         str(YOLO_KW["conf"]),
-        "--small" if YOLO_WEIGHTS.name.endswith(("n.pt", "n.onnx")) else "",
     ]
-    subprocess.check_call([c for c in cmd if c])
+
+    if task == "heatmap":
+        # Use small for deterministic ONNX seg if desired, but explicitly pass seg weights
+        cmd += ["--small", "--seg-weights", str(SEG_WEIGHTS)]
+    elif task == "detect":
+        cmd += ["--det-weights", str(DETECT_WEIGHTS)]
+
+    subprocess.check_call(cmd)
+
 
 def main() -> None:  # pragma: no cover
     if not RAW.exists():
@@ -167,12 +185,14 @@ def main() -> None:  # pragma: no cover
     for src in items:
         if _is_video(src):
             print(f" • {src.name}", end="")
-            _annotate_video(src); print("")
+            _annotate_video(src)
+            print("")
             continue
 
         if src.suffix.lower() == ".avif":
             print(f"  {src.name}  (heat-map only)", end="")
-            _run_cli(str(src), task="heatmap"); print("")
+            _run_cli(str(src), task="heatmap")
+            print("")
             continue
 
         print(f"  {src.name}", end="")
@@ -187,14 +207,17 @@ def main() -> None:  # pragma: no cover
     print("\n→ GeoJSON sanity-checks…\n")
     for url in _GEO_URLS:
         print(f"  {url.split('#')[0].rsplit('/',1)[-1]}", end="")
-        _run_cli(url, task="geojson"); print("")
+        _run_cli(url, task="geojson")
+        print("")
 
     print(f"\nAll done → outputs in {RES}")
+
 
 # pytest hook
 @pytest.mark.skipif(not RAW.exists(), reason="tests/raw is absent; skipping bulk annotation")
 def test_bulk_annotation() -> None:
     main()
+
 
 if __name__ == "__main__":  # pragma: no cover
     main()

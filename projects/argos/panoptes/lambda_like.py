@@ -1,4 +1,3 @@
-# panoptes/lambda_like.py
 """
 Lock-down (2025-08-07)
 ────────────────────────────────────────────────────────────────────
@@ -6,9 +5,8 @@ Lock-down (2025-08-07)
   only – **no** environment-variable or directory scanning.
 * One detector + one segmenter are initialised at import-time; if either
   weight is missing the module raises *RuntimeError* immediately.
-* The optional *override=* path exposed by `load_detector/segmenter`
-  remains available for unit-tests, but this file no longer tries to
-  read any env-vars on its own.
+* A tiny re-init helper lets the CLI steer --small per command without
+  breaking the hard-locking rules.
 """
 
 from __future__ import annotations
@@ -17,12 +15,12 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import os
 import re
 import sys
 import urllib.parse
 import urllib.request
-from importlib import import_module
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
@@ -35,6 +33,17 @@ from PIL import Image, ImageDraw, ImageFont
 from .geo_sink import to_geojson
 from .heatmap import heatmap_overlay
 from .model_registry import load_detector, load_segmenter  # strict, hard-coded
+
+# ─────────────────────────── logging ─────────────────────────────────────
+_LOG = logging.getLogger("panoptes.lambda_like")
+if not _LOG.handlers:
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(logging.Formatter("%(message)s"))
+    _LOG.addHandler(h)
+_LOG.setLevel(logging.INFO)
+
+def _say(msg: str) -> None:
+    _LOG.info(f"[panoptes] {msg}")
 
 # ─────────────────────────── paths & helpers ─────────────────────────────
 _BASE = Path(__file__).resolve().parent          # …/panoptes
@@ -49,17 +58,31 @@ except ImportError:                # pragma: no cover
     _has_yolo = False
 
 # ─────────────────────────── model initialisation ────────────────────────
-# NOTE: absolutely NO env-var reads – weights come solely from model_registry
-_det_model = load_detector()       # may raise RuntimeError if missing
-_seg_model = load_segmenter(small=True)      # may raise RuntimeError if missing  ← ONNX-first for seg
+# Default boot: fast seg (small=True), normal det
+_det_model: Any = load_detector(small=False)
+_seg_model: Any = load_segmenter(small=True)
 
-# Expose the segmenter instance to the heat-map helper so subsequent calls
-# avoid re-loading the weight over and over.
-try:
-    import panoptes.heatmap as _hm
-    setattr(_hm, "_seg_model", _seg_model)       # type: ignore[attr-defined]
-except ImportError:               # pragma: no cover
-    pass
+def reinit_models(
+    *,
+    detect_small: Optional[bool] = None,
+    segment_small: Optional[bool] = None,
+    det_override: Optional[Union[str, Path]] = None,
+    seg_override: Optional[Union[str, Path]] = None,
+) -> tuple[Any, Any]:
+    """
+    Re-initialize one or both models under hard-locked registry rules.
+
+    Used by the CLI to make `--small` apply to still-image flows too.
+    Returns (det_model, seg_model).
+    """
+    global _det_model, _seg_model
+    if detect_small is not None or det_override is not None:
+        _det_model = load_detector(small=bool(detect_small), override=det_override)
+        _say(f"reinit detector small={bool(detect_small)}")
+    if segment_small is not None or seg_override is not None:
+        _seg_model = load_segmenter(small=bool(segment_small), override=seg_override)
+        _say(f"reinit segmenter small={bool(segment_small)}")
+    return _det_model, _seg_model
 
 # ─────────────────────────── inference helpers ──────────────────────────
 def run_inference(
@@ -77,14 +100,12 @@ def run_inference(
     """
     if not _has_yolo:
         raise RuntimeError("Ultralytics YOLO is not installed in this environment.")
-    # _det_model cannot be None – load_detector() hard-fails when missing
     res_list = _det_model.predict(img, imgsz=640, conf=conf_thr, verbose=False)  # type: ignore
     if not res_list:
         return np.empty((0, 6), dtype=np.float32)
 
     res: Any = res_list[0]  # type: ignore[assignment]
     boxes = getattr(res, "boxes", None)  # type: ignore
-    # boxes is expected to be an object with a 'data' attribute
     if boxes is None or not hasattr(boxes, "data"):
         return np.empty((0, 6), dtype=np.float32)
 
@@ -101,7 +122,7 @@ def run_inference(
     return boxes_arr.reshape(-1, 6) if boxes_arr.size else np.empty((0, 6), dtype=np.float32)
 
 
-def _draw_boxes( # type: ignore[too-many-locals]
+def _draw_boxes(  # type: ignore[too-many-locals]
     img: Image.Image,
     boxes: np.ndarray[Any, Any],
     label: Optional[str] = None,
@@ -119,7 +140,6 @@ def _draw_boxes( # type: ignore[too-many-locals]
 
         draw.rectangle((x1, y1, x2, y2), outline="red", width=3)
 
-        # ---- label text -------------------------------------------------
         text = ""
         if conf is not None:
             text = f"{conf:.2f}"
@@ -139,16 +159,15 @@ def _draw_boxes( # type: ignore[too-many-locals]
 
         if text:
             font      = ImageFont.load_default()
-            safe_text = text
-            text_bbox = draw.textbbox((0, 0), safe_text, font=font)
+            text_bbox = draw.textbbox((0, 0), text, font=font)
             tx, ty    = float(x1), max(0.0, float(y1) - (text_bbox[3] - text_bbox[1]) - 2.0)
             draw.rectangle(
                 (int(round(tx)), int(round(ty)),
-                int(round(tx + (text_bbox[2] - text_bbox[0]) + 2)),
-                int(round(ty + (text_bbox[3] - text_bbox[1]) + 2))),
+                 int(round(tx + (text_bbox[2] - text_bbox[0]) + 2)),
+                 int(round(ty + (text_bbox[3] - text_bbox[1]) + 2)) ),
                 fill="black",
             )
-            draw.text((int(tx + 1), int(ty + 1)), safe_text, fill="red", font=font)
+            draw.text((int(tx + 1), int(ty + 1)), text, fill="red", font=font)
 
     return img
 
@@ -159,7 +178,7 @@ def _is_remote(src: str) -> bool:
 
 
 # ─────────────────────────── public entry-point ─────────────────────────
-def run_single(                          # noqa: C901 – core worker
+def run_single(  # noqa: C901 – core worker
     src: Union[str, os.PathLike[str]],
     *,
     model: str = "primary",              # accepted but unused (CLI legacy)
@@ -195,7 +214,7 @@ def run_single(                          # noqa: C901 – core worker
                 src_str.lower().startswith(("http://", "https://"))
                 and re.search(r"lat-?\d+(?:\.\d+)?_lon-?\d+(?:\.\d+)?", urllib.parse.unquote(src_str))
             ):
-                geo = import_module("lambda.geo_sink").to_geojson(
+                geo = __import__("lambda.geo_sink", fromlist=["to_geojson"]).to_geojson(
                     src_str,
                     [list(b)[:5] for b in boxes.tolist()] if boxes.size else None,
                 )
@@ -207,7 +226,6 @@ def run_single(                          # noqa: C901 – core worker
         except Exception:
             geo = to_geojson("", [list(b)[:5] for b in boxes.tolist()] if boxes.size else None)
 
-        # timestamp
         import datetime as _dt
         geo["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
@@ -218,7 +236,7 @@ def run_single(                          # noqa: C901 – core worker
             out_path = ROOT / "tests" / "results" / f"{stem}.geojson"
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(geo, indent=2))
-            print(f"★ wrote {out_path}")
+            _say(f"wrote {out_path}")
         return
 
     # ── HEAT-MAP mode ────────────────────────────────────────────────────────
@@ -243,29 +261,17 @@ def run_single(                          # noqa: C901 – core worker
 
     # ── DETECT mode (default) ────────────────────────────────────────────────
     else:
-        # Ultralytics already plotted boxes for us inside _det_model
         res     = _det_model.predict(pil_img, imgsz=640, conf=conf_thr, verbose=False)[0]  # type: ignore
         plotted: np.ndarray = res.plot()                                                   # type: ignore
-        if isinstance(plotted, np.ndarray):
-            arr = plotted[:, :, ::-1].astype(np.uint8)
-        else:
-            arr = np.asarray(plotted, dtype=np.uint8)
-            if arr.ndim == 3 and arr.shape[2] == 3:
-                arr = arr[:, :, ::-1]
+        arr = np.asarray(plotted, dtype=np.uint8)
+        if arr.ndim == 3 and arr.shape[2] == 3:
+            arr = arr[:, :, ::-1]
         out_img = Image.fromarray(arr)
 
         out_ext  = Path(src_str).suffix.lower() if Path(src_str).suffix.lower() in {".jpg", ".jpeg", ".png"} else ".jpg"
         out_path = ROOT / "tests" / "results" / f"{stem}_boxes{out_ext}"
 
     # ---- write / stream result ---------------------------------------------
-    if isinstance(out_img, np.ndarray):
-        out_img = Image.fromarray(out_img.astype(np.uint8))
-
-    if _is_remote(src_str):
-        buf = io.BytesIO()
-        out_img.save(buf, format="JPEG")
-        sys.stdout.write(base64.b64encode(buf.getvalue()).decode() + "\n")
-    else:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_img.save(out_path)
-        print(f"★ wrote {out_path}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_img.save(out_path)
+    _say(f"wrote {out_path}")

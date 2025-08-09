@@ -1,4 +1,3 @@
-# projects/argos/lambda/app.py
 """
 AWS-Lambda entry-point for the Argos demo
 ===============================================
@@ -9,10 +8,11 @@ Lock-down (2025-08-07)
   referenced in `panoptes.model_registry.WEIGHT_PRIORITY`.
 * No `panoptes_*` environment variables, no directory walks.
 * One detector + one segmenter are initialised at import-time; if either
-  weight is missing **module import fails** (raises *RuntimeError*),
-  surfacing a clear cold-start error in the Lambda logs.
+  weight is missing **module import fails** (raises *RuntimeError*).
 * Public request/response JSON schema remains unchanged.
 """
+
+# pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import base64
 import datetime as _dt
 import io
 import json
+import logging
 import os
 import urllib.request
 import uuid
@@ -35,15 +36,28 @@ from PIL import Image, ImageDraw, ImageFont
 from .heatmap import heatmap_overlay  # local helper tied to ONNX/“small”
 
 # ── internal project imports ──────────────────────────────────────────
-from panoptes.model_registry import (
+from panoptes.model_registry import (  # type: ignore
     load_detector,  # single source-of-truth
     load_segmenter,
 )
 from .geo_sink import to_geojson  # type: ignore
 
+# ───────────────────────── logging ────────────────────────────────────
+_LOG = logging.getLogger("panoptes.lambda.app")
+if not _LOG.handlers:
+    import sys
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(logging.Formatter("%(message)s"))
+    _LOG.addHandler(h)
+_LOG.setLevel(logging.INFO)
+def _say(msg: str) -> None:
+    _LOG.info(f"[panoptes] {msg}")
+
 # ───────────────────────── hard-fail model initialisation ─────────────
-_det_model = load_detector(small=True)    # raises RuntimeError if weight missing
-_seg_model = load_segmenter(small=True)   # raises RuntimeError if weight missing
+# Keep small=True in Lambda for both by default (fast cold starts).
+_det_model: Any = load_detector(small=True)    # raises RuntimeError if weight missing
+_seg_model: Any = load_segmenter(small=True)   # raises RuntimeError if weight missing
+_say("lambda init: detect small=True; heatmap small=True")
 
 # ───────────────────────── helpers ────────────────────────────────────
 def _fetch_image(src: str, timeout: int = 10) -> Image.Image:
@@ -60,7 +74,6 @@ def _fetch_image(src: str, timeout: int = 10) -> Image.Image:
 def _run_inference(img: Image.Image) -> NDArray[np.float32]:
     """
     Run object detection – returns ndarray [N,6] (x1,y1,x2,y2,conf,cls).
-
     *Never* returns None – any weight issues were surfaced at import time.
     """
     res: Any = _det_model.predict(img, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
@@ -113,6 +126,7 @@ def handler(event: Dict[str, Any], _ctx: Any) -> Dict[str, Any]:
         body = json.loads(event["body"])
         src  = body["image_url"]
         task = body.get("task", "detect").lower()
+        _say(f"lambda request: task={task}")
 
         # ── GeoJSON only ───────────────────────────────────────────────
         if task == "geojson":

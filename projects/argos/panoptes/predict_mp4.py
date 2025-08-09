@@ -1,12 +1,13 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\predict_mp4.py
 """
-predict_mp4.py – per‑frame object‑detection overlay for videos.
+predict_mp4.py – per-frame object-detection overlay for videos.
 
-Lock‑down (2025‑08‑07)
+Lock-down (2025-08-07)
 ────────────────────────────────────────────────────────────────────
 * Model selection is **strict**:
       1. an explicit *weights=* argument (override path)
       2. `panoptes.model_registry.load_detector()`
-        – which itself enforces the hard‑coded `WEIGHT_PRIORITY["detect"]`.
+        – which itself enforces the hard-coded `WEIGHT_PRIORITY["detect"]`.
 
 * If the detector weight is missing (or Ultralytics is not installed) the
   script aborts with a clear error; it no longer copies the video verbatim.
@@ -16,6 +17,7 @@ Lock‑down (2025‑08‑07)
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import sys
@@ -25,10 +27,9 @@ from typing import Any
 
 import cv2
 import numpy as np
-from PIL import Image # type: ignore
 
-from panoptes import ROOT
-from panoptes.model_registry import load_detector
+from panoptes import ROOT # type: ignore
+from panoptes.model_registry import load_detector # type: ignore
 
 # Ultralytics may be absent in some minimal environments
 try:
@@ -36,10 +37,19 @@ try:
 except ImportError:  # pragma: no cover
     YOLO = None  # type: ignore
 
+# ───────────────────────── logging ──────────────────────────
+_LOG = logging.getLogger("panoptes.predict_mp4")
+if not _LOG.handlers:
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(logging.Formatter("%(message)s"))
+    _LOG.addHandler(h)
+_LOG.setLevel(logging.INFO)
+def _say(msg: str) -> None:
+    _LOG.info(f"[panoptes] {msg}")
 
 # ───────────────────────── helpers ──────────────────────────
 def _auto(v: str) -> object:
-    """Tiny literal‑to‑Python converter for CLI k=v pairs."""
+    """Tiny literal-to-Python converter for CLI k=v pairs."""
     lv = v.lower()
     if lv in {"true", "false"}:
         return lv == "true"
@@ -47,7 +57,6 @@ def _auto(v: str) -> object:
         return int(v) if v.isdigit() else float(v)
     except ValueError:
         return v
-
 
 def _avi_writer(path: Path, fps: float, size: tuple[int, int]) -> cv2.VideoWriter:
     vw = cv2.VideoWriter(
@@ -59,7 +68,6 @@ def _avi_writer(path: Path, fps: float, size: tuple[int, int]) -> cv2.VideoWrite
     if not vw.isOpened():
         raise RuntimeError("❌  OpenCV cannot open any MJPG writer on this system.")
     return vw
-
 
 # ───────────────────────── main worker ─────────────────────
 def main(  # noqa: C901 – CLI glue
@@ -73,16 +81,6 @@ def main(  # noqa: C901 – CLI glue
 ) -> Path:
     """
     Overlay YOLO detections on *src* video and emit <stem>_det.mp4>.
-
-    Parameters
-    ----------
-    src      : input video path.
-    weights  : optional explicit weight file (bypasses registry).
-               **Can be a folder** – in that case the registry decides.
-    conf     : confidence threshold (0‑1).
-    imgsz    : inference image size.
-    out_dir  : output folder (default tests/results).
-    **kw     : forwarded verbatim to YOLO.predict().
     """
     if YOLO is None:
         raise RuntimeError("Ultralytics YOLO is not installed in this environment.")
@@ -103,14 +101,10 @@ def main(  # noqa: C901 – CLI glue
         cand = Path(weights).expanduser().resolve()
         if not cand.exists():
             raise FileNotFoundError(f"override weight not found: {cand}")
-
-        # If a **directory** was passed (as the unit‑tests do), fall back
-        # to the registry‑defined priority instead of giving Ultralytics
-        # an unsupported path.
         override_path = None if cand.is_dir() else cand
 
-    # ── acquire the detector model (hard‑fail if missing) ────────────
-    det_model = load_detector(override=override_path)  # may raise RuntimeError
+    # ── acquire the detector model (hard-fail if missing) ────────────
+    det_model = load_detector(override=override_path)  # registry logs selection
 
     # ── open video stream & temp writer ──────────────────────────────
     cap = cv2.VideoCapture(str(src))
@@ -120,6 +114,7 @@ def main(  # noqa: C901 – CLI glue
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    _say(f"video detect: src={src.name} fps={fps:.3f} size={w}x{h}")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="dv_det_"))
     avi = tmp_dir / f"{src.stem}.avi"
@@ -135,7 +130,7 @@ def main(  # noqa: C901 – CLI glue
             res = det_model.predict(frame, imgsz=imgsz, conf=conf, verbose=False, **kw)  # type: ignore[arg-type]
             plotted = res[0].plot()  # type: ignore[index]
             out_bgr = np.asarray(plotted, dtype=np.uint8)
-        except Exception as exc:  # pragma: no cover – propagate so user sees failure
+        except Exception as exc:  # pragma: no cover
             cap.release()
             vw.release()
             raise RuntimeError(f"YOLO inference failed: {exc}") from exc
@@ -145,7 +140,7 @@ def main(  # noqa: C901 – CLI glue
     cap.release()
     vw.release()
 
-    # ── re‑encode MJPG → H.264 MP4 via FFmpeg ────────────────────────
+    # ── re-encode MJPG → H.264 MP4 via FFmpeg ────────────────────────
     final = out_dir / f"{src.stem}_det.mp4"
     try:
         subprocess.run(
@@ -170,15 +165,13 @@ def main(  # noqa: C901 – CLI glue
         )
         avi.unlink(missing_ok=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
-        # FFmpeg unavailable – keep MJPG container
         shutil.move(str(avi), str(final))
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    print(f"✅  Saved → {final}")
+    _say(f"Saved → {final}")
     return final
 
-
-# ───────────────────────── CLI entry‑point ──────────────────
+# ───────────────────────── CLI entry-point ──────────────────
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit("Usage: python -m panoptes.predict_mp4 <video> [k=v …]")

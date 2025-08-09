@@ -1,21 +1,22 @@
+# projects/argos/panoptes/geo_sink.py
 """
 panoptes.geo_sink - pixel-space ↔ geo-space GeoJSON helper
 """
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 import re
 import uuid
 from importlib import import_module
 from pathlib import Path
-from typing import Any
-from typing import Dict
-from typing import Sequence
-from typing import Tuple
+from typing import Any, Dict, Sequence, Tuple
 
 from PIL import Image
 
 __all__ = ["to_geojson"]
+
+_LOG = logging.getLogger("panoptes.geo_sink")
 
 # ───────────────────────── helpers ──────────────────────────────────────────
 _LATLON_TAG = re.compile(r"#lat-?\d+(?:\.\d+)?_lon-?\d+(?:\.\d+)?", re.I)
@@ -30,6 +31,10 @@ def _image_size(src: str | Path) -> Tuple[int, int]:
         return 640, 960
 
 
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+
 def _point_feature(cx: float, cy: float, conf: float | None = None) -> Dict[str, Any]:
     prop: Dict[str, Any] = {"id": uuid.uuid4().hex}
     if conf is not None:
@@ -37,7 +42,7 @@ def _point_feature(cx: float, cy: float, conf: float | None = None) -> Dict[str,
         c = float(conf)
         if c > 1.0:
             c = c / 100.0 if c <= 100 else c / 255.0
-        prop["conf"] = round(c, 4)
+        prop["conf"] = round(max(0.0, min(1.0, c)), 4)
     return {
         "type": "Feature",
         "geometry": {"type": "Point", "coordinates": [cx, cy]},
@@ -68,18 +73,16 @@ def to_geojson(
         lam = import_module("lambda.geo_sink")
         geo = lam.to_geojson(src_str, boxes)
         # ensure timestamp & IDs are present (legacy helper may lack them)
-        geo.setdefault(
-            "timestamp", _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
-        )
+        geo.setdefault("timestamp", _now_iso())
+        geo.setdefault("source", src_str)
         for f in geo.get("features", []):
-            f.setdefault("properties", {})["id"] = f["properties"].get(
-                "id", uuid.uuid4().hex
-            )
+            f.setdefault("properties", {})["id"] = f["properties"].get("id", uuid.uuid4().hex)
+        _LOG.info("[panoptes] geo_sink: mode=latlon source=%s features=%d",
+                  src_str, len(geo.get("features", [])))
         return geo
 
     # — pixel-space branch ──────────────────────────────────────────────────
     feats: list[Dict[str, Any]] = []
-
     if boxes:
         for box in boxes:
             x1, y1, x2, y2, *rest = box
@@ -89,9 +92,11 @@ def to_geojson(
         w, h = _image_size(src_str)
         feats.append(_centre_feature(w, h))
 
-    return {
+    out: Dict[str, Any] = {
         "type": "FeatureCollection",
         "source": src_str,
-        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "timestamp": _now_iso(),
         "features": feats,
     }
+    _LOG.info("[panoptes] geo_sink: mode=pixel source=%s features=%d", src_str, len(feats))
+    return out
