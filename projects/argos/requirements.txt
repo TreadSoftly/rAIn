@@ -2,7 +2,7 @@ torch==2.3.*
 torchvision==0.18.*
 ultralytics>=8.0
 
-onnxruntime==1.23.*
+onnxruntime>=1.23,<1.24
 onnx>=1.12,<1.18
 onnxslim>=0.1.59
 
@@ -17,7 +17,7 @@ pandas>=2.2
 redis>=5.0
 
 typer[all]>=0.12
-thop>=0.1.2
+thop==0.1.1.post2209072238
 
 boto3>=1.34
 moto[all]~=4.2
