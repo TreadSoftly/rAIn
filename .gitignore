@@ -59,3 +59,5 @@ Thumbs.db
 # ── Historical artefacts we no longer need ──────────────────────────────────
 projects/argos/requirements-py39.txt
 ###############################################################################
+projects/argos/panoptes/model/*.pt
+projects/argos/panoptes/model/*.onnx
