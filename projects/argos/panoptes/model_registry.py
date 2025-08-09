@@ -22,6 +22,7 @@ import importlib
 import sys
 from pathlib import Path
 from typing import Final, Literal, Optional
+
 # ────────────────────────────────────────────────────────────────
 #  Ultralytics import (kept soft so linting works without it)
 # ────────────────────────────────────────────────────────────────
@@ -136,6 +137,7 @@ WEIGHT_PRIORITY: dict[str, list[Path]] = {
 def _first_existing(paths: list[Path]) -> Optional[Path]:
     """Return the first path that exists on disk or *None*."""
     return next((p for p in paths if p.exists()), None)
+
 @functools.lru_cache(maxsize=None)
 def _load(weight: Optional[Path], *, task: Literal["detect", "segment"]) -> object | None:
     """

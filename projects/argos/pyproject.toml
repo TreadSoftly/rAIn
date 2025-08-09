@@ -30,7 +30,7 @@ dependencies = [
   "opencv-python-headless>=4.10,<4.12",
 
   # NumPy — avoid 2.0.* ABI breakage seen on GH runners
-  "numpy!=2.0.*,>=1.26,<3",
+  "numpy!=2.0.*,>=1.26,<2.3",  # <-- Pin NumPy to prevent breaking changes
 
   "pillow>=10.0,<12.0",
   "pillow-avif-plugin>=1.4",
@@ -56,6 +56,7 @@ dev = [
   "boto3",
   "moto[all]~=4.2",
 ]
+
 # Keep audio optional to avoid torchaudio pinning torch for everyone.
 audio = [
   "torchaudio>=2.3,<2.4",

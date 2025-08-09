@@ -15,8 +15,8 @@ onnxslim>=0.1.59
 
 opencv-python-headless>=4.10,<4.12
 
-# NumPy — avoid 2.0.* ABI breakage
-numpy!=2.0.*,>=1.26,<3
+# NumPy — hard-cap to avoid 2.3+ ABI breakage on runners
+numpy!=2.0.*,>=1.26,<2.3
 
 pillow>=10.0,<12.0
 pillow-avif-plugin>=1.4

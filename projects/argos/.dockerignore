@@ -1,18 +1,26 @@
-# ░░░ Files to KEEP OUT of the Docker build context ░░░
+# Ignore everything by default to keep the Docker build context tiny
+**
+
+# Keep these (Lambda build needs both dirs)
+!.dockerignore
+!lambda/
+!lambda/**
+!panoptes/
+!panoptes/**
+
+# But exclude heavy .pt weights; Lambda copies only ONNX
+panoptes/model/*.pt
+panoptes/model/**/*.pt
+
+# Noise
 **/__pycache__/
+**/*.pyc
 **/.pytest_cache/
-**/.venv/
-**/.vscode/
-**/.git/
-**/.gitignore
-cdk.out/
-web/
-
-# media / raw assets the Lambda image never needs
-*.jpg
-*.png
-*.mp4
-*.csv
-
-# ░░░ BUT keep the model weights ░░░
-!model/**
+venv/
+.venv/
+dist/
+build/
+artifacts/
+node_modules/
+*.log
+tests/

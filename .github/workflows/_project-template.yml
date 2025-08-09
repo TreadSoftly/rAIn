@@ -35,6 +35,7 @@ jobs:
           cache-dependency-path: |
             ${{ inputs.project-dir }}/pyproject.toml
             ${{ inputs.project-dir }}/requirements.txt
+            ${{ inputs.project-dir }}/constraints.txt
 
       # 1) Warm models so Docker can COPY them
       - name: Warm models (bootstrap)
