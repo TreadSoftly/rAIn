@@ -94,7 +94,7 @@ def test_remote_geojson(url: str, exp_lat: float, exp_lon: float) -> None:
     """Ensure CLI returns valid GeoJSON and write it to tests/results/."""
     # Capture output as text; some warnings may appear on stdout
     proc = subprocess.run(
-        ["target", url, "--task", "geojson"],
+        ["target", url, "--task", "geojson", "--small"],
         check=True,
         capture_output=True,
         text=True,
