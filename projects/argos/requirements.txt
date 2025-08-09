@@ -1,7 +1,8 @@
-# projects/argos/requirements.txt
-
-torch==2.3.*
-torchvision==0.18.*
+# Core ML stack
+torch==2.3.* ; python_version < '3.12'
+torchvision==0.18.* ; python_version < '3.12'
+torch>=2.4,<2.6 ; python_version >= '3.12'
+torchvision>=0.19,<0.21 ; python_version >= '3.12'
 ultralytics>=8.0
 
 # ONNX Runtime (platform / Python aware to match pyproject)
@@ -14,8 +15,8 @@ onnxslim>=0.1.59
 
 opencv-python-headless>=4.10,<4.12
 
-# Loosen so Torch wheels on CI can use NumPy 2.x where applicable
-numpy>=1.26.*
+# NumPy — avoid 2.0.* ABI breakage
+numpy!=2.0.*,>=1.26,<3
 
 pillow>=10.0,<12.0
 pillow-avif-plugin>=1.4

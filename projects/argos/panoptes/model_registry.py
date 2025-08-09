@@ -18,17 +18,19 @@ from __future__ import annotations
 
 import functools
 import logging
+import importlib
 import sys
 from pathlib import Path
 from typing import Final, Literal, Optional
-
 # ────────────────────────────────────────────────────────────────
 #  Ultralytics import (kept soft so linting works without it)
 # ────────────────────────────────────────────────────────────────
 try:
-    from ultralytics import YOLO  # type: ignore
-except ImportError:  # pragma: no cover
-    YOLO = None  # type: ignore[assignment]
+    _ultra_mod = importlib.import_module("ultralytics")
+    _yolo_cls = getattr(_ultra_mod, "YOLO", None)
+except Exception:  # pragma: no cover
+    _yolo_cls = None
+    YOLO = None
 
 # ────────────────────────────────────────────────────────────────
 #  logging (explicit, human-friendly, no stack noise)
@@ -134,8 +136,6 @@ WEIGHT_PRIORITY: dict[str, list[Path]] = {
 def _first_existing(paths: list[Path]) -> Optional[Path]:
     """Return the first path that exists on disk or *None*."""
     return next((p for p in paths if p.exists()), None)
-
-
 @functools.lru_cache(maxsize=None)
 def _load(weight: Optional[Path], *, task: Literal["detect", "segment"]) -> object | None:
     """
@@ -145,13 +145,13 @@ def _load(weight: Optional[Path], *, task: Literal["detect", "segment"]) -> obje
     Some Ultralytics builds don't accept the ``task=`` kwarg; fall back
     to plain ``YOLO(path)`` in that case.
     """
-    if YOLO is None or weight is None:
+    if _yolo_cls is None or weight is None:
         return None
     _say(f"init YOLO: task={task} path={weight}")
     try:
-        return YOLO(str(weight), task=task)  # type: ignore[arg-type]
+        return _yolo_cls(str(weight), task=task)
     except TypeError:
-        return YOLO(str(weight))  # type: ignore[arg-type]
+        return _yolo_cls(str(weight))
 
 
 def _require(model: object | None, task: str) -> object:

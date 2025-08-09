@@ -12,8 +12,10 @@ requires-python = ">=3.9,<3.13"
 
 dependencies = [
   # Core ML stack
-  "torch==2.3.*",
-  "torchvision==0.18.*",
+  "torch==2.3.* ; python_version < '3.12'",
+  "torchvision==0.18.* ; python_version < '3.12'",
+  "torch>=2.4,<2.6 ; python_version >= '3.12'",
+  "torchvision>=0.19,<0.21 ; python_version >= '3.12'",
   "ultralytics>=8.0",
 
   # ONNX Runtime (platform/py aware to satisfy Win+Py3.12)
@@ -27,8 +29,8 @@ dependencies = [
   # Imaging / numerics
   "opencv-python-headless>=4.10,<4.12",
 
-  # Loosen so Torch wheels on CI can use NumPy 2.x where available
-  "numpy==2.0.*",
+  # NumPy — avoid 2.0.* ABI breakage seen on GH runners
+  "numpy!=2.0.*,>=1.26,<3",
 
   "pillow>=10.0,<12.0",
   "pillow-avif-plugin>=1.4",
