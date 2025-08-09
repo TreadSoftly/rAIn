@@ -44,6 +44,10 @@ from typing import (
 
 APP = "rAIn"
 
+# Help Windows avoid legacy codepage weirdness in child processes (CI, cmd.exe)
+if os.name == "nt":
+    os.environ.setdefault("PYTHONUTF8", "1")
+
 # ──────────────────────────────────────────────────────────────
 # Path / typing helpers
 # ──────────────────────────────────────────────────────────────
@@ -186,7 +190,7 @@ def _torch_pins_from_requirements() -> Tuple[str, str]:
     torch_spec = "torch==2.3.*"
     tv_spec    = "torchvision==0.18.*"
     if req.exists():
-        for line in req.read_text().splitlines():
+        for line in req.read_text(encoding="utf-8").splitlines():
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
@@ -198,6 +202,11 @@ def _torch_pins_from_requirements() -> Tuple[str, str]:
     return torch_spec, tv_spec
 
 def _install_torch_if_needed(cpu_only: bool) -> None:
+    """
+    Install Torch/Torchvision if missing.
+    - Uses the CPU-only wheels index on Windows/Linux when CUDA isn’t available or --cpu was passed.
+    - macOS sticks to PyPI (MPS wheels).
+    """
     if _module_present("torch") and _module_present("torchvision"):
         return
     torch_spec, tv_spec = _torch_pins_from_requirements()

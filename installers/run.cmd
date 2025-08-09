@@ -1,25 +1,4 @@
 @echo off
-<<<<<<< HEAD
-setlocal enabledelayedexpansion
-
-rem -- locate repo roots
-set "HERE=%~dp0"
-for %%I in ("%HERE%\..") do set "ROOT=%%~fI"
-set "PROJ_DIR=%ROOT%\projects"
-
-rem -- parse args
-set "proj="
-set "tokens="
-:parse
-if "%~1"=="" goto afterparse
-set "t=%~1"
-if /I "%t%"=="run"       (shift & goto parse)
-if /I "%t%"=="me"        (shift & goto parse)
-if /I "%t%"=="argos"     (set "proj=argos" & shift & goto parse)
-if /I "%t%"=="argos:run" (set "proj=argos" & shift & goto parse)
-if /I "%t%"=="run:argos" (set "proj=argos" & shift & goto parse)
-set "tokens=%tokens% %t%"
-=======
 setlocal EnableExtensions EnableDelayedExpansion
 
 set "HERE=%~dp0"
@@ -48,70 +27,28 @@ set "TOKENS="
 :parse
 if "%~1"=="" goto afterparse
 
-if /I "%~1"=="run"       shift & goto parse
-if /I "%~1"=="me"        shift & goto parse
-if /I "%~1"=="build"     set "SAW_BUILD=1" & shift & goto parse
-if /I "%~1"=="package"   set "SAW_BUILD=1" & shift & goto parse
-if /I "%~1"=="pack"      set "SAW_BUILD=1" & shift & goto parse
-if /I "%~1"=="argos"     set "PROJ=argos" & shift & goto parse
-if /I "%~1"=="argos:run" set "PROJ=argos" & shift & goto parse
-if /I "%~1"=="run:argos" set "PROJ=argos" & shift & goto parse
+if /I "%~1"=="run"         shift & goto parse
+if /I "%~1"=="me"          shift & goto parse
+if /I "%~1"=="build"       set "SAW_BUILD=1" & shift & goto parse
+if /I "%~1"=="package"     set "SAW_BUILD=1" & shift & goto parse
+if /I "%~1"=="pack"        set "SAW_BUILD=1" & shift & goto parse
+if /I "%~1"=="argos"       set "PROJ=argos" & shift & goto parse
+if /I "%~1"=="argos:run"   set "PROJ=argos" & shift & goto parse
+if /I "%~1"=="run:argos"   set "PROJ=argos" & shift & goto parse
 if /I "%~1"=="argos:build" set "PROJ=argos" & set "SAW_BUILD=1" & shift & goto parse
 if /I "%~1"=="build:argos" set "PROJ=argos" & set "SAW_BUILD=1" & shift & goto parse
 
 set "TOKENS=%TOKENS% %1"
->>>>>>> c55090c (Argos: Interactive model setup, build command, and model updates)
 shift
 goto parse
 
 :afterparse
-<<<<<<< HEAD
-if not defined proj (
-  echo %cd% | findstr /I /C:"\projects\argos" >nul && set "proj=argos"
-)
-
-if not defined proj (
-  if /I "%cd%"=="%ROOT%"  (
-    echo Specify the project:  run argos  ^|  argos [args]
-    exit /b 2
-  )
-  if /I "%cd%"=="%PROJ_DIR%" (
-    echo Specify the project:  run argos  ^|  argos [args]
-    exit /b 2
-  )
-)
-
-rem -- choose Python (prefer py -3)
-set "PY="
-where py >NUL 2>&1 && set "PY=py -3"
-if not defined PY where python >NUL 2>&1 && set "PY=python"
-if not defined PY (
-  echo Python 3 not found. 1>&2
-  exit /b 1
-)
-
-if /I "%proj%"=="argos" (
-  %PY% "%ROOT%\projects\argos\bootstrap.py" --ensure --yes >NUL 2>&1
-
-  set "VPY="
-  for /f "tokens=* delims=" %%i in ('%PY% "%ROOT%\projects\argos\bootstrap.py" --print-venv') do set "VPY=%%i"
-  if not defined VPY set "VPY=%PY%"
-
-  set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
-  "%VPY%" -m panoptes.cli %tokens%
-  exit /b %ERRORLEVEL%
-)
-
-echo Unknown project: %proj% 1>&2
-exit /b 2
-=======
-
 rem --- Infer project from CWD ---
 echo %CD% | findstr /I "\\projects\\argos" >NUL && set "PROJ=argos"
 
 if not defined PROJ (
-  if /I "%CD%"=="%ROOT%"       goto needproj
-  if /I "%CD%"=="%PROJ_DIR%"   goto needproj
+  if /I "%CD%"=="%ROOT%" goto needproj
+  if /I "%CD%"=="%PROJ_DIR%" goto needproj
 )
 goto gotproj
 
@@ -120,23 +57,32 @@ echo Specify the project:  run argos  ^|  argos [args]
 exit /b 2
 
 :gotproj
-
 if "%SAW_BUILD%"=="1" (
-  call "%ROOT%\installers\build.cmd" %PROJ% %TOKENS%
-  exit /b %ERRORLEVEL%
+  if exist "%ROOT%\installers\build.cmd" (
+    call "%ROOT%\installers\build.cmd" %PROJ% %TOKENS%
+    exit /b %ERRORLEVEL%
+  ) else (
+    echo Build script not found: installers\build.cmd
+    exit /b 1
+  )
 )
 
-rem --- Find Python ---
-for %%P in (python3.exe python.exe) do (
-  where %%P >NUL 2>&1 && set "PY=%%P" && goto gotpy
+rem --- Find Python (prefer py -3, then python3/python) ---
+set "PY="
+where py >NUL 2>&1 && set "PY=py -3"
+if not defined PY (
+  for %%P in (python3.exe python.exe) do (
+    where %%P >NUL 2>&1 && set "PY=%%P" && goto gotpy
+  )
 )
-echo Python 3 not found.
-exit /b 1
+if not defined PY (
+  echo Python 3 not found.
+  exit /b 1
+)
 
 :gotpy
-"%PY%" "%ROOT%\projects\argos\bootstrap.py" --ensure --yes >NUL 2>&1
-for /f "usebackq delims=" %%V in (`"%PY%" "%ROOT%\projects\argos\bootstrap.py" --print-venv`) do set "VPY=%%V"
+%PY% "%ROOT%\projects\argos\bootstrap.py" --ensure --yes >NUL 2>&1
+for /f "usebackq delims=" %%V in (`%PY% "%ROOT%\projects\argos\bootstrap.py" --print-venv`) do set "VPY=%%V"
 set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
 "%VPY%" -m panoptes.cli %TOKENS%
 exit /b %ERRORLEVEL%
->>>>>>> c55090c (Argos: Interactive model setup, build command, and model updates)
