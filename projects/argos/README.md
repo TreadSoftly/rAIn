@@ -1,5 +1,48 @@
 <div align="center">
 
+# ~ Install → Run (Quickstart) ~
+
+<table align="center" cellpadding="6" style="border-collapse:collapse; text-align:left;">
+  <tr><td>•</td><td><b>Clone</b> → open a terminal in the repo root.</td></tr>
+  <tr><td>•</td><td><b>Zero-touch bootstrap</b>: first run auto-creates a venv, installs Torch (CPU if no CUDA), installs the project editable, fetches chosen weights, and writes launchers.</td></tr>
+  <tr><td>•</td><td><b>Media in</b> → put images/videos in <code>projects/argos/tests/raw/</code>. (Assets live in <code>tests/assets</code>.)</td></tr>
+  <tr><td>•</td><td><b>Results out</b> → processed files land in <code>projects/argos/tests/results/</code> with helpful suffixes (e.g., <code>_boxes</code>, <code>_heat</code>).</td></tr>
+</table>
+
+</div>
+
+
+## 1) Git Clone The Repo Then Build & Run
+
+> In Your Terminal Copy And Paste Commands Below Into Terminal ~
+
+```
+git clone https://github.com/TreadSoftly/rAIn.git
+```
+
+```
+cd rAIn
+```
+```
+build
+```
+
+<div align="center">
+
+<table style="display:inline-block; text-align:left; border-collapse:collapse;">
+<tr><td style="padding:0 .5em;">•</td><td>Troubleshooting steps and adjustments to come. This project is a continuous one man work in progress, it is what it is.</td></tr>
+
+</table>
+
+
+</div>
+
+
+<br>
+
+
+<div align="center">
+
 # ~ Capabilities Demo Videos ~
 
 <div align="center">
@@ -137,18 +180,35 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 
 </div>
 
-<table align="center" cellpadding="5">
-<tr>
-<td align="center"><img src="https://github.com/user-attachments/assets/c6382b7b-9ad0-4b13-be2a-0128d7669ce3" width="300" alt="Geo Map 1"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/b406b50d-ea6a-4633-b716-e68b298029ec" width="300" alt="Geo Map 2"></td>
+<table align="center" cellpadding="5" cellspacing="0" border="0">
+  <colgroup>
+    <col width="300">
+    <col width="300">
+  </colgroup>
 
-</tr>
+  <tr height="300">
+    <td align="center" width="300" height="300" valign="middle">
+      <video src="https://github.com/user-attachments/assets/c396456b-370b-485b-a5bc-b5f3852b40f3"
+             width="300" controls playsinline muted></video>
+    </td>
+    <td align="center" width="300" height="300" valign="middle">
+      <img src="https://github.com/user-attachments/assets/b406b50d-ea6a-4633-b716-e68b298029ec"
+           width="300" height="300" alt="Geo Map 2">
+    </td>
+  </tr>
 
-<tr>
-
-<td align="center"><img src="https://github.com/user-attachments/assets/d2613e96-7df7-4a1c-baf8-fa8680cfa57a" width="300" alt="Geo Map 3"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/24e0bc9e-b32a-48a5-813d-51bed1199f9b" width="300" alt="Geo Map 4"></td>
-</tr>
+  <tr height="300">
+    <td align="center" width="300" height="300" valign="middle">
+      <img src="https://github.com/user-attachments/assets/d2613e96-7df7-4a1c-baf8-fa8680cfa57a"
+           width="300" height="300" alt="Geo Map 3">
+    </td>
+    <td align="center" width="300" height="300" valign="middle">
+      <img src="https://github.com/user-attachments/assets/24e0bc9e-b32a-48a5-813d-51bed1199f9b"
+           width="300" height="300" alt="Geo Map 4">
+    </td>
+  </tr>
 </table>
 
 </div>
+
+

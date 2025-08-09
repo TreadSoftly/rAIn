@@ -1,18 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 PROJ_DIR="$ROOT/projects"
 
-<<<<<<< HEAD
-# Collect args → infer project + pass-through tokens
-proj=""
-tokens=()
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-while (($#)); do
-  t="$1"; shift
-  lt="$(lower "$t")"
-=======
 ensure_git_lfs() {
   if command -v git >/dev/null 2>&1; then
     if git lfs version >/dev/null 2>&1; then
@@ -26,16 +18,20 @@ ensure_git_lfs() {
 }
 
 proj=""
+run_tests=1
+want_sdist=1
+want_wheel=1
 tokens=()
-saw_build=0
+
 while (($#)); do
   t="$1"; shift
   lt="${t,,}"
->>>>>>> c55090c (Argos: Interactive model setup, build command, and model updates)
   case "$lt" in
-    run|me) ;;                              # ignore fluff
-    build|package|pack) saw_build=1 ;;
-    argos|argos:run|run:argos|argos:build|build:argos) proj="argos" ;;
+    pack|package|build|me) ;;                   # ignore noise
+    --no-tests)      run_tests=0 ;;
+    --wheel-only)    want_sdist=0; want_wheel=1 ;;
+    --sdist-only)    want_sdist=1; want_wheel=0 ;;
+    argos|argos:pack|pack:argos|argos:build|build:argos) proj="argos" ;;
     *) tokens+=("$t") ;;
   esac
 done
@@ -47,28 +43,38 @@ fi
 
 if [[ -z "${proj:-}" ]]; then
   if [[ "$cwd" == "$ROOT" || "$cwd" == "$PROJ_DIR" ]]; then
-    echo "Specify the project:  run argos  |  argos [args]" >&2
+    echo "Specify the project:  pack argos  |  argos pack  |  pack --no-tests" >&2
     exit 2
   fi
 fi
 
-<<<<<<< HEAD
-# Dispatch to project bootstrap + CLI (no Git LFS dependency)
-=======
 ensure_git_lfs
 
-# Build hand-off
-if [[ "$saw_build" -eq 1 ]]; then
-  exec "$ROOT/installers/build" "$proj" "${tokens[@]}"
-fi
-
->>>>>>> c55090c (Argos: Interactive model setup, build command, and model updates)
 if [[ "$proj" == "argos" ]]; then
   PY="$(command -v python3 || command -v python)"
   "$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes >/dev/null 2>&1 || true
   VPY="$("$PY" "$ROOT/projects/argos/bootstrap.py" --print-venv)"
   export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
-  exec "$VPY" -m panoptes.cli "${tokens[@]}"
+
+  "$VPY" -m pip install --upgrade pip setuptools wheel build >/dev/null
+  ( cd "$ROOT/projects/argos" && "$VPY" -m pip install -e .[dev] >/dev/null )
+
+  if [[ "$run_tests" -eq 1 ]]; then
+    ( cd "$ROOT/projects/argos" && "$VPY" -m pytest -q )
+  fi
+
+  args=()
+  [[ "$want_sdist" -eq 1 ]] && args+=(--sdist)
+  [[ "$want_wheel" -eq 1 ]] && args+=(--wheel)
+  ( cd "$ROOT/projects/argos" && "$VPY" -m build "${args[@]}" )
+
+  mkdir -p "$ROOT/dist/argos"
+  cp -f "$ROOT/projects/argos/dist/"* "$ROOT/dist/argos/" 2>/dev/null || true
+
+  echo "✅ Build complete."
+  echo "   • artifacts → projects/argos/dist/"
+  echo "   • mirror    → dist/argos/"
+  exit 0
 fi
 
 echo "Unknown project: $proj" >&2

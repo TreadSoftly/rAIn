@@ -1,17 +1,26 @@
 * text=auto
 .gitattributes text eol=lf
-
 # Force LF for POSIX launchers so CRLF never sneaks in
 installers/run   text eol=lf
 installers/argos text eol=lf
 *.sh             text eol=lf
-
 # Windows launchers keep CRLF
 *.ps1            text eol=crlf
 *.cmd            text eol=crlf
+<<<<<<< HEAD
 
+=======
+# All models go through Git LFS
+*.pt   filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text
+>>>>>>> c55090c (Argos: Interactive model setup, build command, and model updates)
 # POSIX launchers must be LF
 /run text eol=lf
 /argos text eol=lf
 /projects/argos/run text eol=lf
 /projects/argos/argos text eol=lf
+# NEW: keep LF for new POSIX launchers
+installers/build  text eol=lf
+/build            text eol=lf
+installers/pack   text eol=lf
+/pack             text eol=lf
