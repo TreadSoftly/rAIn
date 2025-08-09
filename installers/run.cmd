@@ -1,18 +1,20 @@
 @echo off
 setlocal enabledelayedexpansion
+
+rem -- locate repo roots
 set "HERE=%~dp0"
 for %%I in ("%HERE%\..") do set "ROOT=%%~fI"
 set "PROJ_DIR=%ROOT%\projects"
 
+rem -- parse args
 set "proj="
 set "tokens="
-
 :parse
 if "%~1"=="" goto afterparse
 set "t=%~1"
-if /I "%t%"=="run"      (shift & goto parse)
-if /I "%t%"=="me"       (shift & goto parse)
-if /I "%t%"=="argos"    (set "proj=argos" & shift & goto parse)
+if /I "%t%"=="run"       (shift & goto parse)
+if /I "%t%"=="me"        (shift & goto parse)
+if /I "%t%"=="argos"     (set "proj=argos" & shift & goto parse)
 if /I "%t%"=="argos:run" (set "proj=argos" & shift & goto parse)
 if /I "%t%"=="run:argos" (set "proj=argos" & shift & goto parse)
 set "tokens=%tokens% %t%"
@@ -35,15 +37,22 @@ if not defined proj (
   )
 )
 
-where python >NUL 2>&1
-if %ERRORLEVEL% NEQ 0 (
+rem -- choose Python (prefer py -3)
+set "PY="
+where py >NUL 2>&1 && set "PY=py -3"
+if not defined PY where python >NUL 2>&1 && set "PY=python"
+if not defined PY (
   echo Python 3 not found. 1>&2
   exit /b 1
 )
 
 if /I "%proj%"=="argos" (
-  python "%ROOT%\projects\argos\bootstrap.py" --ensure --yes >NUL 2>&1
-  for /f "usebackq delims=" %%i in (`python "%ROOT%\projects\argos\bootstrap.py" --print-venv`) do set "VPY=%%i"
+  %PY% "%ROOT%\projects\argos\bootstrap.py" --ensure --yes >NUL 2>&1
+
+  set "VPY="
+  for /f "tokens=* delims=" %%i in ('%PY% "%ROOT%\projects\argos\bootstrap.py" --print-venv') do set "VPY=%%i"
+  if not defined VPY set "VPY=%PY%"
+
   set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
   "%VPY%" -m panoptes.cli %tokens%
   exit /b %ERRORLEVEL%
