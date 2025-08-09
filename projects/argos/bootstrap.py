@@ -30,11 +30,12 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import traceback
 from os import PathLike
 from pathlib import Path
 from typing import (
-    Any,  # added
-    Dict,  # added
+    Any,
+    Dict,
     Literal,  # pyright: ignore[reportUnusedImport]
     Mapping,
     MutableMapping,
@@ -42,7 +43,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
-    cast,  # added
+    cast,
     overload,
 )
 
@@ -319,7 +320,8 @@ out_path.write_text(json.dumps({
 
     def _to_str_list(v: Any) -> list[str]:
         if isinstance(v, list):
-            vv: list[object | None] = cast(list[object | None], v)
+            # Avoid PEP 604 unions at runtime (Py3.9): no `object | None` here.
+            vv = cast(list[Any], v)
             return [str(x) for x in vv if x is not None]
         return []
 
@@ -700,7 +702,9 @@ def _ensure(
         _create_venv()
     _install_torch_if_needed(cpu_only)
     _pip_install_editable_if_needed()
-    if not skip_weights:
+    # Allow skipping weights via env for CI if needed
+    skip_env = os.getenv("ARGOS_SKIP_WEIGHTS", "").strip().lower() in {"1", "true", "yes"}
+    if not (skip_weights or skip_env):
         _ensure_weights_ultralytics(preset=preset, explicit_names=weight_names)
     _move_pytest_cache_out_of_repo()
     _ensure_sitecustomize()
@@ -727,6 +731,8 @@ def main(argv: list[str]) -> int:
         try:
             _ensure(cpu_only, preset=args.weights_preset)
         except Exception as e:
+            # Show full traceback in CI to locate the exact failing file/line
+            traceback.print_exc()
             _print(f"ensure failed: {e}")
             return 1
         return 0
