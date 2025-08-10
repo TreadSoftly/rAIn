@@ -765,6 +765,7 @@ def main(argv: list[str]) -> int:
     _ensure(cpu_only, preset=args.weights_preset)
     return 0
 
+# end and chck github actions
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
