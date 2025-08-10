@@ -11,7 +11,7 @@ install:
 #  Run the pytest suite quietly
 # --------------------------------------------------------------------------- #
 test:
-	pytest -q
+	py -m pytest -q
 
 # --------------------------------------------------------------------------- #
 #  Format + import-sort everything
