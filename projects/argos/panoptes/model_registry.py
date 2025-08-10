@@ -21,14 +21,15 @@ import logging
 import importlib
 import sys
 from pathlib import Path
-from typing import Final, Literal, Optional
+from typing import Final, Literal, Optional, Union
 
 # ────────────────────────────────────────────────────────────────
 #  Ultralytics import (kept soft so linting works without it)
 # ────────────────────────────────────────────────────────────────
 try:
     _ultra_mod = importlib.import_module("ultralytics")
-    _yolo_cls = getattr(_ultra_mod, "YOLO", None)
+    YOLO = getattr(_ultra_mod, "YOLO", None)  # expose symbol (may be None)
+    _yolo_cls = YOLO
 except Exception:  # pragma: no cover
     _yolo_cls = None
     YOLO = None
@@ -139,7 +140,7 @@ def _first_existing(paths: list[Path]) -> Optional[Path]:
     return next((p for p in paths if p.exists()), None)
 
 @functools.lru_cache(maxsize=None)
-def _load(weight: Optional[Path], *, task: Literal["detect", "segment"]) -> object | None:
+def _load(weight: Optional[Path], *, task: Literal["detect", "segment"]) -> Optional[object]:
     """
     Cached wrapper around ``YOLO(path, task=...)`` to avoid re-inits,
     and to kill the “Unable to automatically guess model task” warning.
@@ -156,7 +157,7 @@ def _load(weight: Optional[Path], *, task: Literal["detect", "segment"]) -> obje
         return _yolo_cls(str(weight))
 
 
-def _require(model: object | None, task: str) -> object:
+def _require(model: Optional[object], task: str) -> object:
     """Abort loudly when the chosen weight is missing."""
     if model is None:
         raise RuntimeError(f"[model_registry] no weight configured for task “{task}”")
@@ -184,7 +185,7 @@ def pick_weight(
     return _first_existing(paths)
 
 
-def load_detector(*, small: bool = False, override: str | Path | None = None) -> object:
+def load_detector(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
     """Return a *YOLO* detector – honouring the override when provided."""
     if override is not None:
         chosen = Path(override).expanduser()
@@ -196,7 +197,7 @@ def load_detector(*, small: bool = False, override: str | Path | None = None) ->
     return _require(model, "detect")
 
 
-def load_segmenter(*, small: bool = False, override: str | Path | None = None) -> object:
+def load_segmenter(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
     """Return a *YOLO-Seg* model – abort if no suitable weight is found."""
     if override is not None:
         chosen = Path(override).expanduser()

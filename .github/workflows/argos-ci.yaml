@@ -58,7 +58,8 @@ jobs:
         run: |
           $vpy = python projects/argos/bootstrap.py --print-venv
           & $vpy -m panoptes.cli camo.webp hm
-          & $vpy -c "import cv2, numpy as np; $null = [0..9] | % { }; $out=cv2.VideoWriter('bunny.mp4', (new-object System.Text.ASCIIEncoding).GetBytes('mp4v')[0]+(new-object System.Text.ASCIIEncoding).GetBytes('mp4v')[1]*256+(new-object System.Text.ASCIIEncoding).GetBytes('mp4v')[2]*65536+(new-object System.Text.ASCIIEncoding).GetBytes('mp4v')[3]*16777216,5,(64,64)); 0..9 | % { $arr = [numpy]::zeros(@(64,64,3), [numpy]::uint8); $null = $out.write($arr) }; $out.release()"
+          # create a tiny blank mp4 purely in Python
+          & $vpy -c "import cv2, numpy as np; out=cv2.VideoWriter('bunny.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 5, (64,64)); [out.write(np.zeros((64,64,3), np.uint8)) for _ in range(10)]; out.release()"
           & $vpy -m panoptes.cli bunny.mp4 d
           & $vpy -m panoptes.cli 'https://upload.wikimedia.org/wikipedia/commons/0/0c/GoldenGateBridge-001.jpg#lat37.8199_lon-122.4783' gj
 

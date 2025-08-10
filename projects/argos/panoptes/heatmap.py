@@ -37,8 +37,11 @@ if not _LOG.handlers:
     h.setFormatter(logging.Formatter("%(message)s"))
     _LOG.addHandler(h)
 _LOG.setLevel(logging.INFO)
+
+
 def _say(msg: str) -> None:
     _LOG.info(f"[panoptes] {msg}")
+
 
 # ─────────────────────────── model (hard-fail) ─────────────────────────
 # NOTE: model_registry itself logs the chosen weight; we add a one-liner too.
@@ -57,23 +60,24 @@ def _to_bgr(img: Image.Image | np.ndarray[Any, Any] | str | Path | tuple[int, in
         return np.asarray(img.convert("RGB"))[:, :, ::-1]
     if isinstance(img, (str, Path)):
         return np.asarray(Image.open(img).convert("RGB"))[:, :, ::-1]
-    if len(img) == 2:          # (w, h) placeholder
+    if len(img) == 2:  # (w, h) placeholder
         w, h = img
         return np.zeros((h, w, 3), np.uint8)
     raise TypeError(f"Unsupported image type: {type(img)}")
 
+
 # ---------------------------------------------------------------------- #
 # public API                                                             #
 # ---------------------------------------------------------------------- #
-def heatmap_overlay(                               # noqa: C901  (visual-logic)
+def heatmap_overlay(  # noqa: C901  (visual-logic)
     img: Image.Image | np.ndarray[Any, Any] | str | Path | tuple[int, int],
     *,
     boxes: Optional[np.ndarray[Any, Any]] = None,
-    masks: Iterable[np.ndarray[Any, Any]] | None = None,   # accepted, ignored
+    masks: Iterable[np.ndarray[Any, Any]] | None = None,  # accepted, ignored
     alpha: float = 0.4,
     return_mask: bool = False,
-    cmap: str = "COLORMAP_JET",                    # accepted for CLI parity
-    kernel_scale: float = 5.0,                    # ditto – currently unused
+    cmap: str = "COLORMAP_JET",  # accepted for CLI parity
+    kernel_scale: float = 5.0,  # ditto – currently unused
     **_: Any,
 ) -> Union[Image.Image, NDArray[np.uint8]]:
     """
@@ -97,7 +101,7 @@ def heatmap_overlay(                               # noqa: C901  (visual-logic)
         try:
             import torch  # type: ignore
             masks_np: NDArray[np.float32] = (
-                mdat.cpu().numpy().astype(np.float32)     # type: ignore[attr-defined]
+                mdat.cpu().numpy().astype(np.float32)  # type: ignore[attr-defined]
                 if isinstance(mdat, torch.Tensor)
                 else np.asarray(mdat, dtype=np.float32)
             )
@@ -108,19 +112,19 @@ def heatmap_overlay(                               # noqa: C901  (visual-logic)
         names: Any = getattr(_seg_model, "names", {})
         if not isinstance(names, dict):
             names = {}
-        names = cast(dict[str, Any], names)  # type: ignore[import]
+        names = cast(dict[str, Any], names)
 
         for idx, m_raw in enumerate(masks_np):
             m: NDArray[np.float32] = cast(NDArray[np.float32], m_raw)
             if m.shape != (h, w):
                 m = np.asarray(cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST), dtype=np.float32)
 
-            mask_bool: NDArray[np.bool_] = (m >= 0.5)
+            mask_bool: NDArray[np.bool_] = m >= 0.5
 
             # unique colour via golden-ratio hue rotation
             hue: float = (idx * 0.61803398875) % 1.0
             r, g, b = (np.array(colorsys.hsv_to_rgb(hue, 1.0, 1.0)) * 255)
-            colour: NDArray[np.float32]  = np.array([b, g, r], dtype=np.float32)
+            colour: NDArray[np.float32] = np.array([b, g, r], dtype=np.float32)
 
             overlay[mask_bool] = overlay[mask_bool] * (1.0 - alpha) + colour * alpha
 
@@ -128,13 +132,13 @@ def heatmap_overlay(                               # noqa: C901  (visual-logic)
             boxes_obj: Any = getattr(res if isinstance(res, object) else object(), "boxes", None)
             if boxes_obj is not None and getattr(boxes_obj, "data", None) is not None:
                 try:
-                    xyxy: NDArray[np.float32] = boxes_obj.xyxy[idx].cpu().numpy().astype(float)        # type: ignore[attr-defined]
-                    conf: float = float(boxes_obj.conf[idx])                                           # type: ignore[attr-defined]
-                    cls: int  = int(boxes_obj.cls[idx])                                                # type: ignore[attr-defined]
+                    xyxy: NDArray[np.float32] = boxes_obj.xyxy[idx].cpu().numpy().astype(float)  # type: ignore[attr-defined]
+                    conf: float = float(boxes_obj.conf[idx])  # type: ignore[attr-defined]
+                    cls: int = int(boxes_obj.cls[idx])  # type: ignore[attr-defined]
                     text: str = f"{names.get(str(cls), str(cls))} {conf:.2f}  ID {idx+1}"
 
                     font = cv2.FONT_HERSHEY_SIMPLEX
-                    (tw, th), _ = cv2.getTextSize(text, font, 0.5, 1) # type: ignore[arg-type]
+                    (tw, th), _ = cv2.getTextSize(text, font, 0.5, 1)  # type: ignore[arg-type]
                     x1: int = int(xyxy[0])
                     y1: int = max(0, int(xyxy[1]) - int(th) - 4)
                     cv2.rectangle(overlay, (x1, y1), (x1 + int(tw) + 2, y1 + int(th) + 4), colour.tolist(), -1)

@@ -154,9 +154,6 @@ def _fetch_one(name: str, dst: Path) -> Tuple[str, bool]:
                 # If YOLO wrote elsewhere (cache), copy into dst/target
                 if p.resolve() != target.resolve():
                     shutil.copy2(p, target)
-                else:
-                    # p is already the file at target path – nothing to copy
-                    pass
                 return (target.name, True)
     except Exception:
         pass
@@ -294,7 +291,7 @@ def _menu() -> int:
                 """
             ).strip()
         )
-        pick = typer.prompt("Pick [0–4, ? for help]", default="1").strip().lower()
+        pick = typer.prompt("Pick [0–4, ? for help]", default="'1' for standard build").strip().lower()
         if pick in {"?", "h", "help"}:
             typer.echo("Tips: numbers or names are fine in the builder; 'all' works at every step.")
             continue
@@ -308,13 +305,13 @@ def _menu() -> int:
 
 
 def _ask_size_pack() -> List[str]:
-    fam = typer.prompt(f"Family {FAMILIES}", default="11").strip()
+    fam = typer.prompt(f"Family {FAMILIES}", default="8, 11, or 12").strip()
     while fam not in FAMILIES:
-        fam = typer.prompt(f"Family {FAMILIES}", default="11").strip()
+        fam = typer.prompt(f"Family {FAMILIES}", default="8, 11, or 12").strip()
 
-    sz = typer.prompt(f"Size {SIZES}", default="x").strip().lower()
+    sz = typer.prompt(f"Size {SIZES}", default="x for extra large size").strip().lower()
     while sz not in SIZES:
-        sz = typer.prompt(f"Size {SIZES}", default="x").strip().lower()
+        sz = typer.prompt(f"Size {SIZES}", default="x for extra large size").strip().lower()
 
     want_seg = typer.confirm("Include segmentation (-seg) for heatmaps?", default=True)
 
@@ -343,7 +340,10 @@ def _ask_custom() -> List[str]:
     fam_alias: Dict[str, str] = {"v8": "8", "v11": "11", "v12": "12"}
     fams: List[str] = []
     while not fams:
-        raw = typer.prompt("Pick families (e.g. '1, '2' '3' / 'all')", default="Familiy 11 = '2' / All Families = 'all'")
+        raw = typer.prompt(
+            "Pick families (e.g. '1', '2', '3' / 'all')",
+            default="all for suite of family versions",  # fixed: was a non-parsable sentence
+        )
         fams = _parse_multi(raw, FAMILIES, aliases=fam_alias)
         if not fams:
             _warn("Pick at least one family version (try typing '1' '2' '3' or 'all').")
@@ -353,7 +353,7 @@ def _ask_custom() -> List[str]:
     size_alias: Dict[str, str] = {"nano": "n", "small": "s", "medium": "m", "large": "l", "xlarge": "x"}
     sizes: List[str] = []
     while not sizes:
-        raw = typer.prompt("Pick sizes (e.g. 'n,s' or '5' or 'all')", default="n,s")
+        raw = typer.prompt("Pick sizes (e.g. 'n,s' or '5' or 'all')", default="x,n")
         sizes = _parse_multi(raw, SIZES, aliases=size_alias)
         if not sizes:
             _warn("Pick at least one size (e.g., 'n' or 'all').")

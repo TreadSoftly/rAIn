@@ -9,8 +9,8 @@ on:
         type: string
 
 permissions:
-  id-token: write # OIDC → AWS
-  contents: read # repo checkout
+  id-token: write  # OIDC → AWS
+  contents: read   # repo checkout
 
 env:
   AWS_REGION: us-east-1
@@ -26,7 +26,7 @@ jobs:
         with:
           lfs: false
 
-      # 0.5) Ensure a consistent Python (bootstrap uses stdlib only, but let's be explicit)
+      # 0.5) Ensure a consistent Python (bootstrap uses stdlib only, but be explicit)
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

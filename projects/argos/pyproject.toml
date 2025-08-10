@@ -24,7 +24,6 @@ dependencies = [
   "onnxruntime>=1.22,<1.24 ; python_version >= '3.10' and platform_system != 'Windows'",
 
   "onnx>=1.12,<1.18",
-  "onnxslim>=0.1.59",
 
   # Imaging / numerics
   "opencv-python-headless>=4.11,<4.12",
@@ -60,6 +59,11 @@ dev = [
 # Keep audio optional AND let constraints control the version.
 audio = [
   "torchaudio",
+]
+
+# Optional ONNX graph slimming; kept OUT of core to avoid sympy fights with Torch.
+onnx-tools = [
+  "onnxslim<0.1.59",
 ]
 
 [project.scripts]

@@ -483,13 +483,24 @@ for onnx_name in sys.argv[1:-2]:
                 shutil.copy2(p, src_pt)
         # export ONNX from the .pt within dst
         m = YOLO(str(src_pt))
-        outp = Path(m.export(format='onnx', dynamic=True, simplify=True, imgsz=640, device='cpu'))
+        outp_path = None
+        try:
+            outp = Path(m.export(format='onnx', dynamic=True, simplify=True, imgsz=640, opset=12, device='cpu'))
+            outp_path = outp
+        except Exception:
+            # fallback if simplification or opset settings cause trouble
+            try:
+                outp = Path(m.export(format='onnx', dynamic=True, simplify=False, imgsz=640, opset=12, device='cpu'))
+                outp_path = outp
+            except Exception:
+                outp_path = None
         target = dst / onnx_name
-        if outp.exists() and outp.resolve() != target.resolve():
-            shutil.copy2(outp, target)
-        elif not target.exists() and outp.exists():
-            shutil.copy2(outp, target)
-        ok += 1
+        if outp_path and outp_path.exists() and outp_path.resolve() != target.resolve():
+            shutil.copy2(outp_path, target)
+        elif (not target.exists()) and outp_path and outp_path.exists():
+            shutil.copy2(outp_path, target)
+        if target.exists():
+            ok += 1
     except Exception:
         # swallow; we'll report a warning in the parent
         pass

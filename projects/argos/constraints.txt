@@ -15,7 +15,11 @@ torchaudio==2.3.* ; python_version < "3.12"
 opencv-python-headless==4.11.0.86
 
 # Unified NumPy window; avoid 2.0.* ABI issues
-numpy!=2.0.*,>=1.26,<2.3
+numpy==1.26.4
+
+# Sympy/Scipy pins to satisfy Torch (and avoid onnxslim conflicts)
+sympy==1.13.1
+scipy==1.13.*
 
 # Keep matplotlib flexible but avoid 3.10+ on Python 3.9 where wheels are spotty
 matplotlib>=3.9,<3.10 ; python_version < "3.10"
