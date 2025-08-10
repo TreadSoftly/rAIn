@@ -1,0 +1,68 @@
+###############################################################################
+#  PROJECT-LOCAL OVERRIDES
+###############################################################################
+# At the moment we don’t need anything special here.
+
+###############################################################################
+# ⛔  GENERAL BUILD / BINARY ARTEFACTS
+###############################################################################
+
+# ── Python byte-code / metadata ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.bak
+
+# ── Virtual-envs (top-level **and** inside sub-projects) ────────────────────
+.venv/
+env/
+venv/
+ENV/
+projects/**/.venv/
+
+# ── Node ────────────────────────────────────────────────────────────────────
+node_modules/
+
+# ── Models & other large binaries ───────────────────────────────────────────
+# Keep model binaries out of Git; bootstrap fetches them as-needed
+projects/argos/panoptes/model/*.onnx
+projects/argos/panoptes/model/*.pt
+
+# ── Test / coverage artefacts ───────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+projects/argos/tests/results/         # per-run outputs only
+
+# ── Build / packaging outputs ───────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+projects/**/cdk.out/
+
+# ── Media produced during ad-hoc runs (never tracked) ───────────────────────
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.b64
+*.mp4
+*.mov
+
+# ── IDE / editor junk ───────────────────────────────────────────────────────
+.vscode/
+.vscode/*.log
+projects/**/.vscode/
+
+# ── OS noise ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Historical artefacts we no longer need ──────────────────────────────────
+projects/argos/requirements-py39.txt
+###############################################################################
+projects/argos/panoptes/model/*.pt
+projects/argos/panoptes/model/*.onnx

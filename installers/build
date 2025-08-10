@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+
+# Drop optional leading token from subproject launchers (e.g., "argos")
+if [[ "${1-}" == "argos" ]]; then shift; fi
+
+PY="$(command -v python3 || command -v python)"
+# Ensure venv + force editable reinstall (honors constraints via bootstrap)
+"$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes --reinstall
+VPY="$("$PY" "$ROOT/projects/argos/bootstrap.py" --print-venv)"
+
+# Fail fast on resolver issues
+"$VPY" -m pip check
+
+# Keep pyc out of repo
+export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
+
+# Run the build inside the venv
+exec "$VPY" -m panoptes.tools.build_models "$@"
