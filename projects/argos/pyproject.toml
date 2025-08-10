@@ -11,21 +11,25 @@ readme          = "README.md"
 requires-python = ">=3.9,<3.13"
 
 dependencies = [
-  # Core ML stack (ranges here; exact pins come from constraints.txt)
+  # ── Core ML stack ──
+  # Pin pairs that are known-good on GH runners and keep NumPy < 2 ABI:
   "torch==2.3.* ; python_version < '3.12'",
   "torchvision==0.18.* ; python_version < '3.12'",
-  "torch>=2.4,<2.6 ; python_version >= '3.12'",
-  "torchvision>=0.19,<0.21 ; python_version >= '3.12'",
+  "torch==2.4.* ; python_version >= '3.12'",
+  "torchvision==0.19.* ; python_version >= '3.12'",
+
   "ultralytics>=8.0",
 
-  # ONNX Runtime (platform/py aware to satisfy Win+Py3.12)
+  # ── ONNX Runtime (platform/py aware to satisfy Win+Py3.12) ──
   "onnxruntime==1.19.2 ; python_version < '3.10'",
   "onnxruntime>=1.22,<1.23 ; python_version >= '3.10' and platform_system == 'Windows'",
   "onnxruntime>=1.22,<1.24 ; python_version >= '3.10' and platform_system != 'Windows'",
 
+  # Keep ONNX toolchain conservative to avoid sympy/abi spats
   "onnx>=1.12,<1.18",
 
-  # Imaging / numerics
+  # ── Imaging / numerics ──
+  # OpenCV 4.12+ jumps to NumPy ≥2.3; stay below for now.
   "opencv-python-headless>=4.11,<4.12",
 
   # NumPy — avoid 2.0.* ABI breakage seen on GH runners
@@ -41,7 +45,7 @@ dependencies = [
   # Infra / utils
   "redis>=5.0",
   "typer[all]>=0.12",
-  "thop==0.1.1.post2209072238"
+  "thop==0.1.1.post2209072238",
 ]
 
 [project.optional-dependencies]
@@ -67,9 +71,11 @@ onnx-tools = [
 ]
 
 [project.scripts]
+# Primary CLI names (tests call `target`)
 target  = "panoptes.cli:main"
 argos   = "panoptes.cli:main"
 
+# Convenience aliases (if you expose task-specific entry points)
 d       = "panoptes.cli:main_detect"
 detect  = "panoptes.cli:main_detect"
 hm      = "panoptes.cli:main_heatmap"

@@ -28,11 +28,10 @@ from typing import Final, Literal, Optional, Union
 # ────────────────────────────────────────────────────────────────
 try:
     _ultra_mod = importlib.import_module("ultralytics")
-    YOLO = getattr(_ultra_mod, "YOLO", None)  # expose symbol (may be None)
-    _yolo_cls = YOLO
+    _yolo_cls = getattr(_ultra_mod, "YOLO", None)
 except Exception:  # pragma: no cover
     _yolo_cls = None
-    YOLO = None
+YOLO = _yolo_cls
 
 # ────────────────────────────────────────────────────────────────
 #  logging (explicit, human-friendly, no stack noise)

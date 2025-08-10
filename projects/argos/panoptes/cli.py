@@ -44,13 +44,13 @@ import re
 import sys
 import urllib.parse
 from pathlib import Path
-from typing import Any, List, Literal, Optional, cast
+from typing import Any, Final, List, Literal, Optional, cast
 
 import typer
 
 from panoptes.model_registry import pick_weight  # type: ignore
-from .lambda_like import run_single, reinit_models
-from . import ROOT as _PROJ_ROOT  # /projects/argos
+
+from .lambda_like import reinit_models, run_single
 
 # ────────────────────────────────────────────────────────────────────────────
 #  scaffolding
@@ -94,10 +94,12 @@ _PREF_EXT_ORDER = (
     ".mp4", ".mov", ".avi", ".mkv",
     ".webp", ".bmp", ".tif", ".tiff", ".gif", ".heic", ".heif",
 )
-_RAW_DIR = _PROJ_ROOT / "tests" / "raw"
-_SEARCH_DIRS = [
+# Help the type checker: compute /projects/argos from this file path
+_PROJ_ROOT_PATH: Final[Path] = Path(__file__).resolve().parents[1]
+_RAW_DIR: Path = _PROJ_ROOT_PATH / "tests" / "raw"
+_SEARCH_DIRS: list[Path] = [
     _RAW_DIR,
-    _PROJ_ROOT / "tests" / "assets",
+    _PROJ_ROOT_PATH / "tests" / "assets",
     Path.cwd(),
 ]
 _NOISE = {"argos", "run", "me"}  # ignore these if they appear as positional tokens
@@ -238,10 +240,10 @@ def _expand_tokens(positional: list[str], task_final: str) -> list[str]:
     """
     Expand tokens into concrete input paths.
     Handles:
-       plain filenames/stems (resolved across RAW/assets/CWD)
-       URLs
-       globs: "*.jpg", "*"
-       'all', 'ALL', 'All' (optionally followed by ".ext"/"ext"/"*.ext")
+    plain filenames/stems (resolved across RAW/assets/CWD)
+    URLs
+    globs: "*.jpg", "*"
+    'all', 'ALL', 'All' (optionally followed by ".ext"/"ext"/"*.ext")
     When using globs/'all', we search tests/raw by design.
     """
     i = 0
