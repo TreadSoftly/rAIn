@@ -193,6 +193,14 @@ def _has_cuda() -> bool:
 
 
 # ──────────────────────────────────────────────────────────────
+# Constraints helper
+# ──────────────────────────────────────────────────────────────
+def _constraints_args() -> list[str]:
+    c = ARGOS / "constraints.txt"
+    return ["-c", str(c)] if c.exists() else []
+
+
+# ──────────────────────────────────────────────────────────────
 # Venv + pip
 # ──────────────────────────────────────────────────────────────
 def _create_venv() -> None:
@@ -202,9 +210,12 @@ def _create_venv() -> None:
 
 
 def _torch_pins_from_requirements() -> Tuple[str, str]:
+    # Defaults: let constraints select exact versions
+    torch_spec = "torch"
+    tv_spec = "torchvision"
+
+    # Optional: allow a local requirements.txt to override
     req = ARGOS / "requirements.txt"
-    torch_spec = "torch==2.3.*"
-    tv_spec = "torchvision==0.18.*"
     if req.exists():
         for line in req.read_text(encoding="utf-8").splitlines():
             s = line.strip()
@@ -223,6 +234,7 @@ def _install_torch_if_needed(cpu_only: bool) -> None:
     Install Torch/Torchvision if missing.
     - Uses the CPU-only wheels index on Windows/Linux when CUDA isn’t available or --cpu was passed.
     - macOS sticks to PyPI (MPS wheels).
+    - Always honors constraints.txt.
     """
     if _module_present("torch") and _module_present("torchvision"):
         return
@@ -232,16 +244,20 @@ def _install_torch_if_needed(cpu_only: bool) -> None:
     if cpu_only and (os.name == "nt" or sys.platform.startswith("linux")):
         idx = ["--index-url", "https://download.pytorch.org/whl/cpu"]
     _print(f"→ installing Torch ({'CPU-only' if cpu_only else 'auto'}) …")
-    _run([str(VPY), "-m", "pip", "install", *idx, torch_spec, tv_spec], check=True, capture=False)
+    _run([str(VPY), "-m", "pip", "install", *idx, *_constraints_args(), torch_spec, tv_spec], check=True, capture=False)
 
 
-def _pip_install_editable_if_needed() -> None:
+def _pip_install_editable_if_needed(*, reinstall: bool = False) -> None:
     # Also ensure Ultralytics is there (weight fetch relies on it)
-    need = (not _module_present("panoptes")) or (not _module_present("ultralytics"))
+    need = reinstall or (not _module_present("panoptes")) or (not _module_present("ultralytics"))
     if not need:
         return
     _print("→ installing Argos package (editable) + dev extras …")
-    _run([str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + "[dev]"], check=True, capture=False)
+    _run(
+        [str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + "[dev]", *_constraints_args()],
+        check=True,
+        capture=False,
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -365,8 +381,8 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
     Ensure weights exist under panoptes.model_registry.WEIGHT_PRIORITY.
 
     Preset (env or arg):
-      - "all"     → everything listed (default)
-      - "default" → first detect + first heatmap
+      - "all"     → everything listed
+      - "default" → first detect + first heatmap   (DEFAULT)
       - "nano"    → detect_small + heatmap_small
 
     • Downloads *.pt via Ultralytics
@@ -376,12 +392,13 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
 
     # choose names
     env_preset = (os.getenv("ARGOS_WEIGHT_PRESET") or "").strip().lower()
-    choice = (preset or env_preset or "all").lower()
+    # DEFAULT changed to "default" so we only ensure the two primary .pt weights
+    choice = (preset or env_preset or "default").lower()
     if explicit_names is not None:
         want_names = [n for n in explicit_names if n]
     else:
         if choice not in {"all", "default", "nano"}:
-            choice = "all"
+            choice = "default"
         want_names = {"all": all_names, "default": default_names, "nano": nano_names}[choice]
 
     need = [n for n in want_names if n and not (model_dir / n).exists()]
@@ -396,7 +413,7 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
     pt_missing = [n for n in need if n.lower().endswith(".pt")]
     onnx_missing = [n for n in need if n.lower().endswith(".onnx")]
 
-    # fetch *.pt
+    # fetch *.pt directly into model_dir (avoid CWD pollution)
     if pt_missing:
         _print(f"→ fetching {len(pt_missing)} *.pt via Ultralytics …")
         dl_pt = r"""
@@ -412,16 +429,19 @@ logging.getLogger().handlers.clear()
 logging.getLogger().setLevel(logging.ERROR)
 from ultralytics import YOLO
 dst = Path(sys.argv[-2]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
+os.chdir(dst)  # ← ensure YOLO downloads happen inside panoptes/model
 ok=0
 for nm in sys.argv[1:-2]:
     try:
-        m=YOLO(nm)
-        p=Path(getattr(m,'ckpt_path',nm)).expanduser()
+        m = YOLO(nm)
+        p = Path(getattr(m,'ckpt_path', nm)).expanduser()
         if not p.exists():
-            p=Path(nm).expanduser()
-        if p.exists():
-            shutil.copy2(p, dst / p.name)
-            ok+=1
+            p = Path(nm).expanduser()
+        target = dst / Path(nm).name
+        if p.exists() and p.resolve() != target.resolve():
+            shutil.copy2(p, target)
+        if target.exists():
+            ok += 1
     except Exception:
         # swallow; count only successful copies
         pass
@@ -433,11 +453,11 @@ out_path.write_text(json.dumps({'ok': ok}), encoding='utf-8')
         if got < len(pt_missing):
             _print("⚠️  Some *.pt weights could not be fetched (network/rate-limit?).")
 
-    # export *.onnx from matching *.pt
+    # export *.onnx from matching *.pt (work inside model_dir; avoid repo-root 'runs/')
     if onnx_missing:
         _print(f"→ exporting {len(onnx_missing)} *.onnx from matching *.pt …")
         exp = r"""
-import json, sys, shutil, logging
+import json, sys, shutil, logging, os
 from pathlib import Path
 # Reduce Ultralytics/chatty logs
 try:
@@ -449,26 +469,35 @@ logging.getLogger().handlers.clear()
 logging.getLogger().setLevel(logging.ERROR)
 from ultralytics import YOLO
 dst = Path(sys.argv[-2]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
+os.chdir(dst)  # ← everything (including runs/) stays under model_dir
 ok=0
 for onnx_name in sys.argv[1:-2]:
     try:
         pt_name = Path(onnx_name).with_suffix(".pt").name
         src_pt  = dst / pt_name
-        # Ensure the .pt exists alongside the model dir; if not, YOLO will try to resolve it
+        # ensure the .pt exists in dst (YOLO will fetch to CWD=dst if needed)
         if not src_pt.exists():
             m_fetch = YOLO(pt_name)
-            p = Path(getattr(m_fetch,'ckpt_path',pt_name)).expanduser()
-            if p.exists():
-                shutil.copy2(p, dst / p.name)
-        # Export ONNX from the .pt within our dst directory
-        m = YOLO(str(dst / pt_name))
+            p = Path(getattr(m_fetch,'ckpt_path', pt_name)).expanduser()
+            if p.exists() and p.resolve() != src_pt.resolve():
+                shutil.copy2(p, src_pt)
+        # export ONNX from the .pt within dst
+        m = YOLO(str(src_pt))
         outp = Path(m.export(format='onnx', dynamic=True, simplify=True, imgsz=640, device='cpu'))
-        # Place it exactly where Argos expects it/name it
-        shutil.copy2(outp, dst / onnx_name)
+        target = dst / onnx_name
+        if outp.exists() and outp.resolve() != target.resolve():
+            shutil.copy2(outp, target)
+        elif not target.exists() and outp.exists():
+            shutil.copy2(outp, target)
         ok += 1
     except Exception:
         # swallow; we'll report a warning in the parent
         pass
+# optional tidy: remove the transient 'runs' folder produced by Ultralytics
+try:
+    shutil.rmtree(dst / 'runs', ignore_errors=True)
+except Exception:
+    pass
 out_path = Path(sys.argv[-1])
 out_path.write_text(json.dumps({'ok': ok}), encoding='utf-8')
 """
@@ -591,7 +620,7 @@ def _print_help(cpu_only: bool) -> None:
 Environment
   • Venv:   {py.parent}
   • Torch:  {'CPU-only' if cpu_only else 'auto'}
-  • Models: panoptes/model/  (Ultralytics fetched; preset={os.getenv('ARGOS_WEIGHT_PRESET','all')})
+  • Models: panoptes/model/  (Ultralytics fetched; preset={os.getenv('ARGOS_WEIGHT_PRESET','default')})
 
 Quick start (no venv activation)
   Windows PowerShell:
@@ -608,7 +637,7 @@ Quick start (no venv activation)
 
 Power users
   • Makefile shortcuts (inside projects/argos):
-      make install     # pip install -e .[dev]
+      make install     # pip install -e "projects/argos[dev]"
       make test        # run pytest
       make run         # example CLI invocation
 
@@ -633,17 +662,17 @@ def _first_run_menu() -> tuple[Optional[str], Optional[list[str]], bool]:
     model_dir, all_names = _probe_weight_presets()[:2]
     _print("\nModel weights will be placed under: " + str(model_dir))
     _print("\nChoose what to fetch now:")
-    _print("  [1] All listed weights (recommended)")
-    _print("  [2] Default pair (first detect + first heatmap)")
+    _print("  [1] All listed weights")
+    _print("  [2] Default pair (first detect + first heatmap)  ← recommended")
     _print("  [3] Nano pair (fastest for laptops & CI)")
     _print("  [4] Pick from list")
     _print("  [5] Skip for now")
     while True:
-        ans = input("Selection [1-5, default 1]: ").strip()
-        if not ans or ans == "1":
-            return ("all", None, False)
-        if ans == "2":
+        ans = input("Selection [1-5, default 2]: ").strip()
+        if not ans or ans == "2":
             return ("default", None, False)
+        if ans == "1":
+            return ("all", None, False)
         if ans == "3":
             return ("nano", None, False)
         if ans == "5":
@@ -697,17 +726,20 @@ def _ensure(
     preset: Optional[str] = None,
     weight_names: Optional[list[str]] = None,
     skip_weights: bool = False,
+    reinstall: bool = False,
 ) -> None:
     if not VENV.exists():
         _create_venv()
     _install_torch_if_needed(cpu_only)
-    _pip_install_editable_if_needed()
+    _pip_install_editable_if_needed(reinstall=reinstall)
     # Allow skipping weights via env for CI if needed
     skip_env = os.getenv("ARGOS_SKIP_WEIGHTS", "").strip().lower() in {"1", "true", "yes"}
     if not (skip_weights or skip_env):
         _ensure_weights_ultralytics(preset=preset, explicit_names=weight_names)
     _move_pytest_cache_out_of_repo()
     _ensure_sitecustomize()
+    # Sanity: catch resolver issues early
+    _run([str(VPY), "-m", "pip", "check"], check=True, capture=False)
 
 
 def main(argv: list[str]) -> int:
@@ -716,6 +748,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--print-venv", action="store_true", help="Print venv python path")
     p.add_argument("--cpu", dest="cpu_only", action="store_true", help="Force CPU-only Torch")
     p.add_argument("--weights-preset", choices=["all", "default", "nano"], help="Preset for weights (overrides env)")
+    p.add_argument("--reinstall", action="store_true", help="Force reinstall of Argos editable package")
     p.add_argument("--yes", action="store_true", help="Assume Yes to prompts (non-interactive)")
     args, _ = p.parse_known_args(argv)
 
@@ -729,7 +762,7 @@ def main(argv: list[str]) -> int:
 
     if args.ensure:
         try:
-            _ensure(cpu_only, preset=args.weights_preset)
+            _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall)
         except Exception as e:
             # Show full traceback in CI to locate the exact failing file/line
             traceback.print_exc()
@@ -753,7 +786,7 @@ def main(argv: list[str]) -> int:
             elif preset:
                 os.environ["ARGOS_WEIGHT_PRESET"] = preset
 
-            _ensure(cpu_only, preset=preset, weight_names=picks, skip_weights=skip)
+            _ensure(cpu_only, preset=preset, weight_names=picks, skip_weights=skip, reinstall=args.reinstall)
             _create_launchers()
             _write_sentinel()
             _print_help(cpu_only)
@@ -762,10 +795,9 @@ def main(argv: list[str]) -> int:
         return 0
 
     # Subsequent manual invocations: still idempotent
-    _ensure(cpu_only, preset=args.weights_preset)
+    _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall)
     return 0
 
-# end and chck github  actions
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import shutil
 import subprocess
 import sys
 import textwrap
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -107,6 +109,17 @@ def _latest_exported_onnx() -> Optional[Path]:
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 
+@contextmanager
+def _cd(path: Path):
+    """Temporarily chdir to *path* (restores on exit)."""
+    prev = Path.cwd()
+    try:
+        os.chdir(path)
+        yield
+    finally:
+        os.chdir(prev)
+
+
 # ---------------------------------------------------------------------
 # Fetch logic
 # ---------------------------------------------------------------------
@@ -114,10 +127,10 @@ def _fetch_one(name: str, dst: Path) -> Tuple[str, bool]:
     """
     Try to obtain *name* into *dst*.
 
-    Strategy:
-      1) YOLO(name) – works for official names (e.g., yolov8x.pt, yolo11x.pt)
-      2) If name endswith .onnx and (1) failed:
-           - YOLO(<same>.pt); export(..., format='onnx')
+    Strategy (performed INSIDE dst to avoid polluting repo-root):
+    1) YOLO(name) – works for official names (e.g., yolov8x.pt, yolo11x.pt)
+    2) If name endswith .onnx and (1) failed:
+        - YOLO(<same>.pt); export(..., format='onnx')
     """
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
@@ -130,26 +143,42 @@ def _fetch_one(name: str, dst: Path) -> Tuple[str, bool]:
     if not has_yolo or YOLO is None:
         return (target.name, False)
 
-    # Direct download by name from the model zoo
+    # Direct download by name from the model zoo (run with CWD=dst)
     try:
-        m = YOLO(name)  # type: ignore
-        p = Path(getattr(m, "ckpt_path", name)).expanduser()
-        if p.exists():
-            shutil.copy2(p, target)
-            return (target.name, True)
+        with _cd(dst):
+            m = YOLO(name)  # type: ignore
+            p = Path(getattr(m, "ckpt_path", name)).expanduser()
+            if not p.exists():
+                p = Path(name).expanduser()
+            if p.exists():
+                # If YOLO wrote elsewhere (cache), copy into dst/target
+                if p.resolve() != target.resolve():
+                    shutil.copy2(p, target)
+                else:
+                    # p is already the file at target path – nothing to copy
+                    pass
+                return (target.name, True)
     except Exception:
         pass
 
-    # Export ONNX from the corresponding .pt
+    # Export ONNX from the corresponding .pt (run entirely inside dst)
     if name.endswith(".onnx"):
         try:
             pt_name = name[:-5] + ".pt"
-            m = YOLO(pt_name)  # type: ignore
-            m.export(format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu")
-            cand = _latest_exported_onnx()
-            if cand and cand.exists():
-                shutil.copy2(cand, target)
-                return (target.name, True)
+            with _cd(dst):
+                # Ensure the .pt is here (YOLO will fetch into CWD=dst if needed)
+                m_pt = YOLO(pt_name)  # type: ignore
+                # Export ONNX (Ultralytics writes under runs/)
+                m_pt.export(format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu")
+                cand = _latest_exported_onnx()
+                if cand and cand.exists():
+                    shutil.copy2(cand, target)
+                    # optional tidy
+                    try:
+                        shutil.rmtree(dst / "runs", ignore_errors=True)
+                    except Exception:
+                        pass
+                    return (target.name, True)
         except Exception:
             return (target.name, False)
 
@@ -257,11 +286,11 @@ def _menu() -> int:
                 """
                 What would you like to install?
 
-                  1) Default Drone-Vision pack
-                  2) Full pack (ALL families/sizes; .pt + .onnx; includes -seg)
-                  3) Size pack (choose 1 family/size/formats; optional -seg)
-                  4) Custom builder (multi-select; preview; extras)
-                  0) Exit
+                1) Default Drone-Vision pack
+                2) Full pack (ALL families/sizes; .pt + .onnx; includes -seg)
+                3) Size pack (choose 1 family/size/formats; optional -seg)
+                4) Custom builder (multi-select; preview; extras)
+                0) Exit
                 """
             ).strip()
         )
@@ -303,11 +332,11 @@ def _ask_size_pack() -> List[str]:
 def _ask_custom() -> List[str]:
     """
     Guided, multi-select custom builder:
-      • choose one or more families
-      • choose one or more sizes
-      • choose detect/seg (or both)
-      • choose formats (.pt/.onnx/both)
-      • optional extras typed as raw names
+    • choose one or more families
+    • choose one or more sizes
+    • choose detect/seg (or both)
+    • choose formats (.pt/.onnx/both)
+    • optional extras typed as raw names
     """
     # Families
     _show_row("Families:", FAMILIES)

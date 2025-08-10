@@ -43,4 +43,4 @@ jobs:
         env:
           panoptes_TEST_DET_WEIGHTS: projects/argos/panoptes/model/yolov8n.onnx
           panoptes_TEST_SEG_WEIGHTS: projects/argos/panoptes/model/yolov8n-seg.onnx
-        run: py -m pytest -q projects\argos\tests -vv
+        run: python -m pytest -q projects/argos/tests -vv

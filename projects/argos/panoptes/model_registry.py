@@ -71,7 +71,7 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 _DETECT_LIST: list[Path] = [
     MODEL_DIR / "yolov8x.pt",    # MAIN
     MODEL_DIR / "yolo11x.pt",    # BACKUP
-    MODEL_DIR / "yolov12x.onnx", # light/fast dev
+    MODEL_DIR / "yolov12x.onnx", # light xtra large for fast/dev
     MODEL_DIR / "yolov12x.pt",
     MODEL_DIR / "yolo11x.onnx",
     MODEL_DIR / "yolov8x.onnx",
