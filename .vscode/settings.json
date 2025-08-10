@@ -1,7 +1,0 @@
-{
-    "files.associations": {
-        "*.dbclient-js": "javascript",
-        "plyconfig.json": "jsonc"
-    },
-    "git.ignoreLimitWarning": true
-}
