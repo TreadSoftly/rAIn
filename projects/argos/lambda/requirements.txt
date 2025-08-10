@@ -1,17 +1,16 @@
 # Argos Lambda runtime deps (Python 3.11 base image)
 
-# ONNX runtime (Py3.11 compatible; keep <1.24 to avoid ABI surprises)
-onnxruntime>=1.22,<1.24
+# ONNX Runtime – Lambda's Python 3.11 image only publishes wheels up to 1.16.x
+onnxruntime==1.16.3
 
-# NumPy window shared with main project; avoid 2.0.* ABI bumps
-numpy!=2.0.*,>=1.26,<2.3
+# NumPy kept <2.0 to avoid ABI mismatches with ORT 1.16 wheels
+numpy>=1.26,<2.0
 
 # Imaging / ML
 pillow>=10.0,<12.0
-ultralytics>=8.0
+ultralytics>=8.0,<8.3
 
-# OpenCV 4.12 wheels require NumPy >=2;
-# lock to 4.11 to stay compatible with the NumPy range above.
+# OpenCV 4.12 wheels require NumPy >=2; lock to 4.11 for the NumPy window above
 opencv-python-headless==4.11.0.86
 
 # SciPy window aligned with project
@@ -21,5 +20,5 @@ scipy>=1.11,<1.15
 redis>=5.0
 boto3>=1.34
 
-# Keep this flexible so Py3.11 can pick a suitable wheel
+# Keep flexible; Py3.11 wheels available
 matplotlib>=3.9
