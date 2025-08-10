@@ -1,36 +1,35 @@
-# Core ML stack
-torch==2.3.* ; python_version < '3.12'
-torchvision==0.18.* ; python_version < '3.12'
-torch>=2.4,<2.6 ; python_version >= '3.12'
-torchvision>=0.19,<0.21 ; python_version >= '3.12'
-ultralytics>=8.0
+# Core ML stack (kept in sync with pyproject; exacts set by constraints)
+torch>=2.4,<2.6
+torchvision>=0.19,<0.21
+ultralytics>=8.0,<8.3
 
-# ONNX Runtime (platform / Python aware to match pyproject)
+# ONNX Runtime (platform / Python aware)
 onnxruntime==1.19.2 ; python_version < '3.10'
 onnxruntime>=1.22,<1.23 ; python_version >= '3.10' and platform_system == 'Windows'
 onnxruntime>=1.22,<1.24 ; python_version >= '3.10' and platform_system != 'Windows'
 
 onnx>=1.12,<1.18
-onnxslim>=0.1.59
 
-# OpenCV locked to a NumPy-2-compatible wheel but below 4.12
+# OpenCV locked below 4.12 (NumPy ≥2.3 jump)
 opencv-python-headless>=4.11,<4.12
 
-# NumPy — hard-cap to avoid 2.3+ ABI breakage on runners
+# NumPy — flexible window (constraints decide 1.26 vs 2.1–2.2)
 numpy!=2.0.*,>=1.26,<2.3
 
 pillow>=10.0,<12.0
 pillow-avif-plugin>=1.4
 
+# Viz / numerics
 matplotlib>=3.9
 scipy>=1.11,<1.15
 pandas>=2.2
-redis>=5.0
 
+# Infra / utils
+redis>=5.0
 typer[all]>=0.12
 thop==0.1.1.post2209072238
 
-# Dev/test tools (not used in CI install unless you explicitly -r this file)
+# Dev/test (not pulled unless you ask for [dev])
 boto3>=1.34
 moto[all]~=4.2
 pytest>=8

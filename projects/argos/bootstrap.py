@@ -206,8 +206,7 @@ def _constraints_args() -> list[str]:
 def _create_venv() -> None:
     _print("→ creating virtual environment (outside repo)…")
     _run([sys.executable, "-m", "venv", str(VENV)], check=True, capture=False)
-    # Keep pip on a safe window to match CI (pip<25.3) and avoid sudden resolver changes.
-    _run([str(VPY), "-m", "pip", "install", "--upgrade", "pip<25.3", "setuptools", "wheel"], check=True, capture=False)
+    _run([str(VPY), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], check=True, capture=False)
 
 
 def _torch_pins_from_requirements() -> Tuple[str, str]:
@@ -243,11 +242,7 @@ def _install_torch_if_needed(cpu_only: bool) -> None:
     # CPU wheels index for Win/Linux when cpu_only; macOS uses default (MPS wheels on PyPI)
     idx: list[str] = []
     if cpu_only and (os.name == "nt" or sys.platform.startswith("linux")):
-        # Use PyTorch CPU index for torch/torchvision, but allow deps (e.g., numpy) from PyPI
-        idx = [
-            "--index-url", "https://download.pytorch.org/whl/cpu",
-            "--extra-index-url", "https://pypi.org/simple",
-        ]
+        idx = ["--index-url", "https://download.pytorch.org/whl/cpu"]
     _print(f"→ installing Torch ({'CPU-only' if cpu_only else 'auto'}) …")
     _run([str(VPY), "-m", "pip", "install", *idx, *_constraints_args(), torch_spec, tv_spec], check=True, capture=False)
 
@@ -258,9 +253,8 @@ def _pip_install_editable_if_needed(*, reinstall: bool = False) -> None:
     if not need:
         return
     _print("→ installing Argos package (editable) + dev extras …")
-    # Put constraints BEFORE the requirement so pip applies them to the editable install.
     _run(
-        [str(VPY), "-m", "pip", "install", *_constraints_args(), "-e", str(ARGOS) + "[dev]"],
+        [str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + "[dev]", *_constraints_args()],
         check=True,
         capture=False,
     )
@@ -582,7 +576,7 @@ def _create_launchers() -> None:
     )
     os.chmod(sh, 0o755)
 
-    # PowerShell (prefer py -3 if present; matches other launchers)
+    # PowerShell
     ps1 = HERE / "argos.ps1"
     ps1.write_text(
         textwrap.dedent(
@@ -590,11 +584,10 @@ def _create_launchers() -> None:
         [CmdletBinding()] param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
         $ErrorActionPreference = "Stop"
         $HERE = Split-Path -Parent $MyInvocation.MyCommand.Path
-        $py = (Get-Command py -ErrorAction SilentlyContinue).Source
-        $pyArgs = @()
-        if ($py) { $pyArgs = @('-3') } else { $py = (Get-Command python -ErrorAction SilentlyContinue).Source }
-        & $py @pyArgs "$HERE\bootstrap.py" --ensure --yes | Out-Null
-        $vpy = & $py @pyArgs "$HERE\bootstrap.py" --print-venv
+        $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+        if (-not $py) { $py = (Get-Command py -ErrorAction SilentlyContinue).Source }
+        & $py "$HERE\bootstrap.py" --ensure --yes | Out-Null
+        $vpy = & $py "$HERE\bootstrap.py" --print-venv
         $env:PYTHONPYCACHEPREFIX = Join-Path $env:LOCALAPPDATA "rAIn\pycache"
         & $vpy -m panoptes.cli @Args
     """

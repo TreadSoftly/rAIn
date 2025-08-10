@@ -1,26 +1,23 @@
 # Resolver anchors used by CI across Linux/macOS/Windows.
 
-# Torch/TorchVision pairs
-torch==2.5.1 ; python_version >= "3.12"
-torchvision==0.20.1 ; python_version >= "3.12"
+# Torch/TorchVision pairs (lets pip land on a single, known-good combo)
+torch==2.5.1
+torchvision==0.20.1
 
-torch==2.3.* ; python_version < "3.12"
-torchvision==0.18.* ; python_version < "3.12"
+# Torchaudio (only if [audio] extra is installed)
+torchaudio==2.5.1
 
-# Torchaudio pairs (only installed if you opt into the [audio] extra)
-torchaudio==2.5.1 ; python_version >= "3.12"
-torchaudio==2.3.* ; python_version < "3.12"
-
-# OpenCV wheel compatible with NumPy<2.3 and rebuilt for NumPy 2
+# OpenCV wheel compatible with NumPy<2.3 and also publishes NP2 wheels
 opencv-python-headless==4.11.0.86
 
-# Unified NumPy window; avoid 2.0.* ABI issues
-numpy==1.26.4
+# NumPy: keep 1.26 on Py<3.12; allow NP2 on newer (TV 0.20 wants NP2)
+numpy==1.26.4          ; python_version < "3.12"
+numpy>=2.1,<2.3        ; python_version >= "3.12"
 
-# Sympy/Scipy pins to satisfy Torch (and avoid onnxslim conflicts)
+# Sympy/Scipy pins to satisfy Torch and ONNX tools
 sympy==1.13.1
 scipy==1.13.*
 
-# Keep matplotlib flexible but avoid 3.10+ on Python 3.9 where wheels are spotty
-matplotlib>=3.9,<3.10 ; python_version < "3.10"
-matplotlib>=3.9 ; python_version >= "3.10"
+# Matplotlib: cap on Py3.9 only to avoid wheel gaps
+matplotlib>=3.9,<3.10  ; python_version < "3.10"
+matplotlib>=3.10       ; python_version >= "3.10"

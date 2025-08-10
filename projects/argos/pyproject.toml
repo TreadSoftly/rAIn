@@ -12,33 +12,34 @@ requires-python = ">=3.9,<3.13"
 
 dependencies = [
   # ── Core ML stack ──
-  # Pin pairs that are known-good on GH runners and keep NumPy < 2 ABI:
-  "torch==2.3.* ; python_version < '3.12'",
-  "torchvision==0.18.* ; python_version < '3.12'",
-  "torch==2.4.* ; python_version >= '3.12'",
-  "torchvision==0.19.* ; python_version >= '3.12'",
+  # Keep ranges wide enough for both Py3.9 and Py3.12; exacts come from constraints.txt.
+  "torch>=2.4,<2.6",
+  "torchvision>=0.19,<0.21",
+  # Cap Ultralytics to a train that stays compatible with Torch 2.4–2.5 across runners.
+  "ultralytics>=8.0,<8.3",
 
-  "ultralytics>=8.0",
-
-  # ── ONNX Runtime (platform/py aware to satisfy Win+Py3.12) ──
+  # ── ONNX Runtime (platform/py aware) ──
   "onnxruntime==1.19.2 ; python_version < '3.10'",
   "onnxruntime>=1.22,<1.23 ; python_version >= '3.10' and platform_system == 'Windows'",
   "onnxruntime>=1.22,<1.24 ; python_version >= '3.10' and platform_system != 'Windows'",
 
-  # Keep ONNX toolchain conservative to avoid sympy/abi spats
+  # Conservative ONNX toolchain
   "onnx>=1.12,<1.18",
 
   # ── Imaging / numerics ──
-  # OpenCV 4.12+ jumps to NumPy ≥2.3; stay below for now.
+  # OpenCV 4.12+ jumps to NumPy ≥2.3; keep below.
   "opencv-python-headless>=4.11,<4.12",
 
-  # NumPy — avoid 2.0.* ABI breakage seen on GH runners
+  # NumPy window that allows 1.26 on Py3.9 and 2.1–2.2 on Py3.12 (constraints pick exact).
   "numpy!=2.0.*,>=1.26,<2.3",
 
   "pillow>=10.0,<12.0",
   "pillow-avif-plugin>=1.4",
 
-  "matplotlib>=3.9",
+  # Matplotlib: be explicit about Py3.9 cap to dodge wheel gaps.
+  "matplotlib>=3.9,<3.10 ; python_version < '3.10'",
+  "matplotlib>=3.10       ; python_version >= '3.10'",
+
   "scipy>=1.11,<1.15",
   "pandas>=2.2",
 
