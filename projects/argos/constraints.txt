@@ -1,3 +1,5 @@
+# projects/argos/constraints.txt
+
 # Resolver anchors used by CI across Linux/macOS/Windows.
 
 # Torch/TorchVision pairs (lets pip land on a single, known-good combo)
@@ -10,9 +12,8 @@ torchaudio==2.5.1
 # OpenCV wheel compatible with NumPy<2.3 and also publishes NP2 wheels
 opencv-python-headless==4.11.0.86
 
-# NumPy: keep 1.26 on Py<3.12; allow NP2 on newer (TV 0.20 wants NP2)
-numpy==1.26.4          ; python_version < "3.12"
-numpy>=2.1,<2.3        ; python_version >= "3.12"
+# NumPy: allow 1.26 or NP2 across Pythons (TV 0.20 cpu wheels need NP>=2.1 on 3.9/3.11)
+numpy>=1.26,<2.3
 
 # Sympy/Scipy pins to satisfy Torch and ONNX tools
 sympy==1.13.1
