@@ -27,7 +27,7 @@ while (($#)); do
   t="$1"; shift
   lt="${t,,}"
   case "$lt" in
-    pack|package|build|me) ;;                   # ignore noise
+    pack|package|build|me) ;;
     --no-tests)      run_tests=0 ;;
     --wheel-only)    want_sdist=0; want_wheel=1 ;;
     --sdist-only)    want_sdist=1; want_wheel=0 ;;

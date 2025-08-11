@@ -7,11 +7,16 @@ if ($Args.Length -gt 0 -and $Args[0] -eq 'argos') { $Args = $Args[1..($Args.Leng
 $HERE = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ROOT = Split-Path -Parent $HERE
 
-$py = (Get-Command python3 -ErrorAction SilentlyContinue)?.Source
-if (-not $py) { $py = (Get-Command python -ErrorAction SilentlyContinue)?.Source }
+# Prefer 'py -3' when available (then python3/python)
+$pyExe = (Get-Command py -ErrorAction SilentlyContinue)?.Source
+$pyArgs = @()
+if ($pyExe) { $pyArgs = @('-3') }
+if (-not $pyExe) { $pyExe = (Get-Command python3 -ErrorAction SilentlyContinue)?.Source }
+if (-not $pyExe) { $pyExe = (Get-Command python  -ErrorAction SilentlyContinue)?.Source }
+if (-not $pyExe) { Write-Error "Python 3 not found."; exit 1 }
 
-& $py "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall *> $null
-$vpy = & $py "$ROOT\projects\argos\bootstrap.py" --print-venv
+& $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall *> $null
+$vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
 
 & $vpy -m pip check
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
