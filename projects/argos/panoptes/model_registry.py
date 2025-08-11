@@ -1,3 +1,4 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\model_registry.py
 """
 panoptes.model_registry
 --------------------------
@@ -30,12 +31,13 @@ try:
     _ultra_mod = importlib.import_module("ultralytics")
     _yolo_cls = getattr(_ultra_mod, "YOLO", None)
     try:
-        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
         # Ultralytics may expose a loguru Logger (has .remove()) or std logging.Logger
+        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
         remover = getattr(_ULTRA_LOGGER, "remove", None)
         if callable(remover):
-            remover()
+            remover()  # silence loguru banner
         else:
+            # stdlib logger: clear handlers if any
             handlers = list(getattr(_ULTRA_LOGGER, "handlers", []))
             remove_handler = getattr(_ULTRA_LOGGER, "removeHandler", None)
             for h in handlers:
@@ -83,9 +85,9 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # DETECTION (boxes)
 _DETECT_LIST: list[Path] = [
-    MODEL_DIR / "yolov8x.pt",    # MAIN
-    MODEL_DIR / "yolo11x.pt",    # BACKUP
-    MODEL_DIR / "yolo12x.onnx",  # light xtra large for fast/dev
+    MODEL_DIR / "yolov8x.pt",    # MAIN (stable, wide support)
+    MODEL_DIR / "yolo11x.pt",    # BACKUP (newer, larger)
+    MODEL_DIR / "yolo12x.onnx",  # extra fast/dev if exported
     MODEL_DIR / "yolo12x.pt",
     MODEL_DIR / "yolo11x.onnx",
     MODEL_DIR / "yolov8x.onnx",
