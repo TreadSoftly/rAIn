@@ -17,20 +17,71 @@
 
 </div>
 
-## 1) Git Clone The Repo Then Build & Run
+<div align="center">
 
-> In Your Terminal Copy And Paste Commands Below Into Terminal ~
+## To Get Up And Running ~
+
+</div>
+
+<div align="center">
+
+> In Your Terminal Copy And Paste Commands Below Into Terminal: >
+
+</div>
 
 ```
 git clone https://github.com/TreadSoftly/rAIn.git
+
 ```
 
 ```
 cd rAIn
+
 ```
+
 ```
 build
+
 ```
+
+```
+argos -h
+
+```
+
+<div align="center">
+
+> To practice with the media in the tests/raw folder copy and paste: >
+
+</div>
+
+```
+d mildrone
+
+```
+
+```
+assets heatmap
+
+```
+
+```
+hm all
+
+```
+
+```
+all detect
+
+```
+<div align="center">
+
+> To Process Your Own Media Files Locate /tests/raw/ Folder And Place Your Media There. Then Run The Desired Commands As Shown Above To Process The Media. Results Will Be Placed In /tests/results/ Folder.
+
+</div>
+
+
+
 
 <div align="center">
 
