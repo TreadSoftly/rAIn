@@ -32,9 +32,6 @@
 ```
 git clone https://github.com/TreadSoftly/rAIn.git
 
-```
-
-```
 cd rAIn
 
 ```
