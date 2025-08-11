@@ -1,6 +1,12 @@
 <div align="center">
 
-# ~ Install → Run (Quickstart) ~
+# ~ Argos ~
+
+</div>
+
+<div align="center">
+
+### Install → Run (Quickstart)
 
 <table align="center" cellpadding="6" style="border-collapse:collapse; text-align:left;">
   <tr><td>•</td><td><b>Clone</b> → open a terminal in the repo root.</td></tr>
@@ -11,21 +17,80 @@
 
 </div>
 
+<div align="center">
 
-## 1) Git Clone The Repo Then Build & Run
+## To Get Up And Running
 
-> In Your Terminal Copy And Paste Commands Below Into Terminal ~
+</div>
+
+<div align="center">
+
+> In Your Terminal Copy And Paste Commands Below Into Terminal: >
+
+</div>
 
 ```
 git clone https://github.com/TreadSoftly/rAIn.git
+
 ```
 
 ```
 cd rAIn
+
 ```
+
 ```
 build
+
 ```
+
+<div align="center">
+
+> Once you select the build you want and take the quick smoke test copy and paste for simple instructions: >
+
+</div>
+
+```
+argos -h
+
+```
+
+<br>
+
+
+<div align="center">
+
+> To practice with the media in the tests/raw folder copy and paste: >
+
+</div>
+
+```
+d mildrone
+
+```
+
+```
+assets heatmap
+
+```
+
+```
+hm all
+
+```
+
+```
+all detect
+
+```
+<div align="center">
+
+> IMPORTANT: = To Process Your Own Media Files Locate /tests/raw/ Folder And Place Your Media There. Then Run The Desired Commands As Shown Above To Process The Media. Results Will Be Placed In /tests/results/ Folder.
+
+</div>
+
+
+
 
 <div align="center">
 
@@ -39,7 +104,6 @@ build
 
 
 <br>
-
 
 <div align="center">
 
@@ -210,5 +274,3 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 </table>
 
 </div>
-
-
