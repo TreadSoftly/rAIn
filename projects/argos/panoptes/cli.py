@@ -558,35 +558,35 @@ def target(  # noqa: C901
     inputs: List[str] = typer.Argument(..., metavar="INPUT [d|hm|gj|FLAGS|help|man]"),
     *,
     # flexible: explicit task name
-    task: Optional[str] = typer.Option(None, "--task", "-t", help="Task: detect|heatmap|geojson"),
+    task: Optional[str] = typer.Option(None, "--task", "-t", help="- task detect /or/ -t d | -t heatmap /or/ -task d | -t geojson /or/ -t -gj"),
     # convenience boolean flags for task selection
-    detect_flag: bool = typer.Option(False, "--detect", "-d", help="Shortcut for --task detect"),
-    heatmap_flag: bool = typer.Option(False, "--heatmap", help="Shortcut for --task heatmap"),
-    geojson_flag: bool = typer.Option(False, "--geojson", help="Shortcut for --task geojson"),
+    detect_flag: bool = typer.Option(False, "--detect", "-d", help="d is shortcut for --task detect | d YourFile /or/ YourFile d"),
+    heatmap_flag: bool = typer.Option(False, "--heatmap", help="hm is shortcut for --task heatmap | hm YourFile /or/ YourFile hm"),
+    geojson_flag: bool = typer.Option(False, "--geojson", help="gj is shortcut for --task geojson | gj YourFile /or/ YourFile gj"),
     # meta/help UX
-    man_flag: bool = typer.Option(False, "--man", help="Open the full manual and exit"),
-    examples_flag: bool = typer.Option(False, "--examples", help="Show examples and exit"),
-    tutorial_flag: bool = typer.Option(False, "--tutorial", help="Show a short tutorial and exit"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Explain what would run, then exit"),
+    man_flag: bool = typer.Option(False, "--man", help="TODO: Open the full manual and exit"),
+    examples_flag: bool = typer.Option(False, "--examples", help="TODO: Show examples and exit"),
+    tutorial_flag: bool = typer.Option(False, "--tutorial", help="TODO: Show a short tutorial and exit"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="TODO: Explain what would run, then exit"),
     # model (cosmetic placeholder for compatibility)
     model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
     # heat-map tuning
-    alpha: float = typer.Option(0.40, help="Heat-map blend 0-1"),
-    cmap: str = typer.Option("COLORMAP_JET", help="OpenCV / Matplotlib colour-map"),
-    kernel_scale: float = typer.Option(5.0, "--k", "-k", help="σ  area / kernel_scale (smaller  blurrier)"),
+    alpha: float = typer.Option(0.40, help="TODO: Heat-map blend 0-1"),
+    cmap: str = typer.Option("COLORMAP_JET", help="TODO: OpenCV / Matplotlib colour-map"),
+    kernel_scale: float = typer.Option(5.0, "--k", "-k", help="TODO:  Area / kernel_scale (smaller  blurrier)"),
     conf: float = typer.Option(0.40, help="[detect / heat-map] confidence threshold 0-1"),
-    small: bool = typer.Option(False, "--small", "--fast", help="use nano models for live video"),
+    small: bool = typer.Option(False, "--small", "--fast", help="TODO: Use nano models for live video"),
     # per-task override weights
     det_override: Optional[Path] = typer.Option(
         None, "--det-weights",
-        help="Force a detector weight for detect/geojson (path to .pt/.onnx).",
+        help="TODO: Force a detector weight for detect/geojson (path to .pt/.onnx).",
     ),
     seg_override: Optional[Path] = typer.Option(
         None, "--seg-weights",
-        help="Force a segmentation weight for heatmap (path to .pt/.onnx).",
+        help="TODO: Force a segmentation weight for heatmap (path to .pt/.onnx).",
     ),
 ) -> None:
-    """Batch-process images / videos with zero manual weight fiddling."""
+    """TODO: Batch-process images / videos with zero manual weight fiddling."""
 
     # Honor meta flags first (no heavy imports)
     if man_flag:
