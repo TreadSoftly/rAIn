@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\tools\build_models.py
+# \rAIn\projects\argos\panoptes\tools\build_models.py
 from __future__ import annotations
 
 import glob
@@ -465,8 +465,11 @@ def _quick_check() -> None:
 # ---------------------------------------------------------------------
 @app.command()
 def main() -> None:
-    _ensure_env_hint()
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Show environment hint on first run (no manifest yet)
+    if not (MODEL_DIR / "manifest.json").exists():
+        _ensure_env_hint()
 
     choice = _menu()
     if choice == 0:
