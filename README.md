@@ -19,7 +19,7 @@
 
 <div align="center">
 
-## To Get Up And Running ~
+## To Get Up And Running
 
 </div>
 
