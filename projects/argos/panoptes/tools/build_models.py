@@ -333,7 +333,7 @@ def _menu() -> int:
                 """
                 What would you like to install?
 
-                1) Default Drone-Vision pack
+                1) Default Argos pack
                 2) Full pack (ALL families/sizes; ALL tasks; .pt + .onnx)
                 3) Size pack (choose 1 family/size/tasks/formats)
                 4) Custom builder (multi-select; preview; extras)
