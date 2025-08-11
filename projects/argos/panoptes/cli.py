@@ -24,8 +24,11 @@ import typer
 #  app scaffolding
 # ────────────────────────────────────────────────────────────────────────────
 
-# Recognize as many help invocations as possible (Windows-style included)
-_HELP_NAMES = ["-h", "--help", "-help", "-?", "/?"]
+# Recognize lots of help invocations. IMPORTANT:
+# Do NOT include "/?" except on Windows, or Click will treat "/" as an option
+# prefix and absolute paths like /tmp or /home will be parsed as options.
+_IS_WINDOWS = sys.platform.startswith("win")
+_HELP_NAMES = ["-h", "--help", "-help", "-?"] + (["/?"] if _IS_WINDOWS else [])
 
 app = typer.Typer(
     add_completion=False,
