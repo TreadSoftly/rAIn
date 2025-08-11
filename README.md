@@ -44,13 +44,19 @@ build
 
 ```
 
+<div align="center">
+
 > Once you select the build you want and take the quick smoke test copy and paste for simple instructions: >
 
+</div>
 
 ```
 argos -h
 
 ```
+
+<br>
+
 
 <div align="center">
 
@@ -79,7 +85,7 @@ all detect
 ```
 <div align="center">
 
-> To Process Your Own Media Files Locate /tests/raw/ Folder And Place Your Media There. Then Run The Desired Commands As Shown Above To Process The Media. Results Will Be Placed In /tests/results/ Folder.
+> IMPORTANT: = To Process Your Own Media Files Locate /tests/raw/ Folder And Place Your Media There. Then Run The Desired Commands As Shown Above To Process The Media. Results Will Be Placed In /tests/results/ Folder.
 
 </div>
 
