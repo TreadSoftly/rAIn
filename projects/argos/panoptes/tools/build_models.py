@@ -1,3 +1,4 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\tools\build_models.py
 from __future__ import annotations
 
 import glob
@@ -18,16 +19,25 @@ import typer
 # ---------------------------------------------------------------------
 try:
     from panoptes.model_registry import MODEL_DIR as _REG_MODEL_DIR  # type: ignore
-    _registry_model_dir: Optional[Path] = Path(_REG_MODEL_DIR)
+    _registry_model_dir: Optional[Path] = Path(_REG_MODEL_DIR)  # type: ignore[arg-type]
 except Exception:
     _registry_model_dir = None
 
 MODEL_DIR: Path = _registry_model_dir or (Path(__file__).resolve().parents[2] / "panoptes" / "model")
 
 # Ultralytics (used to fetch/export weights)
+has_yolo: bool
 try:
-    from ultralytics import YOLO as _YOLO  # type: ignore[reportMissingTypeStubs,import-not-found]
-    has_yolo: bool = True
+    from ultralytics import YOLO as _YOLO  # type: ignore[reportMissingTypeStubs]
+    try:
+        # Keep Ultralytics quiet; we print our own succinct logs.
+        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
+        _rem = getattr(_ULTRA_LOGGER, "remove", None)
+        if callable(_rem):
+            _rem()
+    except Exception:
+        pass
+    has_yolo = True
 except Exception:
     _YOLO = None  # type: ignore[assignment]
     has_yolo = False
@@ -42,43 +52,67 @@ app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 FAMILIES: Tuple[str, ...] = ("8", "11", "12")
 SIZES: Tuple[str, ...] = ("x", "l", "m", "s", "n")
 EXTS: Tuple[str, ...] = (".pt", ".onnx")
+TASKS: Tuple[str, ...] = ("det", "seg", "pose", "cls", "obb")
 
-# Your curated default pack
+# A sensible curated default (small but covers multiple tasks)
 DEFAULT_PACK: List[str] = [
     # DETECT
-    "yolov8x.pt",      # main
-    "yolo11x.pt",      # backup
-    "yolov12x.onnx",   # dev/light
+    "yolov8x.pt",
+    "yolo11x.pt",
+    "yolo12x.onnx",
 
-    # HEATMAP (seg)
-    "yolo11x-seg.pt",  # main
-    "yolo11m-seg.pt",  # backup
-    "yolov8n-seg.pt",  # dev/light
+    # SEG
+    "yolo11x-seg.pt",
+    "yolo11m-seg.pt",
+    "yolov8n-seg.pt",
 
-    # LIGHTWEIGHT family (additional fallbacks)
-    "yolov12x.onnx",
-    "yolov12m.onnx",
-    "yolov12n.onnx",
+    # POSE
+    "yolo11s-pose.pt",
+    "yolov8n-pose.pt",
+
+    # CLS
+    "yolo11s-cls.pt",
+    "yolov8n-cls.pt",
+
+    # OBB
+    "yolo11s-obb.pt",
+    "yolov8n-obb.pt",
+
+    # LIGHT/DEV extras
+    "yolo12m.onnx",
+    "yolo12n.onnx",
 ]
 
 
-def _mk(fam: str, size: str, seg: bool, ext: str) -> str:
-    """Construct official Ultralytics-style names."""
-    base = f"yolo11{size}" if fam == "11" else f"yolov{fam}{size}"
-    if seg:
-        base += "-seg"
-    return base + ext
+def _mk(fam: str, size: str, task: str, ext: str) -> str:
+    """
+    Construct official Ultralytics-style names.
+
+    Ultralytics naming:
+      • YOLOv8:  yolov8{s}.pt / yolov8{s}-seg.pt / -pose / -cls / -obb
+      • YOLO11:  yolo11{s}.pt / yolo11{s}-seg.pt / -pose / -cls / -obb
+      • YOLO12:  yolo12{s}.pt / yolo12{s}-seg.pt / -pose / -cls / -obb
+    """
+    base = f"yolov{fam}{size}" if fam == "8" else f"yolo{fam}{size}"
+    suf = {
+        "det": "",
+        "seg": "-seg",
+        "pose": "-pose",
+        "cls": "-cls",
+        "obb": "-obb",
+    }[task]
+    return base + suf + ext
 
 
 def _full_pack() -> List[str]:
-    """All families/sizes; include seg and non-seg; .pt + .onnx."""
+    """All families/sizes/tasks; .pt + .onnx (deduped)."""
     out: List[str] = []
     seen: Set[str] = set()
     for fam in FAMILIES:
         for sz in SIZES:
-            for ext in EXTS:
-                for seg in (False, True):
-                    n = _mk(fam, sz, seg, ext)
+            for task in TASKS:
+                for ext in EXTS:
+                    n = _mk(fam, sz, task, ext)
                     if n not in seen:
                         seen.add(n)
                         out.append(n)
@@ -123,27 +157,28 @@ def _cd(path: Path):
 # ---------------------------------------------------------------------
 # Fetch logic
 # ---------------------------------------------------------------------
-def _fetch_one(name: str, dst: Path) -> Tuple[str, bool]:
+def _fetch_one(name: str, dst: Path) -> Tuple[str, str]:
     """
-    Try to obtain *name* into *dst*.
+    Obtain *name* into *dst* and return (basename, action).
 
-    Strategy (performed INSIDE dst to avoid polluting repo-root):
-    1) YOLO(name) – works for official names (e.g., yolov8x.pt, yolo11x.pt)
-    2) If name endswith .onnx and (1) failed:
-        - YOLO(<same>.pt); export(..., format='onnx')
+    Possible actions:
+      • "present"   – already existed in dst
+      • "download"  – YOLO fetched directly into dst
+      • "copied"    – YOLO fetched elsewhere; we copied into dst
+      • "exported"  – we exported ONNX from a matching .pt
+      • "failed"    – nothing worked
     """
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
 
     # Already present
     if target.exists():
-        return (target.name, True)
+        return (target.name, "present")
 
-    # Need Ultralytics to download/export
     if not has_yolo or YOLO is None:
-        return (target.name, False)
+        return (target.name, "failed")
 
-    # Direct download by name from the model zoo (run with CWD=dst)
+    # 1) Try to fetch directly by name from the model zoo (with CWD=dst)
     try:
         with _cd(dst):
             m = YOLO(name)  # type: ignore
@@ -151,57 +186,67 @@ def _fetch_one(name: str, dst: Path) -> Tuple[str, bool]:
             if not p.exists():
                 p = Path(name).expanduser()
             if p.exists():
-                # If YOLO wrote elsewhere (cache), copy into dst/target
-                if p.resolve() != target.resolve():
-                    shutil.copy2(p, target)
-                return (target.name, True)
+                if p.resolve() == target.resolve():
+                    return (target.name, "download")
+                shutil.copy2(p, target)
+                return (target.name, "copied")
     except Exception:
+        # swallow and try ONNX export path below
         pass
 
-    # Export ONNX from the corresponding .pt (run entirely inside dst)
+    # 2) If ONNX, export from the corresponding .pt (inside dst)
     if name.endswith(".onnx"):
         try:
             pt_name = name[:-5] + ".pt"
             with _cd(dst):
-                # Ensure the .pt is here (YOLO will fetch into CWD=dst if needed)
+                # Ensure the .pt is present in dst (YOLO will fetch into CWD=dst if needed)
                 m_pt = YOLO(pt_name)  # type: ignore
+                p_pt = Path(getattr(m_pt, "ckpt_path", pt_name)).expanduser()
+                if p_pt.exists() and p_pt.resolve() != (dst / Path(pt_name)).resolve():
+                    shutil.copy2(p_pt, (dst / Path(pt_name)))
                 # Export ONNX (Ultralytics writes under runs/)
-                m_pt.export(format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu")
+                try:
+                    m_pt.export(format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu")
+                except Exception:
+                    # fallback if simplification/opset settings cause issues
+                    m_pt.export(format="onnx", dynamic=True, simplify=False, imgsz=640, opset=12, device="cpu")
                 cand = _latest_exported_onnx()
                 if cand and cand.exists():
                     shutil.copy2(cand, target)
-                    # optional tidy
                     try:
                         shutil.rmtree(dst / "runs", ignore_errors=True)
                     except Exception:
                         pass
-                    return (target.name, True)
+                    if target.exists():
+                        return (target.name, "exported")
         except Exception:
-            return (target.name, False)
+            return (target.name, "failed")
 
-    return (target.name, False)
+    return (target.name, "failed")
 
 
-def _fetch_all(names: List[str]) -> Tuple[List[str], List[str]]:
-    ok: List[str] = []
-    bad: List[str] = []
+def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
+    results: List[Tuple[str, str]] = []
+    failed: List[str] = []
     for nm in names:
-        final, success = _fetch_one(nm, MODEL_DIR)
-        (ok if success else bad).append(final)
-    return ok, bad
+        base, action = _fetch_one(nm, MODEL_DIR)
+        results.append((base, action))
+        if action == "failed":
+            failed.append(base)
+    return results, failed
 
 
 def _write_manifest(selected: List[str], installed: List[str]) -> None:
     data: Dict[str, object] = {
         "model_dir": str(MODEL_DIR),
-        "selected": selected,
-        "installed": installed,
+        "selected": _dedupe(selected),
+        "installed": _dedupe(installed),
     }
     (MODEL_DIR / "manifest.json").write_text(json.dumps(data, indent=2))
 
 
 # ---------------------------------------------------------------------
-# Interactive helpers (for a nicer “Custom” flow)
+# Interactive helpers
 # ---------------------------------------------------------------------
 def _show_row(title: str, items: Iterable[str]) -> None:
     typer.secho(f"\n{title}", bold=True)
@@ -248,20 +293,16 @@ def _parse_multi(raw: str, items: Tuple[str, ...], *, aliases: Optional[Dict[str
 def _build_combo(
     fams: Iterable[str],
     sizes: Iterable[str],
+    tasks: Iterable[str],
     *,
-    want_det: bool,
-    want_seg: bool,
     formats: Iterable[str],
 ) -> List[str]:
     names: List[str] = []
     for fam in fams:
         for sz in sizes:
-            if want_det:
+            for task in tasks:
                 for ext in formats:
-                    names.append(_mk(fam, sz, False, ext))
-            if want_seg:
-                for ext in formats:
-                    names.append(_mk(fam, sz, True, ext))
+                    names.append(_mk(fam, sz, task, ext))
     return _dedupe(names)
 
 
@@ -270,8 +311,8 @@ def _build_combo(
 # ---------------------------------------------------------------------
 def _ensure_env_hint() -> None:
     typer.echo()
-    _warn("If this is a fresh clone, the launcher ensured the Python env.")
-    _warn("You do not need to activate a venv manually.")
+    typer.secho("If this is a fresh clone, the launcher ensured the Python env.", fg="yellow")
+    typer.secho("You do not need to activate a venv manually.", fg="yellow")
     typer.echo()
 
 
@@ -284,14 +325,14 @@ def _menu() -> int:
                 What would you like to install?
 
                 1) Default Drone-Vision pack
-                2) Full pack (ALL families/sizes; .pt + .onnx; includes -seg)
-                3) Size pack (choose 1 family/size/formats; optional -seg)
+                2) Full pack (ALL families/sizes; ALL tasks; .pt + .onnx)
+                3) Size pack (choose 1 family/size/tasks/formats)
                 4) Custom builder (multi-select; preview; extras)
                 0) Exit
                 """
             ).strip()
         )
-        pick = typer.prompt("Pick [0–4, ? for help]", default="'1' for standard build").strip().lower()
+        pick = typer.prompt("Pick [0–4, ? for help]", default="1").strip().lower()
         if pick in {"?", "h", "help"}:
             typer.echo("Tips: numbers or names are fine in the builder; 'all' works at every step.")
             continue
@@ -301,28 +342,32 @@ def _menu() -> int:
                 return choice
         except ValueError:
             pass
-        _warn("Invalid choice. Try 0–4 or '?' for help.")
+        typer.secho("Invalid choice. Try 0–4 or '?' for help.", fg="yellow")
 
 
 def _ask_size_pack() -> List[str]:
-    fam = typer.prompt(f"Family {FAMILIES}", default="8, 11, or 12").strip()
+    fam = typer.prompt(f"Family {FAMILIES}", default="8").strip()
     while fam not in FAMILIES:
-        fam = typer.prompt(f"Family {FAMILIES}", default="8, 11, or 12").strip()
+        fam = typer.prompt(f"Family {FAMILIES}", default="8").strip()
 
-    sz = typer.prompt(f"Size {SIZES}", default="x for extra large size").strip().lower()
+    sz = typer.prompt(f"Size {SIZES}", default="x").strip().lower()
     while sz not in SIZES:
-        sz = typer.prompt(f"Size {SIZES}", default="x for extra large size").strip().lower()
+        sz = typer.prompt(f"Size {SIZES}", default="x").strip().lower()
 
-    want_seg = typer.confirm("Include segmentation (-seg) for heatmaps?", default=True)
+    # Tasks
+    task_alias = {"detect": "det", "segmentation": "seg", "classification": "cls"}
+    _show_row("Tasks:", TASKS)
+    raw_tasks = typer.prompt("Pick tasks (e.g. 'det,seg,pose' or 'all')", default="det,seg").strip()
+    chosen_tasks = _parse_multi(raw_tasks, TASKS, aliases=task_alias)
+    if not chosen_tasks:
+        chosen_tasks = ["det"]
 
     fmt = typer.prompt("Formats: .pt / .onnx / both", default="both").strip().lower()
     if fmt not in {"pt", "onnx", "both"}:
         fmt = "both"
-
     exts = (".pt", ".onnx") if fmt == "both" else (f".{fmt}",)
-    names = [_mk(fam, sz, False, ext) for ext in exts]
-    if want_seg:
-        names += [_mk(fam, sz, True, ext) for ext in exts]
+
+    names = _build_combo([fam], [sz], chosen_tasks, formats=exts)
     return _dedupe(names)
 
 
@@ -331,7 +376,7 @@ def _ask_custom() -> List[str]:
     Guided, multi-select custom builder:
     • choose one or more families
     • choose one or more sizes
-    • choose detect/seg (or both)
+    • choose tasks (det/seg/pose/cls/obb)
     • choose formats (.pt/.onnx/both)
     • optional extras typed as raw names
     """
@@ -340,13 +385,10 @@ def _ask_custom() -> List[str]:
     fam_alias: Dict[str, str] = {"v8": "8", "v11": "11", "v12": "12"}
     fams: List[str] = []
     while not fams:
-        raw = typer.prompt(
-            "Pick families (e.g. '1', '2', '3' / 'all')",
-            default="all for suite of family versions",  # fixed: was a non-parsable sentence
-        )
+        raw = typer.prompt("Pick families (e.g. '1', '2', '3' / 'all')", default="all")
         fams = _parse_multi(raw, FAMILIES, aliases=fam_alias)
         if not fams:
-            _warn("Pick at least one family version (try typing '1' '2' '3' or 'all').")
+            typer.secho("Pick at least one family version (try typing '1' '2' '3' or 'all').", fg="yellow")
 
     # Sizes
     _show_row("Model sizes:", SIZES)
@@ -356,14 +398,17 @@ def _ask_custom() -> List[str]:
         raw = typer.prompt("Pick sizes (e.g. 'n,s' or '5' or 'all')", default="x,n")
         sizes = _parse_multi(raw, SIZES, aliases=size_alias)
         if not sizes:
-            _warn("Pick at least one size (e.g., 'n' or 'all').")
+            typer.secho("Pick at least one size (e.g., 'n' or 'all').", fg="yellow")
 
-    # Tasks (detect/seg)
-    want_det = typer.confirm("Include DETECT (no -seg)?", default=True)
-    want_seg = typer.confirm("Include SEG (heatmap, '-seg')?", default=True)
-    if not (want_det or want_seg):
-        _warn("Nothing selected; enabling SEG by default.")
-        want_seg = True
+    # Tasks
+    _show_row("Tasks:", TASKS)
+    task_alias = {"detect": "det", "segmentation": "seg", "classification": "cls"}
+    tasks: List[str] = []
+    while not tasks:
+        raw = typer.prompt("Pick tasks (e.g. 'det,seg,pose,cls,obb' or 'all')", default="all")
+        tasks = _parse_multi(raw, TASKS, aliases=task_alias)
+        if not tasks:
+            typer.secho("Pick at least one task (e.g., 'det').", fg="yellow")
 
     # Formats
     _show_row("Formats:", EXTS)
@@ -373,7 +418,7 @@ def _ask_custom() -> List[str]:
     formats: Tuple[str, ...] = (".pt", ".onnx") if fmt_raw == "both" else (f".{fmt_raw}",)
 
     # Build + optional extras
-    names = _build_combo(fams, sizes, want_det=want_det, want_seg=want_seg, formats=formats)
+    names = _build_combo(fams, sizes, tasks, formats=formats)
 
     typer.secho("\nPreview (will be fetched):", bold=True)
     for n in names:
@@ -427,7 +472,7 @@ def main() -> None:
     if choice == 0:
         raise typer.Exit(0)
     if choice == 1:
-        selected = list(DEFAULT_PACK)
+        selected = _dedupe(DEFAULT_PACK)
     elif choice == 2:
         selected = _full_pack()
     elif choice == 3:
@@ -435,7 +480,6 @@ def main() -> None:
     elif choice == 4:
         selected = _ask_custom()
     else:
-        # Should never happen because _menu() only returns 0–4
         _err("Invalid choice.")
         raise typer.Exit(2)
 
@@ -452,19 +496,45 @@ def main() -> None:
     if not typer.confirm("Proceed to download/install into panoptes/model/?", default=True):
         raise typer.Exit(1)
 
-    ok, bad = _fetch_all(selected)
+    results, bad = _fetch_all(selected)
 
-    if ok:
-        _ok(f"Installed {len(ok)} file(s) to {MODEL_DIR}:")
-        for n in ok:
-            typer.echo(f"  ✓ {n}")
+    # Per-file, clear log
+    action_icons = {
+        "present": "↺",
+        "download": "↓",
+        "copied": "⇢",
+        "exported": "⎘",
+        "failed": "✗",
+    }
+    for name, action in results:
+        icon = action_icons.get(action, "•")
+        if action == "failed":
+            _warn(f"{icon} {name}  (failed)")
+        elif action == "present":
+            typer.echo(f"{icon} {name}  (already present)")
+        elif action == "download":
+            _ok(f"{icon} {name}  (downloaded)")
+        elif action == "copied":
+            _ok(f"{icon} {name}  (downloaded → copied into model dir)")
+        elif action == "exported":
+            _ok(f"{icon} {name}  (exported from matching .pt)")
+        else:
+            typer.echo(f"{icon} {name}  ({action})")
+
+    installed = [n for (n, a) in results if a != "failed"]
+
+    # Summary
+    typer.echo()
+    _ok(f"Installed/ready: {len(installed)}")
     if bad:
-        _warn(f"\nSkipped/failed ({len(bad)}):")
-        for n in bad:
+        _warn(f"Skipped/failed: {len(bad)}")
+        for n in _dedupe(bad):
             typer.echo(f"  – {n}")
-        _warn("Those names may not be hosted by Ultralytics, or export failed. You can add them manually.")
+        _warn("Those names may not be hosted by Ultralytics yet, or export failed.")
 
-    _write_manifest(selected, ok)
+    # Manifest for reproducibility
+    _write_manifest(selected, installed)
+
     _quick_check()
 
 

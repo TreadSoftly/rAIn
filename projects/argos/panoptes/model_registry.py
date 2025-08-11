@@ -17,8 +17,8 @@ Hard-locking rules (2025-08-07)
 from __future__ import annotations
 
 import functools
-import logging
 import importlib
+import logging
 import sys
 from pathlib import Path
 from typing import Final, Literal, Optional, Union
@@ -29,6 +29,20 @@ from typing import Final, Literal, Optional, Union
 try:
     _ultra_mod = importlib.import_module("ultralytics")
     _yolo_cls = getattr(_ultra_mod, "YOLO", None)
+    try:
+        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
+        # Ultralytics may expose a loguru Logger (has .remove()) or std logging.Logger
+        remover = getattr(_ULTRA_LOGGER, "remove", None)
+        if callable(remover):
+            remover()
+        else:
+            handlers = list(getattr(_ULTRA_LOGGER, "handlers", []))
+            remove_handler = getattr(_ULTRA_LOGGER, "removeHandler", None)
+            for h in handlers:
+                if callable(remove_handler):
+                    remove_handler(h)
+    except Exception:
+        pass
 except Exception:  # pragma: no cover
     _yolo_cls = None
 YOLO = _yolo_cls
@@ -56,9 +70,7 @@ _MODEL_DIR_A = _ROOT / "model"  # packaged weights (preferred)
 _MODEL_DIR_B = _ROOT.parent / "model"  # legacy path (fallback)
 
 # Prefer packaged dir; only fall back to legacy if it already exists
-MODEL_DIR: Final[Path] = (
-    _MODEL_DIR_A if _MODEL_DIR_A.exists() or not _MODEL_DIR_B.exists() else _MODEL_DIR_B
-)
+MODEL_DIR: Final[Path] = _MODEL_DIR_A if _MODEL_DIR_A.exists() or not _MODEL_DIR_B.exists() else _MODEL_DIR_B
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # ────────────────────────────────────────────────────────────────
@@ -68,42 +80,77 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 #  Only list **real** upstream files you actually keep in panoptes/model.
 #  (No placeholders. No names that don’t exist.)
 # ────────────────────────────────────────────────────────────────
+
+# DETECTION (boxes)
 _DETECT_LIST: list[Path] = [
     MODEL_DIR / "yolov8x.pt",    # MAIN
     MODEL_DIR / "yolo11x.pt",    # BACKUP
-    MODEL_DIR / "yolov12x.onnx", # light xtra large for fast/dev
-    MODEL_DIR / "yolov12x.pt",
+    MODEL_DIR / "yolo12x.onnx",  # light xtra large for fast/dev
+    MODEL_DIR / "yolo12x.pt",
     MODEL_DIR / "yolo11x.onnx",
     MODEL_DIR / "yolov8x.onnx",
     MODEL_DIR / "yolo11s.pt",
     MODEL_DIR / "yolo11s.onnx",
     MODEL_DIR / "yolov8s.pt",
     MODEL_DIR / "yolov8s.onnx",
-    MODEL_DIR / "yolov12n.onnx",
-    MODEL_DIR / "yolov12n.pt",
+    MODEL_DIR / "yolo12n.onnx",
+    MODEL_DIR / "yolo12n.pt",
     MODEL_DIR / "yolo11n.pt",
     MODEL_DIR / "yolo11n.onnx",
     MODEL_DIR / "yolov8n.pt",
     MODEL_DIR / "yolov8n.onnx",
 ]
 
+# SEGMENTATION (heatmaps)
 _HEATMAP_LIST: list[Path] = [
-    MODEL_DIR / "yolo11x-seg.pt",  # MAIN
+    MODEL_DIR / "yolo11x-seg.pt",   # MAIN
     MODEL_DIR / "yolo11x-seg.onnx",
     MODEL_DIR / "yolo11s-seg.pt",
     MODEL_DIR / "yolo11s-seg.onnx",
     MODEL_DIR / "yolov8x-seg.pt",
     MODEL_DIR / "yolov8x-seg.onnx",
-    MODEL_DIR / "yolov12s-seg.onnx",
-    MODEL_DIR / "yolov12s-seg.pt",
+    # Note: YOLO12 -seg weights may not be hosted by Ultralytics yet; keep near bottom.
+    MODEL_DIR / "yolo12s-seg.onnx",
+    MODEL_DIR / "yolo12s-seg.pt",
     MODEL_DIR / "yolo11n-seg.pt",
     MODEL_DIR / "yolo11n-seg.onnx",
     MODEL_DIR / "yolov8n-seg.pt",
     MODEL_DIR / "yolov8n-seg.onnx",
 ]
 
+# CLASSIFICATION
+_CLASSIFY_LIST: list[Path] = [
+    MODEL_DIR / "yolo11x-cls.pt",
+    MODEL_DIR / "yolov8x-cls.pt",
+    MODEL_DIR / "yolo11s-cls.pt",
+    MODEL_DIR / "yolov8s-cls.pt",
+    MODEL_DIR / "yolo11n-cls.pt",
+    MODEL_DIR / "yolov8n-cls.pt",
+]
+
+# POSE (keypoints)
+_POSE_LIST: list[Path] = [
+    MODEL_DIR / "yolo11x-pose.pt",
+    MODEL_DIR / "yolov8x-pose.pt",
+    MODEL_DIR / "yolo11s-pose.pt",
+    MODEL_DIR / "yolov8s-pose.pt",
+    MODEL_DIR / "yolo11n-pose.pt",
+    MODEL_DIR / "yolov8n-pose.pt",
+]
+
+# OBB (oriented boxes)
+_OBB_LIST: list[Path] = [
+    MODEL_DIR / "yolo11x-obb.pt",
+    MODEL_DIR / "yolov8x-obb.pt",
+    MODEL_DIR / "yolo11s-obb.pt",
+    MODEL_DIR / "yolov8s-obb.pt",
+    MODEL_DIR / "yolo11n-obb.pt",
+    MODEL_DIR / "yolov8n-obb.pt",
+]
+
+# “small / fast” (live video / tiny devices)
 _DETECT_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolov12n.onnx",
+    MODEL_DIR / "yolo12n.onnx",
     MODEL_DIR / "yolov8n.pt",
     MODEL_DIR / "yolo11n.pt",
     MODEL_DIR / "yolov8n.onnx",
@@ -111,12 +158,27 @@ _DETECT_SMALL_LIST: list[Path] = [
 ]
 
 _HEATMAP_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolov12s-seg.onnx",
+    MODEL_DIR / "yolo12s-seg.onnx",
     MODEL_DIR / "yolo11n-seg.onnx",
     MODEL_DIR / "yolov8n-seg.onnx",
-    MODEL_DIR / "yolov12s-seg.pt",
+    MODEL_DIR / "yolo12s-seg.pt",
     MODEL_DIR / "yolo11n-seg.pt",
     MODEL_DIR / "yolov8n-seg.pt",
+]
+
+_CLASSIFY_SMALL_LIST: list[Path] = [
+    MODEL_DIR / "yolo11n-cls.pt",
+    MODEL_DIR / "yolov8n-cls.pt",
+]
+
+_POSE_SMALL_LIST: list[Path] = [
+    MODEL_DIR / "yolo11n-pose.pt",
+    MODEL_DIR / "yolov8n-pose.pt",
+]
+
+_OBB_SMALL_LIST: list[Path] = [
+    MODEL_DIR / "yolo11n-obb.pt",
+    MODEL_DIR / "yolov8n-obb.pt",
 ]
 
 WEIGHT_PRIORITY: dict[str, list[Path]] = {
@@ -126,9 +188,19 @@ WEIGHT_PRIORITY: dict[str, list[Path]] = {
     "geojson": list(_DETECT_LIST),
     # Instance segmentation (heatmaps)
     "heatmap": _HEATMAP_LIST,
-    # “small / fast” (live video / tiny devices)
+    # Classification
+    "classify": _CLASSIFY_LIST,
+    # Pose
+    "pose": _POSE_LIST,
+    # Oriented detection
+    "obb": _OBB_LIST,
+
+    # “small / fast” sets
     "detect_small": _DETECT_SMALL_LIST,
     "heatmap_small": _HEATMAP_SMALL_LIST,
+    "classify_small": _CLASSIFY_SMALL_LIST,
+    "pose_small": _POSE_SMALL_LIST,
+    "obb_small": _OBB_SMALL_LIST,
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -138,8 +210,13 @@ def _first_existing(paths: list[Path]) -> Optional[Path]:
     """Return the first path that exists on disk or *None*."""
     return next((p for p in paths if p.exists()), None)
 
+
 @functools.lru_cache(maxsize=None)
-def _load(weight: Optional[Path], *, task: Literal["detect", "segment"]) -> Optional[object]:
+def _load(
+    weight: Optional[Path],
+    *,
+    task: Literal["detect", "segment", "classify", "pose", "obb"],
+) -> Optional[object]:
     """
     Cached wrapper around ``YOLO(path, task=...)`` to avoid re-inits,
     and to kill the “Unable to automatically guess model task” warning.
@@ -167,20 +244,23 @@ def _require(model: Optional[object], task: str) -> object:
 #  Public helpers
 # ────────────────────────────────────────────────────────────────
 def pick_weight(
-    task: Literal["detect", "heatmap", "geojson"],
+    task: Literal["detect", "heatmap", "geojson", "classify", "pose", "obb"],
     *,
     small: bool = False,
 ) -> Optional[Path]:
     """
     Return the path to the **first** existing weight for *task* or *None*.
 
-    When *small=True* the *_small* key is used (falls back to normal key
-    if not defined).
+    When *small=True* we prefer the *_small* list but fall back to the
+    normal list if no file from the preferred list exists.
     """
-    prefer_key = f"{task}_small" if small else task
-    paths = WEIGHT_PRIORITY.get(prefer_key)
-    if not paths:
-        paths = WEIGHT_PRIORITY.get(task, [])
+    if small:
+        pref = WEIGHT_PRIORITY.get(f"{task}_small", [])
+        chosen = _first_existing(pref)
+        if chosen is not None:
+            return chosen
+        # graceful fallback to normal set
+    paths = WEIGHT_PRIORITY.get(task, [])
     return _first_existing(paths)
 
 
@@ -208,11 +288,49 @@ def load_segmenter(*, small: bool = False, override: Optional[Union[str, Path]] 
     return _require(model, "heatmap")
 
 
-# Re-export for “from panoptes import *”
+def load_classifier(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
+    """Return a *YOLO-Cls* model – abort if no suitable weight is found."""
+    if override is not None:
+        chosen = Path(override).expanduser()
+        _say(f"task=classify small={small} override={chosen}")
+    else:
+        chosen = pick_weight("classify", small=small)
+        _say(f"task=classify small={small} weight={chosen}")
+    model = _load(chosen, task="classify")
+    return _require(model, "classify")
+
+
+def load_pose(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
+    """Return a *YOLO-Pose* model – abort if no suitable weight is found."""
+    if override is not None:
+        chosen = Path(override).expanduser()
+        _say(f"task=pose small={small} override={chosen}")
+    else:
+        chosen = pick_weight("pose", small=small)
+        _say(f"task=pose small={small} weight={chosen}")
+    model = _load(chosen, task="pose")
+    return _require(model, "pose")
+
+
+def load_obb(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
+    """Return a *YOLO-OBB* model – abort if no suitable weight is found."""
+    if override is not None:
+        chosen = Path(override).expanduser()
+        _say(f"task=obb small={small} override={chosen}")
+    else:
+        chosen = pick_weight("obb", small=small)
+        _say(f"task=obb small={small} weight={chosen}")
+    model = _load(chosen, task="obb")
+    return _require(model, "obb")
+
+
 __all__ = [
     "MODEL_DIR",
     "WEIGHT_PRIORITY",
     "pick_weight",
     "load_detector",
     "load_segmenter",
+    "load_classifier",
+    "load_pose",
+    "load_obb",
 ]

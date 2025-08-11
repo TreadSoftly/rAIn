@@ -17,9 +17,9 @@ import io
 import json
 import logging
 import os
-import re
+import re # type: ignore
 import sys
-import urllib.parse
+import urllib.parse # type: ignore
 import urllib.request
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
@@ -210,21 +210,13 @@ def run_single(  # noqa: C901 – core worker
     # ── GEOJSON mode ─────────────────────────────────────────────────────────
     if task == "geojson":
         try:
-            if (
-                src_str.lower().startswith(("http://", "https://"))
-                and re.search(r"lat-?\d+(?:\.\d+)?_lon-?\d+(?:\.\d+)?", urllib.parse.unquote(src_str))
-            ):
-                geo = __import__("lambda.geo_sink", fromlist=["to_geojson"]).to_geojson(
-                    src_str,
-                    [list(b)[:5] for b in boxes.tolist()] if boxes.size else None,
-                )
-            else:
-                geo = to_geojson(
-                    src_str,
-                    [list(b)[:5] for b in boxes.tolist()] if boxes.size else None,
-                )
+            geo = to_geojson(
+                src_str,
+                [list(b)[:5] for b in boxes.tolist()] if boxes.size else None,
+            )
         except Exception:
-            geo = to_geojson("", [list(b)[:5] for b in boxes.tolist()] if boxes.size else None)
+            # Last resort: still use the real source string so URL fragments are honored
+            geo = to_geojson(src_str, None)
 
         import datetime as _dt
         geo["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")

@@ -15,8 +15,10 @@ dependencies = [
   # Keep ranges wide enough for both Py3.9 and Py3.12; exacts come from constraints.txt.
   "torch>=2.4,<2.6",
   "torchvision>=0.19,<0.21",
-  # Cap Ultralytics to a train that stays compatible with Torch 2.4–2.5 across runners.
-  "ultralytics>=8.0,<8.3",
+
+  # Ultralytics: need 8.3+ for official YOLO11/YOLO12 hub weights.
+  # Keep a conservative ceiling for reproducibility.
+  "ultralytics>=8.3,<8.6",
 
   # ── ONNX Runtime (platform/py aware) ──
   "onnxruntime==1.19.2 ; python_version < '3.10'",
@@ -27,12 +29,8 @@ dependencies = [
   "onnx>=1.12,<1.18",
 
   # ── Imaging / numerics ──
-  # OpenCV 4.12+ jumps to NumPy ≥2.3; keep below.
   "opencv-python-headless>=4.11,<4.12",
-
-  # NumPy window that allows 1.26 on Py3.9 and 2.1–2.2 on Py3.12 (constraints pick exact).
   "numpy!=2.0.*,>=1.26,<2.3",
-
   "pillow>=10.0,<12.0",
   "pillow-avif-plugin>=1.4",
 
@@ -61,22 +59,17 @@ dev = [
   "moto[all]~=4.2",
 ]
 
-# Keep audio optional AND let constraints control the version.
 audio = [
   "torchaudio",
 ]
 
-# Optional ONNX graph slimming; kept OUT of core to avoid sympy fights with Torch.
 onnx-tools = [
   "onnxslim<0.1.59",
 ]
 
 [project.scripts]
-# Primary CLI names (tests call `target`)
 target  = "panoptes.cli:main"
 argos   = "panoptes.cli:main"
-
-# Convenience aliases (if you expose task-specific entry points)
 d       = "panoptes.cli:main_detect"
 detect  = "panoptes.cli:main_detect"
 hm      = "panoptes.cli:main_heatmap"

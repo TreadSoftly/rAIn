@@ -1,0 +1,20 @@
+{
+  "type": "FeatureCollection",
+  "source": "https://upload.wikimedia.org/wikipedia/commons/0/0c/GoldenGateBridge-001.jpg#lat37.8199_lon-122.4783",
+  "timestamp": "2025-08-11T03:01:36+00:00",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -122.4783,
+          37.8199
+        ]
+      },
+      "properties": {
+        "id": "5cbaa41d9f1747378bb5be283351577a"
+      }
+    }
+  ]
+}
