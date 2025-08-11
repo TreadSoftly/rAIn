@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\tests\unit-tests\test_cli_format_preservation.py
+# \rAIn\projects\argos\tests\unit-tests\test_cli_format_preservation.py
 """
 Ensures the CLI preserves the source image's extension when writing heat-maps.
 """

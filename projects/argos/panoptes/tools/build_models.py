@@ -237,8 +237,17 @@ def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
 
 
 def _write_manifest(selected: List[str], installed: List[str]) -> None:
+    """
+    Write a user-agnostic manifest:
+      • model_dir is stored *relative* to projects/argos to avoid absolute user paths
+      • paths use forward slashes for cross-platform consistency
+    """
+    # repo_root here means .../projects/argos
+    repo_root = Path(__file__).resolve().parents[2]
+    rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
+
     data: Dict[str, object] = {
-        "model_dir": str(MODEL_DIR),
+        "model_dir": rel_model_dir,
         "selected": _dedupe(selected),
         "installed": _dedupe(installed),
     }
@@ -535,7 +544,7 @@ def main() -> None:
             typer.echo(f"  – {n}")
         _warn("Those names may not be hosted by Ultralytics yet, or export failed.")
 
-    # Manifest for reproducibility
+    # Manifest for reproducibility (user-agnostic, relative paths)
     _write_manifest(selected, installed)
 
     _quick_check()

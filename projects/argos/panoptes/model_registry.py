@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\model_registry.py
+# \rAIn\projects\argos\panoptes\model_registry.py
 """
 panoptes.model_registry
 --------------------------

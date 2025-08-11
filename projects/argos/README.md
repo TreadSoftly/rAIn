@@ -36,14 +36,27 @@ cd rAIn
 
 ```
 
-```
-build
+> Powershell
 
 ```
+.\build
+
+```
+
+> Bash
+
+```
+./build
+
+```
+
+###### Once you run the .\build or ./build you can just rerun a regular command "build" or "build argos" or "argos build" to get the build selection process again
+
+<br>
 
 <div align="center">
 
-> Once you select the build you want and take the quick smoke test copy and paste for simple instructions: >
+> Help Commands: >
 
 </div>
 
@@ -52,8 +65,14 @@ argos -h
 
 ```
 
-<br>
+> or
 
+```
+argos ?
+
+```
+
+<br>
 
 <div align="center">
 
@@ -80,14 +99,12 @@ hm all
 all detect
 
 ```
+
 <div align="center">
 
 > IMPORTANT: = To Process Your Own Media Files Locate /tests/raw/ Folder And Place Your Media There. Then Run The Desired Commands As Shown Above To Process The Media. Results Will Be Placed In /tests/results/ Folder.
 
 </div>
-
-
-
 
 <div align="center">
 
@@ -96,9 +113,7 @@ all detect
 
 </table>
 
-
 </div>
-
 
 <br>
 
@@ -117,7 +132,6 @@ all detect
 </table>
 
 </div>
-
 
 <table align="center">
 
@@ -181,7 +195,6 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 </table>
 
 </div>
-
 
 <table align="center" cellpadding="5">
 

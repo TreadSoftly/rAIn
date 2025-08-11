@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\model\_export_onnx.py
+# \rAIn\projects\argos\panoptes\model\_export_onnx.py
 from __future__ import annotations
 
 import glob
@@ -153,4 +153,4 @@ def main(argv: List[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-    
+

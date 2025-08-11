@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\tools\build_models.py
+# \rAIn\projects\argos\panoptes\tools\build_models.py
 from __future__ import annotations
 
 import glob

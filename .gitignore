@@ -1,7 +1,7 @@
 ###############################################################################
 #  PROJECT-LOCAL OVERRIDES
 ###############################################################################
-# At the moment we don’t need anything special here.
+# Keep this file in the repo; add ONLY project-wide rules here.
 
 ###############################################################################
 # ⛔  GENERAL BUILD / BINARY ARTEFACTS
@@ -26,10 +26,9 @@ projects/**/.venv/
 # ── Node ────────────────────────────────────────────────────────────────────
 node_modules/
 
-# ── Models & other large binaries ───────────────────────────────────────────
-# Keep model binaries out of Git; bootstrap fetches them as-needed
-projects/argos/panoptes/model/*.onnx
+# ── Models & other large binaries (fetched by build) ────────────────────────
 projects/argos/panoptes/model/*.pt
+projects/argos/panoptes/model/*.onnx
 
 # ── Test / coverage artefacts ───────────────────────────────────────────────
 .pytest_cache/
@@ -63,6 +62,13 @@ Thumbs.db
 
 # ── Historical artefacts we no longer need ──────────────────────────────────
 projects/argos/requirements-py39.txt
+
 ###############################################################################
-projects/argos/panoptes/model/*.pt
-projects/argos/panoptes/model/*.onnx
+# Auto-generated / user-specific
+###############################################################################
+
+# Build manifest (rewritten per-user with relative paths)
+projects/argos/panoptes/model/manifest.json
+
+# Local pytest config (contained only here; prevents committing user paths)
+projects/argos/pytest.ini
