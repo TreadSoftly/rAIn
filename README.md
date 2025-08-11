@@ -44,6 +44,9 @@ build
 
 ```
 
+> Once you select the build you want and take the quick smoke test copy and paste for simple instructions: >
+
+
 ```
 argos -h
 
