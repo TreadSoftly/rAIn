@@ -49,7 +49,7 @@ app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 # ---------------------------------------------------------------------
 # Packs / naming
 # ---------------------------------------------------------------------
-FAMILIES: Tuple[str, ...] = ("8", "11", "12")
+VERSIONS: Tuple[str, ...] = ("8", "11", "12")
 SIZES: Tuple[str, ...] = ("x", "l", "m", "s", "n")
 EXTS: Tuple[str, ...] = (".pt", ".onnx")
 TASKS: Tuple[str, ...] = ("det", "seg", "pose", "cls", "obb")
@@ -84,16 +84,16 @@ DEFAULT_PACK: List[str] = [
 ]
 
 
-def _mk(fam: str, size: str, task: str, ext: str) -> str:
+def _mk(ver: str, size: str, task: str, ext: str) -> str:
     """
     Construct official Ultralytics-style names.
 
     Ultralytics naming:
-      • YOLOv8:  yolov8{s}.pt / yolov8{s}-seg.pt / -pose / -cls / -obb
-      • YOLO11:  yolo11{s}.pt / yolo11{s}-seg.pt / -pose / -cls / -obb
-      • YOLO12:  yolo12{s}.pt / yolo12{s}-seg.pt / -pose / -cls / -obb
+    • YOLOv8:  yolov8{s}.pt / yolov8{s}-seg.pt / -pose / -cls / -obb
+    • YOLO11:  yolo11{s}.pt / yolo11{s}-seg.pt / -pose / -cls / -obb
+    • YOLO12:  yolo12{s}.pt / yolo12{s}-seg.pt / -pose / -cls / -obb
     """
-    base = f"yolov{fam}{size}" if fam == "8" else f"yolo{fam}{size}"
+    base = f"yolov{ver}{size}" if ver == "8" else f"yolo{ver}{size}"
     suf = {
         "det": "",
         "seg": "-seg",
@@ -105,14 +105,14 @@ def _mk(fam: str, size: str, task: str, ext: str) -> str:
 
 
 def _full_pack() -> List[str]:
-    """All families/sizes/tasks; .pt + .onnx (deduped)."""
+    """All versions/sizes/tasks; .pt + .onnx (deduped)."""
     out: List[str] = []
     seen: Set[str] = set()
-    for fam in FAMILIES:
+    for ver in VERSIONS:
         for sz in SIZES:
             for task in TASKS:
                 for ext in EXTS:
-                    n = _mk(fam, sz, task, ext)
+                    n = _mk(ver, sz, task, ext)
                     if n not in seen:
                         seen.add(n)
                         out.append(n)
@@ -162,11 +162,11 @@ def _fetch_one(name: str, dst: Path) -> Tuple[str, str]:
     Obtain *name* into *dst* and return (basename, action).
 
     Possible actions:
-      • "present"   – already existed in dst
-      • "download"  – YOLO fetched directly into dst
-      • "copied"    – YOLO fetched elsewhere; we copied into dst
-      • "exported"  – we exported ONNX from a matching .pt
-      • "failed"    – nothing worked
+    • "present"   – already existed in dst
+    • "download"  – YOLO fetched directly into dst
+    • "copied"    – YOLO fetched elsewhere; we copied into dst
+    • "exported"  – we exported ONNX from a matching .pt
+    • "failed"    – nothing worked
     """
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
@@ -300,18 +300,18 @@ def _parse_multi(raw: str, items: Tuple[str, ...], *, aliases: Optional[Dict[str
 
 
 def _build_combo(
-    fams: Iterable[str],
+    vers: Iterable[str],
     sizes: Iterable[str],
     tasks: Iterable[str],
     *,
     formats: Iterable[str],
 ) -> List[str]:
     names: List[str] = []
-    for fam in fams:
+    for ver in vers:
         for sz in sizes:
             for task in tasks:
                 for ext in formats:
-                    names.append(_mk(fam, sz, task, ext))
+                    names.append(_mk(ver, sz, task, ext))
     return _dedupe(names)
 
 
@@ -334,8 +334,8 @@ def _menu() -> int:
                 What would you like to install?
 
                 1) Default Argos pack
-                2) Full pack (ALL families/sizes; ALL tasks; .pt + .onnx)
-                3) Size pack (choose 1 family/size/tasks/formats)
+                2) Full pack (ALL versions/sizes; ALL tasks; .pt + .onnx)
+                3) Size pack (choose 1 version/size/tasks/formats)
                 4) Custom builder (multi-select; preview; extras)
                 0) Exit
                 """
@@ -355,9 +355,9 @@ def _menu() -> int:
 
 
 def _ask_size_pack() -> List[str]:
-    fam = typer.prompt(f"Family {FAMILIES}", default="8").strip()
-    while fam not in FAMILIES:
-        fam = typer.prompt(f"Family {FAMILIES}", default="8").strip()
+    ver = typer.prompt(f"Version {VERSIONS}", default="8").strip()
+    while ver not in VERSIONS:
+        ver = typer.prompt(f"Version {VERSIONS}", default="8").strip()
 
     sz = typer.prompt(f"Size {SIZES}", default="x").strip().lower()
     while sz not in SIZES:
@@ -376,28 +376,28 @@ def _ask_size_pack() -> List[str]:
         fmt = "both"
     exts = (".pt", ".onnx") if fmt == "both" else (f".{fmt}",)
 
-    names = _build_combo([fam], [sz], chosen_tasks, formats=exts)
+    names = _build_combo([ver], [sz], chosen_tasks, formats=exts)
     return _dedupe(names)
 
 
 def _ask_custom() -> List[str]:
     """
     Guided, multi-select custom builder:
-    • choose one or more families
+    • choose one or more versions
     • choose one or more sizes
     • choose tasks (det/seg/pose/cls/obb)
     • choose formats (.pt/.onnx/both)
     • optional extras typed as raw names
     """
-    # Families
-    _show_row("Families:", FAMILIES)
-    fam_alias: Dict[str, str] = {"v8": "8", "v11": "11", "v12": "12"}
-    fams: List[str] = []
-    while not fams:
-        raw = typer.prompt("Pick families (e.g. '1', '2', '3' / 'all')", default="all")
-        fams = _parse_multi(raw, FAMILIES, aliases=fam_alias)
-        if not fams:
-            typer.secho("Pick at least one family version (try typing '1' '2' '3' or 'all').", fg="yellow")
+    # Versions
+    _show_row("Versions:", VERSIONS)
+    ver_alias: Dict[str, str] = {"v8": "8", "v11": "11", "v12": "12"}
+    vers: List[str] = []
+    while not vers:
+        raw = typer.prompt("Pick versions (e.g. '1', '2', '3' / 'all')", default="all")
+        vers = _parse_multi(raw, VERSIONS, aliases=ver_alias)
+        if not vers:
+            typer.secho("Pick at least one version (try typing '1' '2' '3' or 'all').", fg="yellow")
 
     # Sizes
     _show_row("Model sizes:", SIZES)
@@ -427,7 +427,7 @@ def _ask_custom() -> List[str]:
     formats: Tuple[str, ...] = (".pt", ".onnx") if fmt_raw == "both" else (f".{fmt_raw}",)
 
     # Build + optional extras
-    names = _build_combo(fams, sizes, tasks, formats=formats)
+    names = _build_combo(vers, sizes, tasks, formats=formats)
 
     typer.secho("\nPreview (will be fetched):", bold=True)
     for n in names:

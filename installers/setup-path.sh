@@ -9,7 +9,7 @@ ANS="${1-}"
 if [[ "$ANS" == "-y" || -n "${CI-}" ]]; then
   REPLY="y"
 else
-  read -rp "Add '$TARGET' to PATH in your shell profile? [Y/n] " REPLY
+  read -rp "Add '$TARGET' to PATH in your shell profile? [y/n] " REPLY
   REPLY="${REPLY:-Y}"
 fi
 REPLY="${REPLY,,}"

@@ -15,7 +15,7 @@ if /I "%~1"=="-q"     set "_QUIET=1"
 if /I "%~1"=="-y"     set "_QUIET=1"
 
 if "%_QUIET%"=="0" (
-  set /p RESP=Add "%TARGET%" to your PATH (current user)? [Y/n]
+  set /p RESP=Add "%TARGET%" to your PATH (current user)? [y/n]
   if /I "%RESP%"=="N"  goto :skip
   if /I "%RESP%"=="No" goto :skip
 )

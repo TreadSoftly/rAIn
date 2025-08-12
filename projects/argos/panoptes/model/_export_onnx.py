@@ -47,9 +47,9 @@ def _synonyms(name: str) -> List[str]:
     """Try YOLO’s common spelling variants (yolo12 ↔ yolov12; etc.)."""
     base = Path(name).name
     alts = {base}
-    for fam in ("11", "12"):
-        alts.add(base.replace(f"yolov{fam}", f"yolo{fam}"))
-        alts.add(base.replace(f"yolo{fam}",  f"yolov{fam}"))
+    for ver in ("11", "12"):
+        alts.add(base.replace(f"yolov{ver}", f"yolo{ver}"))
+        alts.add(base.replace(f"yolo{ver}",  f"yolov{ver}"))
     return [a for a in alts if a]
 
 

@@ -12,7 +12,7 @@ if ($env:Path.Split(';') -contains $target) {
 }
 
 if (-not $Quiet) {
-  $resp = Read-Host "Add '$target' to your PATH for this user? [Y/n]"
+  $resp = Read-Host "Add '$target' to your PATH for this user? [y/n]"
   if (-not $resp) { $resp = 'Y' }
   if ($resp.ToLower() -notin @('y','yes')) { Write-Host "Skipped."; exit 0 }
 }
