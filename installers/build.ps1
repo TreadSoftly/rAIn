@@ -15,11 +15,17 @@ if (-not $pyExe) { $pyExe = (Get-Command python3 -ErrorAction SilentlyContinue)?
 if (-not $pyExe) { $pyExe = (Get-Command python  -ErrorAction SilentlyContinue)?.Source }
 if (-not $pyExe) { Write-Error "Python 3 not found."; exit 1 }
 
+# Ensure venv + project
 & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall *> $null
 $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
-
 & $vpy -m pip check
+
+# Keep pyc out of repo
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
+# Put installers/ on PATH now (current session + persisted)
+& (Join-Path $HERE 'setup-path.ps1') -Quiet
+
+# Run the build inside the venv
 & $vpy -m panoptes.tools.build_models @Args
 exit $LASTEXITCODE

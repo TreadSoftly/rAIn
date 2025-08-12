@@ -43,7 +43,6 @@ shift
 goto parse
 
 :afterparse
-rem --- Infer project from CWD ---
 echo %CD% | findstr /I "\\projects\\argos" >NUL && set "PROJ=argos"
 
 if not defined PROJ (
@@ -67,7 +66,6 @@ if "%SAW_BUILD%"=="1" (
   )
 )
 
-rem --- Find Python (prefer py -3, then python3/python) ---
 set "PY="
 where py >NUL 2>&1 && set "PY=py -3"
 if not defined PY (

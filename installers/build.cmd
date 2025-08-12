@@ -13,5 +13,9 @@ for /f "usebackq delims=" %%i in (`%PY% "%ROOT%\projects\argos\bootstrap.py" --p
 
 "%VPY%" -m pip check
 set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
+
+rem Persist PATH + update current cmd session
+call "%HERE%setup-path.cmd" /quiet
+
 "%VPY%" -m panoptes.tools.build_models %*
 exit /b %ERRORLEVEL%

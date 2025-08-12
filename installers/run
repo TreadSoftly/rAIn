@@ -17,16 +17,12 @@ ensure_git_lfs() {
   fi
 }
 
-# Collect args → infer project + pass-through tokens
-proj=""
-tokens=()
-saw_build=0
-
+proj=""; tokens=(); saw_build=0
 while (($#)); do
   t="$1"; shift
   lt="${t,,}"
   case "$lt" in
-    run|me) ;;                              # ignore fluff
+    run|me) ;;
     build|package|pack) saw_build=1 ;;
     argos|argos:run|run:argos|argos:build|build:argos) proj="argos" ;;
     *) tokens+=("$t") ;;
@@ -37,7 +33,6 @@ cwd="$(pwd)"
 if [[ -z "${proj:-}" ]]; then
   case "$cwd" in *"/projects/argos"*) proj="argos" ;; esac
 fi
-
 if [[ -z "${proj:-}" ]]; then
   if [[ "$cwd" == "$ROOT" || "$cwd" == "$PROJ_DIR" ]]; then
     echo "Specify the project:  run argos  |  argos [args]" >&2
@@ -47,12 +42,31 @@ fi
 
 ensure_git_lfs
 
-# Build hand-off
+normalize_tokens() {
+  local -a in=("$@") out=()
+  local op="" op_idx=-1 tok low
+  for i in "${!in[@]}"; do
+    tok="${in[$i]}"; low="${tok,,}"
+    case "$low" in
+      d|detect|-d|--detect) op="d"; op_idx=$i; break ;;
+      hm|heatmap|-hm|--hm|-heatmap|--heatmap) op="hm"; op_idx=$i; break ;;
+      gj|geojson|-gj|--gj|-geojson|--geojson) op="gj"; op_idx=$i; break ;;
+      *) ;;
+    esac
+  done
+  if [[ "$op_idx" -gt 0 ]]; then
+    out+=("$op")
+    for j in "${!in[@]}"; do [[ $j -ne $op_idx ]] && out+=("${in[$j]}"); done
+    in=("${out[@]}")
+  fi
+  printf '%s\n' "${in[@]}"
+}
+mapfile -t tokens < <(normalize_tokens "${tokens[@]}")
+
 if [[ "$saw_build" -eq 1 ]]; then
   exec "$ROOT/installers/build" "$proj" "${tokens[@]}"
 fi
 
-# Project dispatch
 if [[ "$proj" == "argos" ]]; then
   PY="$(command -v python3 || command -v python)"
   "$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes >/dev/null 2>&1 || true

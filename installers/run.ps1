@@ -11,32 +11,26 @@ function Ensure-GitLFS {
       & git -C $ROOT lfs install --local *> $null
       $env:GIT_LFS_SKIP_SMUDGE = '0'
       & git -C $ROOT lfs pull *> $null
-    }
-    else {
+    } else {
       Write-Host "⚠️  Git LFS not installed. Large files (models) may be missing."
       Write-Host "   Install Git LFS and re-run this command."
     }
   }
 }
 
-# Parse args
-$proj = $null
-$tokens = @()
-$sawBuild = $false
+$proj = $null; $tokens = @(); $sawBuild = $false
 foreach ($a in $Args) {
   $la = $a.ToLowerInvariant()
-  if ($la -in @('run', 'me')) { continue }
-  elseif ($la -in @('build', 'package', 'pack')) { $sawBuild = $true }
-  elseif ($la -in @('argos', 'argos:run', 'run:argos', 'argos:build', 'build:argos')) { $proj = 'argos' }
+  if     ($la -in @('run','me')) { continue }
+  elseif ($la -in @('build','package','pack')) { $sawBuild = $true }
+  elseif ($la -in @('argos','argos:run','run:argos','argos:build','build:argos')) { $proj = 'argos' }
   else { $tokens += $a }
 }
 
-# Infer project from CWD
 $cwd = (Get-Location).Path
 if (-not $proj) {
   if ($cwd -like "*\projects\argos*") { $proj = 'argos' }
 }
-
 if (-not $proj) {
   if ($cwd -eq $ROOT -or $cwd -eq (Join-Path $ROOT 'projects')) {
     Write-Host "Specify the project:  run argos  |  argos [args]" -ForegroundColor Yellow
@@ -46,21 +40,31 @@ if (-not $proj) {
 
 Ensure-GitLFS
 
-# Build hand-off
+# Normalize like "clip.mp4 d" -> "d clip.mp4", "all detect" -> "detect all"
+$opsMap = @{
+  'd'='d'; 'detect'='d'; '-d'='d'; '--detect'='d';
+  'hm'='hm'; 'heatmap'='hm'; '-hm'='hm'; '--hm'='hm'; '-heatmap'='hm'; '--heatmap'='hm';
+  'gj'='gj'; 'geojson'='gj'; '-gj'='gj'; '--gj'='gj'; '-geojson'='gj'; '--geojson'='gj';
+}
+$opIdx = -1; $opNorm = $null
+for ($i=0; $i -lt $tokens.Count; $i++) {
+  $key = $tokens[$i].ToLowerInvariant()
+  if ($opsMap.ContainsKey($key)) { $opIdx = $i; $opNorm = $opsMap[$key]; break }
+}
+if ($opIdx -gt 0) {
+  $new = New-Object System.Collections.Generic.List[string]
+  $new.Add($opNorm) | Out-Null
+  for ($j=0; $j -lt $tokens.Count; $j++) { if ($j -ne $opIdx) { $new.Add($tokens[$j]) | Out-Null } }
+  $tokens = $new
+}
+
 if ($sawBuild) {
   $build = Join-Path $ROOT 'installers\build.ps1'
-  if (Test-Path $build) {
-    & $build $proj @tokens
-    exit $LASTEXITCODE
-  }
-  else {
-    Write-Error "Build script not found: installers\build.ps1"
-    exit 1
-  }
+  & $build $proj @tokens
+  exit $LASTEXITCODE
 }
 
 if ($proj -eq 'argos') {
-  # Find Python (prefer py -3, then python3/python)
   $pyExe = (Get-Command py -ErrorAction SilentlyContinue)?.Source
   $pyArgs = @()
   if ($pyExe) { $pyArgs = @('-3') }
