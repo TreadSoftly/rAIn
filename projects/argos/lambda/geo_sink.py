@@ -7,6 +7,8 @@ YOLO-style boxes into a GeoJSON FeatureCollection.
 * Otherwise → one point per box, naïvely displaced from the centre.
 
 This file purposefully stays *very* light-weight - no heavy deps.
+
+Progress: wraps main conversion with a tiny `simple_status` (no-op if absent).
 """
 from __future__ import annotations
 
@@ -14,7 +16,14 @@ import re
 import urllib.parse
 import uuid
 from datetime import datetime, timezone
+from types import TracebackType
 from typing import Any, Dict, Sequence, Tuple
+
+# optional progress (safe fallback)
+try:
+    from panoptes.progress.progress_ux import simple_status  # type: ignore
+except Exception:  # pragma: no cover
+    simple_status = None  # type: ignore
 
 # Accept “lat<N>_lon<M>” anywhere in the (decoded) URL / file-name
 _COORD_RE = re.compile(
@@ -61,39 +70,55 @@ def to_geojson(
     dict
         GeoJSON FeatureCollection.
     """
-    lat0, lon0 = _latlon(image_url)
+    ctx = simple_status("compose geojson") if simple_status is not None else None
+    if ctx is None:
+        class _Null:
+            def __enter__(self) -> None:
+                return None
 
-    features: list[Dict[str, Any]] = []
-    if boxes:  # detections → offset points
-        for x1, y1, x2, y2, *rest in boxes:
-            conf = _norm_conf(rest[0] if rest else None)
-            relx = ((x1 + x2) / 2 - 320) / 320  # centre-normalised
-            rely = ((y1 + y2) / 2 - 320) / 320
-            feat: Dict[str, Any] = {
-                "type": "Feature",
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [lon0 + relx * 0.005, lat0 - rely * 0.005],
-                },
-                "properties": {
-                    "id": uuid.uuid4().hex,
-                },
-            }
-            if conf is not None:
-                feat["properties"]["conf"] = conf
-            features.append(feat)
-    else:  # no detections → just the centre
-        features.append(
-            {
-                "type": "Feature",
-                "geometry": {"type": "Point", "coordinates": [lon0, lat0]},
-                "properties": {"id": uuid.uuid4().hex},
-            }
-        )
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                tb: TracebackType | None,
+            ) -> bool:
+                return False
+        ctx = _Null()
 
-    return {
-        "type": "FeatureCollection",
-        "source": image_url,
-        "features": features,
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
+    with ctx:
+        lat0, lon0 = _latlon(image_url)
+
+        features: list[Dict[str, Any]] = []
+        if boxes:  # detections → offset points
+            for x1, y1, x2, y2, *rest in boxes:
+                conf = _norm_conf(rest[0] if rest else None)
+                relx = ((x1 + x2) / 2 - 320) / 320  # centre-normalised
+                rely = ((y1 + y2) / 2 - 320) / 320
+                feat: Dict[str, Any] = {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [lon0 + relx * 0.005, lat0 - rely * 0.005],
+                    },
+                    "properties": {
+                        "id": uuid.uuid4().hex,
+                    },
+                }
+                if conf is not None:
+                    feat["properties"]["conf"] = conf
+                features.append(feat)
+        else:  # no detections → just the centre
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [lon0, lat0]},
+                    "properties": {"id": uuid.uuid4().hex},
+                }
+            )
+
+        return {
+            "type": "FeatureCollection",
+            "source": image_url,
+            "features": features,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }

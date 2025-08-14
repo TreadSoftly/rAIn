@@ -12,12 +12,10 @@ requires-python = ">=3.9,<3.13"
 
 dependencies = [
   # ── Core ML stack ──
-  # Keep ranges wide enough for both Py3.9 and Py3.12; exacts come from constraints.txt.
   "torch>=2.4,<2.6",
   "torchvision>=0.19,<0.21",
 
   # Ultralytics: need 8.3+ for official YOLO11/YOLO12 hub weights.
-  # Keep a conservative ceiling for reproducibility.
   "ultralytics>=8.3,<8.6",
 
   # ── ONNX Runtime (platform/py aware) ──
@@ -34,7 +32,7 @@ dependencies = [
   "pillow>=10.0,<12.0",
   "pillow-avif-plugin>=1.4",
 
-  # Matplotlib: be explicit about Py3.9 cap to dodge wheel gaps.
+  # Matplotlib
   "matplotlib>=3.9,<3.10 ; python_version < '3.10'",
   "matplotlib>=3.10       ; python_version >= '3.10'",
 
@@ -66,6 +64,9 @@ audio = [
 onnx-tools = [
   "onnxslim<0.1.59",
 ]
+
+# Optional CLI progress UI (spinners/colors). Code works without; this just enables pretty UX.
+progress-ui = ["halo>=0.0.31", "colorama>=0.4.6"]
 
 [project.scripts]
 target  = "panoptes.cli:main"

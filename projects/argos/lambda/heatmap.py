@@ -13,13 +13,18 @@ Lock-down (2025-08-07)
 * Public API is unchanged:
 
       heatmap_overlay(img, *, boxes=None, masks=None, **kw) → np.ndarray[BGR]
-"""
 
+Progress
+────────
+* Short `simple_status` around model init & predict (no-op if absent).
+"""
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Iterable
 
 import numpy as np
@@ -27,6 +32,12 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from panoptes.model_registry import load_segmenter  # type: ignore
+
+# optional progress
+try:
+    from panoptes.progress.progress_ux import simple_status  # type: ignore
+except Exception:  # pragma: no cover
+    simple_status = None  # type: ignore
 
 # ───────────────────────── logging ─────────────────────────────────────
 _LOG = logging.getLogger("lambda.heatmap")
@@ -42,8 +53,8 @@ def _say(msg: str) -> None:
 
 
 # ───────────────────────── single, authoritative model ──────────────────────────
-# Any weight issue will raise *RuntimeError* here, stopping import immediately.
-_seg_model = load_segmenter(small=True)  # ← ONNX-first in Lambda; hard-fail if missing
+with (simple_status("init segmenter (lambda)") if simple_status is not None else contextlib.nullcontext()):
+    _seg_model = load_segmenter(small=True)  # ← ONNX-first in Lambda; hard-fail if missing
 _say("lambda.heatmap init: segmenter small=True (see registry log for weight)")
 
 __all__ = ["heatmap_overlay"]
@@ -74,8 +85,24 @@ def heatmap_overlay(
 
     # ── run segmentation & render (Ultralytics returns BGR already) ──────────
     try:
-        res = _seg_model.predict(bgr, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
-        out: NDArray[np.uint8] = np.asarray(res.plot(), dtype=np.uint8)        # type: ignore[arg-type]
+        if simple_status is not None:
+            ctx = simple_status("segment")
+        else:
+            class _Null:
+                def __enter__(self) -> None:
+                    return None
+
+                def __exit__(
+                    self,
+                    exc_type: type[BaseException] | None,
+                    exc: BaseException | None,
+                    tb: TracebackType | None,
+                ) -> bool:
+                    return False
+            ctx = _Null()
+        with ctx:
+            res = _seg_model.predict(bgr, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
+            out: NDArray[np.uint8] = np.asarray(res.plot(), dtype=np.uint8)        # type: ignore[arg-type]
         return out
     except Exception:
         # Any runtime glitch → return the original image unchanged

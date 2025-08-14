@@ -12,7 +12,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, List, Optional, cast
 
 import cv2
 import numpy as np
@@ -62,7 +62,7 @@ def test_avif_support(tmp_path: Path) -> None:
     assert isinstance(out, Image.Image) and out.size == (64, 64)
 
 
-def test_video_heatmap(tmp_path: Path) -> None:
+def test_video_heatmap(tmp_path: Path, cli_base_cmd: List[str]) -> None:
     vid = tmp_path / "bunny.mp4"
 
     # 10-frame black dummy @ 5 fps, 64x64
@@ -74,7 +74,7 @@ def test_video_heatmap(tmp_path: Path) -> None:
     vw.release()
 
     # Drive the CLI heatmap path; --small ensures the ONNX seg weight is used
-    subprocess.check_call(["target", str(vid), "--task", "heatmap", "--small"])
+    subprocess.check_call([*cli_base_cmd, str(vid), "--task", "heatmap", "--small"])
 
     expected = _repo_root() / "tests" / "results" / "bunny_heat.mp4"
     assert expected.exists() and expected.stat().st_size > 0

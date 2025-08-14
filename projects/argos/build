@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
+# Build ARGOS models/tools with progress-friendly terminal settings.
 set -euo pipefail
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
+
+export TERM="${TERM:-xterm-256color}"
+export PYTHONUTF8=1
+export PYTHONIOENCODING=UTF-8
+export PYTHONUNBUFFERED=1
+export FORCE_COLOR=1
+export PANOPTES_NESTED_PROGRESS="${PANOPTES_NESTED_PROGRESS:-1}"
+export PANOPTES_ENABLE_OSC8="${PANOPTES_ENABLE_OSC8:-1}"
+
 exec "$ROOT/installers/build" argos "$@"

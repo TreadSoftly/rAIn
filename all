@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Progress-friendly environment
+export PYTHONUTF8=1
+export FORCE_COLOR=1
+: "${TERM:=xterm-256color}"
+unset PANOPTES_PROGRESS_ACTIVE || true
+
 exec "$HERE/installers/run" argos all "$@"

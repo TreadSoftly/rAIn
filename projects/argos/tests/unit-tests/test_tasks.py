@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -153,10 +154,17 @@ def _annotate_video(vid_path: Path) -> None:
     subprocess.check_call(cmd)
 
 
+def _cli_base_cmd() -> List[str]:
+    exe = shutil.which("target")
+    if exe:
+        return ["target"]
+    return [sys.executable, "-m", "panoptes.cli"]
+
+
 def _run_cli(inp: str, *, task: str, model: str = "primary") -> None:
-    """Invoke the public CLI (`target`) for *heatmap* / *geojson* work."""
+    """Invoke the public CLI for *heatmap* / *geojson* work."""
     cmd = [
-        "target",
+        *_cli_base_cmd(),
         inp,
         "--task",
         task,

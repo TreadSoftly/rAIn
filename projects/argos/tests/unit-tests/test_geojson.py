@@ -17,6 +17,7 @@ import math
 import re
 import subprocess
 from pathlib import Path
+from typing import List
 from urllib.parse import urlparse
 
 import pytest
@@ -60,7 +61,7 @@ def _basename(url: str) -> str:
     'GoldenGateBridge-001'
     """
     tail = urlparse(url).path.split("/")[-1]  # e.g. GoldenGateBridge-001.jpg
-    return Path(tail).stem                     # → GoldenGateBridge-001
+    return Path(tail).stem  # → GoldenGateBridge-001
 
 
 def _extract_trailing_json(text: str) -> str:
@@ -90,11 +91,11 @@ def _extract_trailing_json(text: str) -> str:
     CASES,
     ids=["golden_gate", "liberty", "sydney"],
 )
-def test_remote_geojson(url: str, exp_lat: float, exp_lon: float) -> None:
+def test_remote_geojson(url: str, exp_lat: float, exp_lon: float, cli_base_cmd: List[str]) -> None:
     """Ensure CLI returns valid GeoJSON and write it to tests/results/."""
     # Capture output as text; some warnings may appear on stdout
     proc = subprocess.run(
-        ["target", url, "--task", "geojson", "--small"],
+        [*cli_base_cmd, url, "--task", "geojson", "--small"],
         check=True,
         capture_output=True,
         text=True,

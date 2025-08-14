@@ -1,8 +1,13 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\__init__.py
 """
 Lightweight package init.
 
 Avoid importing heavy optional deps (Ultralytics, Torch, OpenCV) at import time.
 CLI and submodules should import what they need locally.
+
+Exports:
+    __version__ : best-effort package version (falls back to "0+unknown")
+    ROOT        : repository project root (…/projects/argos)
 """
 
 from __future__ import annotations

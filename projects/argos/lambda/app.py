@@ -12,15 +12,20 @@ Lock-down (2025-08-07)
 
 Pragmatic init (for tests & robustness)
 ────────────────────────────────────────────────────────────────────
-We initialise one detector and one segmenter at import-time with a
-graceful fallback chain:
+We initialise one detector at import-time with a graceful fallback:
 
   detector:  small → full-size → Dummy (returns 0 boxes)
-  segmenter: small → full-size → None  (handler falls back to boxes)
 
-This keeps the module importable even if some weights are missing,
-so unit tests can monkey-patch inference without crashing process
-startup. Only files listed in the registry are ever considered.
+This keeps the module importable even if some weights are missing, so
+unit tests can monkey-patch inference without crashing process startup.
+Only files listed in the registry are ever considered.
+
+Progress instrumentation
+────────────────────────────────────────────────────────────────────
+* Uses `panoptes.progress` if available:
+  - `live_percent` for coarse request steps (no-ops off-TTY / in Lambda)
+  - `simple_status` for short one-off phases (model init, fetch, S3 put)
+* Never throws; silently no-ops if progress layer isn’t present.
 """
 
 # pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false
@@ -29,6 +34,7 @@ from __future__ import annotations
 
 # ── stdlib ─────────────────────────────────────────────────────────────
 import base64
+import contextlib
 import datetime as _dt
 import io
 import json
@@ -36,6 +42,7 @@ import logging
 import os
 import urllib.request
 import uuid
+from types import TracebackType
 from typing import Any, Dict, Sequence
 
 # ── third-party ────────────────────────────────────────────────────────
@@ -44,17 +51,26 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
-# Heatmap compositor (segmentation masks or box fallback)
-from panoptes.heatmap import heatmap_overlay  # type: ignore
+# Local Lambda heatmap helper (segmentation overlay; returns **BGR** ndarray)
+from .heatmap import heatmap_overlay  # type: ignore
 
 # ── internal project imports ──────────────────────────────────────────
 from panoptes.model_registry import (  # type: ignore
     load_detector,  # single source-of-truth
-    load_segmenter,
 )
 
 # If present, GeoJSON sink (kept as in original)
 from .geo_sink import to_geojson  # type: ignore
+
+# Optional progress layer
+try:
+    from panoptes.progress import ProgressEngine  # type: ignore
+    from panoptes.progress.bridges import live_percent  # type: ignore
+    from panoptes.progress.progress_ux import simple_status  # type: ignore
+except Exception:  # pragma: no cover
+    ProgressEngine = None  # type: ignore
+    live_percent = None  # type: ignore
+    simple_status = None  # type: ignore
 
 # ───────────────────────── logging ────────────────────────────────────
 _LOG = logging.getLogger("panoptes.lambda.app")
@@ -69,6 +85,32 @@ _LOG.setLevel(logging.INFO)
 
 def _say(msg: str) -> None:
     _LOG.info(f"[panoptes] {msg}")
+
+
+# tiny no-op ctx for when progress is unavailable
+class _Null:
+    def __enter__(self) -> None:  # noqa: D401
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        return False
+
+
+def _lp_ctx(prefix: str):
+    if live_percent is not None and ProgressEngine is not None:  # type: ignore
+        return live_percent(ProgressEngine(), prefix=prefix)  # type: ignore
+    return _Null()
+
+
+def _status_ctx(label: str):
+    if simple_status is not None:
+        return simple_status(label)  # type: ignore
+    return contextlib.nullcontext()
 
 
 # ───────────────────────── init helpers (robust) ──────────────────────
@@ -91,12 +133,14 @@ class _DummyDetector:
 
 def _init_detector() -> Any:
     # Prefer small/fast for Lambda cold starts
-    try:
-        m = load_detector(small=True)
-        _say("lambda init: detector small=True")
-        return m
-    except Exception as e_small:
-        _say(f"lambda init: detector small=True unavailable ({e_small!s}); trying full-size")
+    with _status_ctx("init detector (small)"):
+        try:
+            m = load_detector(small=True)
+            _say("lambda init: detector small=True")
+            return m
+        except Exception as e_small:
+            _say(f"lambda init: detector small=True unavailable ({e_small!s}); trying full-size")
+    with _status_ctx("init detector (full)"):
         try:
             m = load_detector(small=False)
             _say("lambda init: detector small=False")
@@ -106,36 +150,20 @@ def _init_detector() -> Any:
             return _DummyDetector()
 
 
-def _init_segmenter() -> Any | None:
-    try:
-        m = load_segmenter(small=True)
-        _say("lambda init: segmenter small=True")
-        return m
-    except Exception as e_small:
-        _say(f"lambda init: segmenter small=True unavailable ({e_small!s}); trying full-size")
-        try:
-            m = load_segmenter(small=False)
-            _say("lambda init: segmenter small=False")
-            return m
-        except Exception as e_full:
-            _say(f"lambda init: segmenter unavailable ({e_full!s}); heatmaps will fall back to boxes")
-            return None
-
-
 # ───────────────────────── model initialisation ───────────────────────
 _det_model: Any = _init_detector()
-_seg_model: Any | None = _init_segmenter()
 
 # ───────────────────────── helpers ────────────────────────────────────
 def _fetch_image(src: str, timeout: int = 10) -> Image.Image:
     """Download data-URI or remote image → RGB Pillow image."""
-    if src.startswith("data:"):
-        _, b64 = src.split(",", 1)
-        return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    with _status_ctx("fetch image"):
+        if src.startswith("data:"):
+            _, b64 = src.split(",", 1)
+            return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
 
-    req = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return Image.open(io.BytesIO(r.read())).convert("RGB")
+        req = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return Image.open(io.BytesIO(r.read())).convert("RGB")
 
 
 def _run_inference(img: Image.Image) -> NDArray[np.float32]:
@@ -143,8 +171,9 @@ def _run_inference(img: Image.Image) -> NDArray[np.float32]:
     Run object detection – returns ndarray [N,6] (x1,y1,x2,y2,conf,cls).
     *Never* returns None; if a dummy detector is in use this yields (0,6).
     """
-    res: Any = _det_model.predict(img, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
-    data = getattr(getattr(res, "boxes", None), "data", None)  # type: ignore[arg-type]
+    with _status_ctx("detect"):
+        res: Any = _det_model.predict(img, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
+        data = getattr(getattr(res, "boxes", None), "data", None)  # type: ignore[arg-type]
     if data is None:
         return np.empty((0, 6), dtype=np.float32)
 
@@ -189,61 +218,86 @@ def _draw_boxes(img: Image.Image, boxes: Sequence[Sequence[Any]]) -> Image.Image
 
 # ───────────────────────── Lambda handler ─────────────────────────────
 def handler(event: Dict[str, Any], _ctx: Any) -> Dict[str, Any]:
-    try:
-        body = json.loads(event["body"])
-        src = body["image_url"]
-        task = body.get("task", "detect").lower()
-        _say(f"lambda request: task={task}")
+    # coarse request-level progress (safe no-op in Lambda)
+    lp = _lp_ctx("LAMBDA")
+    # try to access engine to set totals if available
+    eng = getattr(lp, "engine", None) if hasattr(lp, "engine") else None  # type: ignore[attr-defined]
 
-        # ── GeoJSON only ───────────────────────────────────────────────
-        if task == "geojson":
-            geo = to_geojson(src, None)  # type: ignore[arg-type]
-            geo["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    with lp:
+        try:
+            if eng:
+                eng.set_total(5.0)
+                eng.set_current("parse body")
+            body = json.loads(event["body"])
+            src = body["image_url"]
+            task = body.get("task", "detect").lower()
+            _say(f"lambda request: task={task}")
 
-            key = f"detections/{_dt.date.today()}/{uuid.uuid4()}.geojson"
-            boto3.client("s3").put_object(  # type: ignore[attr-defined]
-                Bucket=os.getenv("GEO_BUCKET", "out"),
-                Key=key,
-                Body=json.dumps(geo).encode(),
-                ContentType="application/geo+json",
-            )
-            return {"statusCode": 201, "body": json.dumps({"s3_key": key})}
+            # ── GeoJSON only ───────────────────────────────────────────────
+            if task == "geojson":
+                if eng:
+                    eng.set_total(3.0)
+                    eng.set_current("compose geojson")
+                geo = to_geojson(src, None)  # type: ignore[arg-type]
+                geo["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
-        # ── fetch + detect ────────────────────────────────────────────
-        img = _fetch_image(src)
-        boxes = run_inference(img)
+                if eng:
+                    eng.add(1.0, current_item="upload s3")
+                with _status_ctx("s3 put geojson"):
+                    key = f"detections/{_dt.date.today()}/{uuid.uuid4()}.geojson"
+                    boto3.client("s3").put_object(  # type: ignore[attr-defined]
+                        Bucket=os.getenv("GEO_BUCKET", "out"),
+                        Key=key,
+                        Body=json.dumps(geo).encode(),
+                        ContentType="application/geo+json",
+                    )
+                if eng:
+                    eng.add(1.0, current_item="done")
+                return {"statusCode": 201, "body": json.dumps({"s3_key": key})}
 
-        # ── heat-map (true masks) ─────────────────────────────────────
-        if task == "heatmap":
-            try:
-                if _seg_model is not None:
-                    res = _seg_model.predict(img, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
-                    if getattr(getattr(res, "masks", None), "data", None) is not None:  # type: ignore[attr-defined]
-                        img = Image.fromarray(heatmap_overlay(img))
-                    else:
-                        img = _draw_boxes(img, boxes.tolist())
-                else:
-                    img = _draw_boxes(img, boxes.tolist())
-            except Exception:  # pragma: no cover
-                img = _draw_boxes(img, boxes.tolist())
+            # ── fetch + detect ────────────────────────────────────────────
+            if eng:
+                eng.set_current("fetch image")
+            img = _fetch_image(src)
 
+            if eng:
+                eng.add(1.0, current_item="detect")
+            boxes = run_inference(img)
+
+            # ── heat-map (segmentation overlay) ───────────────────────────
+            if task == "heatmap":
+                if eng:
+                    eng.set_current("render heatmap")
+                # heatmap_overlay returns BGR ndarray; convert → RGB PIL for JPEG
+                bgr = heatmap_overlay(img)
+                rgb = bgr[:, :, ::-1]  # BGR → RGB
+                if eng:
+                    eng.add(1.0, current_item="encode")
+                buf = io.BytesIO()
+                Image.fromarray(rgb).save(buf, format="JPEG")
+                if eng:
+                    eng.add(1.0, current_item="done")
+                return {
+                    "statusCode": 200,
+                    "body": base64.b64encode(buf.getvalue()).decode(),
+                    "isBase64Encoded": True,
+                }
+
+            # ── detect (default) ─────────────────────────────────────────
+            if eng:
+                eng.set_current("draw boxes")
+            out = _draw_boxes(img.copy(), boxes.tolist())
+            if eng:
+                eng.add(1.0, current_item="encode")
             buf = io.BytesIO()
-            img.save(buf, format="JPEG")
+            out.save(buf, format="JPEG")
+            if eng:
+                eng.add(1.0, current_item="done")
             return {
                 "statusCode": 200,
                 "body": base64.b64encode(buf.getvalue()).decode(),
                 "isBase64Encoded": True,
             }
 
-        # ── detect (default) ─────────────────────────────────────────
-        out = _draw_boxes(img.copy(), boxes.tolist())
-        buf = io.BytesIO()
-        out.save(buf, format="JPEG")
-        return {
-            "statusCode": 200,
-            "body": base64.b64encode(buf.getvalue()).decode(),
-            "isBase64Encoded": True,
-        }
-
-    except Exception as exc:  # pragma: no cover
-        return {"statusCode": 500, "body": str(exc)}
+        except Exception as exc:  # pragma: no cover
+            return {"statusCode": 500, "body": str(exc)}

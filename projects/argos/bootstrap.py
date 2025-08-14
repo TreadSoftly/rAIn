@@ -35,6 +35,7 @@ from os import PathLike
 from pathlib import Path
 from typing import (
     Any,
+    Callable,  # added
     Dict,
     Literal,  # pyright: ignore[reportUnusedImport]
     Mapping,
@@ -46,6 +47,18 @@ from typing import (
     cast,
     overload,
 )
+
+# ──────────────────────────────────────────────────────────────
+# Optional: Progress UI (safe fallbacks if deps missing / CI / non-TTY)
+# ──────────────────────────────────────────────────────────────
+try:
+    from panoptes.progress import (  # type: ignore
+        ProgressEngine,  # type: ignore
+        live_percent,
+    )
+except Exception:
+    ProgressEngine = None  # type: ignore[assignment]
+    live_percent = None  # type: ignore[assignment]
 
 JSONDict = Dict[str, Any]
 
@@ -204,6 +217,8 @@ def _constraints_args() -> list[str]:
 # Venv + pip
 # ──────────────────────────────────────────────────────────────
 def _create_venv() -> None:
+    if VENV.exists() and VPY.exists():
+        return
     _print("→ creating virtual environment (outside repo)…")
     _run([sys.executable, "-m", "venv", str(VENV)], check=True, capture=False)
     _run([str(VPY), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], check=True, capture=False)
@@ -739,18 +754,37 @@ def _ensure(
     skip_weights: bool = False,
     reinstall: bool = False,
 ) -> None:
-    if not VENV.exists():
-        _create_venv()
-    _install_torch_if_needed(cpu_only)
-    _pip_install_editable_if_needed(reinstall=reinstall)
-    # Allow skipping weights via env for CI if needed
-    skip_env = os.getenv("ARGOS_SKIP_WEIGHTS", "").strip().lower() in {"1", "true", "yes"}
-    if not (skip_weights or skip_env):
-        _ensure_weights_ultralytics(preset=preset, explicit_names=weight_names)
-    _move_pytest_cache_out_of_repo()
-    _ensure_sitecustomize()
-    # Sanity: catch resolver issues early
-    _run([str(VPY), "-m", "pip", "check"], check=True, capture=False)
+    """
+    Core ensure pipeline with optional progress output.
+    Uses ProgressEngine when available; otherwise prints plain messages.
+    """
+    steps: list[tuple[str, Callable[[], None]]] = [  # fixed annotation
+        ("Create venv", _create_venv),
+        ("Install Torch", lambda: _install_torch_if_needed(cpu_only)),
+        ("Install Argos (editable)", lambda: _pip_install_editable_if_needed(reinstall=reinstall)),
+        ("Ensure weights", (lambda: None) if (skip_weights or os.getenv("ARGOS_SKIP_WEIGHTS", "").lower() in {"1", "true", "yes"}) else (lambda: _ensure_weights_ultralytics(preset=preset, explicit_names=weight_names))),
+        ("Move pytest cache", _move_pytest_cache_out_of_repo),
+        ("Sitecustomize (pycache outside)", _ensure_sitecustomize),
+        ("pip check", lambda: _run([str(VPY), "-m", "pip", "check"], check=True, capture=False)),
+    ]
+
+    if ProgressEngine is None or live_percent is None:
+        # Fallback: just run steps in order
+        for name, fn in steps:
+            _print(f"→ {name} …")
+            fn()
+        return
+
+    eng = ProgressEngine()  # type: ignore[call-arg]
+    with live_percent(eng, prefix="BOOTSTRAP"):  # type: ignore[misc]
+        eng.set_total(len(steps))
+        for name, fn in steps:
+            eng.set_current(name)
+            try:
+                fn()
+            finally:
+                eng.add(1)
+        # done — spinner closes on context exit
 
 
 def main(argv: list[str]) -> int:

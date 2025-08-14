@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# --- Progress-friendly environment for the Python builder ---
+export TERM="${TERM:-xterm-256color}"
+export PYTHONUTF8=1
+export PYTHONUNBUFFERED=1
+export FORCE_COLOR=1
+export PANOPTES_NESTED_PROGRESS=1
+# Build.ps1 handles PANOPTES_PROGRESS_ACTIVE during its own phases
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 

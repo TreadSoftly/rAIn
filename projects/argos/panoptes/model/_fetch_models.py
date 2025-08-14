@@ -1,4 +1,4 @@
-# \rAIn\projects\argos\panoptes\tools\build_models.py
+# \rAIn\projects\argos\panoptes\model\_fetch_models.py
 from __future__ import annotations
 
 import glob
@@ -8,11 +8,52 @@ import shutil
 import subprocess
 import sys
 import textwrap
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    Set,
+    Tuple,
+    Type,
+    cast,
+)
 
 import typer
+
+# Optional progress (safe fallback if not importable or in CI/non-TTY)
+try:
+    import panoptes.progress as _prog  # type: ignore[reportMissingTypeStubs]
+except Exception:
+    _prog = None  # type: ignore[assignment]
+
+ProgressEngine: Optional[Type[Any]]
+live_percent: Optional[Callable[..., ContextManager[Any]]]
+simple_status: Optional[Callable[..., ContextManager[Any]]]
+
+if _prog is not None:
+    ProgressEngine = cast(Optional[Type[Any]], getattr(_prog, "ProgressEngine", None))
+    live_percent = cast(Optional[Callable[..., ContextManager[Any]]], getattr(_prog, "live_percent", None))
+    simple_status = cast(Optional[Callable[..., ContextManager[Any]]], getattr(_prog, "simple_status", None))
+else:
+    ProgressEngine = None
+    live_percent = None
+    simple_status = None
+
+# Our byte-accurate downloader (shows progress via ProgressEngine if provided)
+try:
+    from panoptes.progress.integrations.download_progress import download_url  # type: ignore
+except Exception:
+    download_url = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------
 # Resolve model directory from registry (fallback to repo path)
@@ -25,7 +66,7 @@ except Exception:
 
 MODEL_DIR: Path = _registry_model_dir or (Path(__file__).resolve().parents[2] / "panoptes" / "model")
 
-# Ultralytics (used to fetch/export weights)
+# Ultralytics (used to export ONNX and as last-resort fetcher)
 has_yolo: bool
 try:
     from ultralytics import YOLO as _YOLO  # type: ignore[reportMissingTypeStubs]
@@ -36,7 +77,6 @@ try:
         if callable(_rem):
             _rem()
         else:
-            # older builds expose stdlib logger; strip handlers
             for h in list(getattr(_ULTRA_LOGGER, "handlers", [])):
                 try:
                     _ULTRA_LOGGER.removeHandler(h)  # type: ignore[attr-defined]
@@ -52,6 +92,9 @@ except Exception:
 YOLO = _YOLO
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
+
+# Where the official assets live (override with ULTRA_ASSETS_BASE if needed)
+ASSETS_BASE = os.getenv("ULTRA_ASSETS_BASE", "https://github.com/ultralytics/assets/releases/download/v8.3.0").rstrip("/")
 
 # ---------------------------------------------------------------------
 # Packs / naming
@@ -90,7 +133,9 @@ DEFAULT_PACK: List[str] = [
     "yolo12n.onnx",
 ]
 
-
+# ---------------------------------------------------------------------
+# Small helpers (naming, UX, links)
+# ---------------------------------------------------------------------
 def _mk(ver: str, size: str, task: str, ext: str) -> str:
     """
     Construct official Ultralytics-style names.
@@ -101,13 +146,7 @@ def _mk(ver: str, size: str, task: str, ext: str) -> str:
       • YOLO12:  yolo12{s}.pt / yolo12{s}-seg.pt / -pose / -cls / -obb
     """
     base = f"yolov{ver}{size}" if ver == "8" else f"yolo{ver}{size}"
-    suf = {
-        "det": "",
-        "seg": "-seg",
-        "pose": "-pose",
-        "cls": "-cls",
-        "obb": "-obb",
-    }[task]
+    suf = {"det": "", "seg": "-seg", "pose": "-pose", "cls": "-cls", "obb": "-obb"}[task]
     return base + suf + ext
 
 
@@ -130,9 +169,6 @@ def _dedupe(names: Iterable[str]) -> List[str]:
     return sorted({n.strip(): None for n in names if n and n.strip()}.keys())
 
 
-# ---------------------------------------------------------------------
-# UX helpers
-# ---------------------------------------------------------------------
 def _ok(msg: str) -> None:
     typer.secho(msg, fg="green")
 
@@ -145,13 +181,39 @@ def _err(msg: str) -> None:
     typer.secho(msg, fg="red", err=True)
 
 
+def _osc8(label: str, path: Path, *, yellow: bool = True) -> str:
+    """
+    Return a clickable label.
+    • In capable terminals: OSC-8 hyperlink with bright-yellow bold label.
+    • In VS Code terminal: plain absolute path (no OSC-8) so Ctrl+Click opens.
+    """
+    # VS Code integrated terminal doesn’t reliably honor OSC-8 for file:// on custom labels.
+    is_vscode = (os.environ.get("TERM_PROGRAM", "").lower() == "vscode") or bool(os.environ.get("VSCODE_PID"))
+    if is_vscode:
+        return str(path.resolve())  # plain absolute path → VS Code opens it
+
+    try:
+        uri = path.resolve().as_uri()
+    except Exception:
+        uri = "file:///" + str(path.resolve()).replace("\\", "/")
+
+    ESC   = "\x1b"
+    BR_YE = "\x1b[93m"   # bright yellow
+    BOLD  = "\x1b[1m"
+    RST   = "\x1b[0m"
+
+    text = f"{BR_YE}{BOLD}{label}{RST}" if yellow else label
+    return f"{ESC}]8;;{uri}{ESC}\\{text}{ESC}]8;;{ESC}\\"
+
+
+
 def _latest_exported_onnx() -> Optional[Path]:
     hits = [Path(p) for p in glob.glob("runs/**/**/*.onnx", recursive=True)]
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 
 @contextmanager
-def _cd(path: Path):
+def _cd(path: Path) -> Iterator[None]:
     """Temporarily chdir to *path* (restores on exit)."""
     prev = Path.cwd()
     try:
@@ -161,24 +223,27 @@ def _cd(path: Path):
         os.chdir(prev)
 
 
-# ---------------------------------------------------------------------
-# Robustness helpers
-# ---------------------------------------------------------------------
-def _synonyms(name: str) -> List[str]:
-    """
-    Try Ultralytics spelling variants:
-      yolo11 ↔ yolov11, yolo12 ↔ yolov12 (suffixes like -seg/-pose kept).
-    """
-    base = Path(name).name
-    alts = {base}
-    for ver in ("11", "12"):
-        alts.add(base.replace(f"yolov{ver}", f"yolo{ver}"))
-        alts.add(base.replace(f"yolo{ver}", f"yolov{ver}"))
-    return [a for a in alts if a]
+@contextmanager
+def _silence_stdio() -> Iterator[None]:
+    buf_out, buf_err = StringIO(), StringIO()
+    with redirect_stdout(buf_out), redirect_stderr(buf_err):
+        yield
+
+
+@contextmanager
+def _tqdm_disabled_env() -> Iterator[None]:
+    old = os.environ.get("TQDM_DISABLE", None)
+    os.environ["TQDM_DISABLE"] = "1"
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TQDM_DISABLE", None)
+        else:
+            os.environ["TQDM_DISABLE"] = old
 
 
 def _looks_like_text_header(bs: bytes) -> bool:
-    # Leading text-y bytes that often indicate HTML/JSON errors
     s = bs.lstrip()
     if not s:
         return False
@@ -206,137 +271,283 @@ def _validate_weight(p: Path) -> bool:
         return False
 
 
+def _asset_url_for(name: str) -> str:
+    return f"{ASSETS_BASE}/{Path(name).name}"
+
+
+class ProgressLike(Protocol):
+    def set_total(self, total_units: float) -> None: ...
+    def set_current(self, label: str) -> None: ...
+    def add(self, units: float, *, current_item: str | None = None) -> None: ...
+
+
+class _ScaledProgress:
+    """
+    Wrap a parent ProgressEngine so a byte download maps to +1.0 for this item.
+    We ignore set_total() from the child and compute our own scale.
+    """
+    def __init__(self, parent: ProgressLike | None) -> None:
+        self.parent = parent
+        self.total_bytes: Optional[float] = None
+        self.scale: float = 0.0
+        self.added: float = 0.0
+
+    def set_total(self, total_units: float) -> None:
+        try:
+            self.total_bytes = float(total_units)
+            self.scale = (1.0 / self.total_bytes) if self.total_bytes and self.total_bytes > 0 else 0.0
+        except Exception:
+            self.total_bytes, self.scale = None, 0.0
+
+    def set_current(self, label: str) -> None:
+        if self.parent is not None:
+            try:
+                self.parent.set_current(label)
+            except Exception:
+                pass
+
+    def add(self, units: float, *, current_item: str | None = None) -> None:
+        if self.parent is None:
+            return
+        if self.scale > 0.0:
+            delta = float(units) * self.scale
+            if delta > 0:
+                try:
+                    self.parent.add(delta)
+                    self.added += delta
+                except Exception:
+                    pass
+
+    # Top-up to exactly +1.0 for this item
+    def finalize(self) -> None:
+        if self.parent is None:
+            return
+        try:
+            if self.added < 1.0:
+                self.parent.add(1.0 - self.added)
+                self.added = 1.0
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------
 # Fetch logic
 # ---------------------------------------------------------------------
-def _fetch_one(name: str, dst: Path) -> Tuple[str, str]:
+def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> Tuple[str, str]:
     """
     Obtain *name* into *dst* and return (basename, action).
 
+    We prefer our own downloader (byte-accurate progress) and only fall
+    back to Ultralytics when needed (and silence its tqdm bars).
     Possible actions:
       • "present"   – already existed in dst
-      • "download"  – YOLO fetched directly into dst
+      • "download"  – fetched via direct URL (Argos progress)
       • "copied"    – YOLO fetched elsewhere; we copied into dst
-      • "exported"  – we exported ONNX from a matching .pt
+      • "exported"  – exported ONNX from a matching .pt
       • "failed"    – nothing worked
     """
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
 
-    # Already present
+    # Already present (and sane)
     if target.exists() and _validate_weight(target):
+        if engine is not None:
+            try:
+                engine.add(1.0)
+            except Exception:
+                pass
         return (target.name, "present")
     elif target.exists() and not _validate_weight(target):
-        # bad/corrupt cache from prior run
         try:
             target.unlink()
         except Exception:
             pass
 
-    if not has_yolo or YOLO is None:
-        return (target.name, "failed")
-
-    # 1) Try to fetch directly by name and synonyms (with CWD=dst)
-    for nm in _synonyms(name):
+    # 1) Direct download (.pt only) with byte progress
+    base = target.name
+    if base.lower().endswith(".pt") and download_url is not None:
+        scaler = _ScaledProgress(engine)
         try:
-            with _cd(dst):
-                m = YOLO(nm)  # type: ignore
-                p = Path(getattr(m, "ckpt_path", nm)).expanduser()
-                if not p.exists():
-                    p = Path(nm).expanduser()
-                if p.exists():
-                    if p.resolve() == target.resolve():
-                        if _validate_weight(target):
-                            return (target.name, "download")
-                        else:
-                            try:
-                                target.unlink()
-                            except Exception:
-                                pass
-                            continue
-                    shutil.copy2(p, target)
-                    if _validate_weight(target):
-                        return (target.name, "copied")
-                    else:
-                        try:
-                            target.unlink()
-                        except Exception:
-                            pass
-                        # try another synonym/export path
+            ctx: ContextManager[Any] = (
+                simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
+                if simple_status is not None else cast(ContextManager[Any], nullcontext())
+            )
+            with ctx:
+                download_url(_asset_url_for(base), str(target), scaler)
+            scaler.finalize()
+            if _validate_weight(target):
+                return (target.name, "download")
+            else:
+                target.unlink(missing_ok=True)
         except Exception:
-            # swallow and try next
             pass
 
-    # 2) If ONNX, export from the corresponding .pt (inside dst)
-    if name.endswith(".onnx"):
-        canonical_pt = name[:-5] + ".pt"
-        for pt_nm in _synonyms(canonical_pt):
+    # 2) YOLO as a last-resort fetcher for .pt (silenced)
+    if base.lower().endswith(".pt") and has_yolo and YOLO is not None:
+        try:
+            with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
+                m = YOLO(base)  # type: ignore
+                p = Path(getattr(m, "ckpt_path", base)).expanduser()
+                if not p.exists():
+                    p = Path(base).expanduser()
+                if p.exists():
+                    if p.resolve() == target.resolve():
+                        # downloaded straight to target
+                        pass
+                    else:
+                        shutil.copy2(p, target)
+        except Exception:
+            pass
+        if _validate_weight(target):
+            if engine is not None:
+                try:
+                    engine.add(1.0)
+                except Exception:
+                    pass
+            # If YOLO wrote into cwd directly, treat as "download"
+            return (target.name, "download" if (dst / base).exists() else "copied")
+
+    # 3) If ONNX requested, export from the matching .pt (ensure it exists)
+    if base.lower().endswith(".onnx"):
+        pt_name = Path(base).with_suffix(".pt").name
+        pt_path = dst / pt_name
+
+        # Ensure the .pt exists (prefer our downloader)
+        if not pt_path.exists() or not _validate_weight(pt_path):
+            # try direct
+            if download_url is not None:
+                scaler = _ScaledProgress(engine)
+                try:
+                    ctx: ContextManager[Any] = (
+                        simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
+                        if simple_status is not None else cast(ContextManager[Any], nullcontext())
+                    )
+                    with ctx:
+                        download_url(_asset_url_for(pt_name), str(pt_path), scaler)
+                    scaler.finalize()
+                except Exception:
+                    pass
+
+            # YOLO fallback for fetching the .pt
+            if (not pt_path.exists() or not _validate_weight(pt_path)) and has_yolo and YOLO is not None:
+                try:
+                    with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
+                        m_pt = YOLO(pt_name)  # type: ignore
+                        p_pt = Path(getattr(m_pt, "ckpt_path", pt_name)).expanduser()
+                        if not p_pt.exists():
+                            p_pt = Path(pt_name).expanduser()
+                        if p_pt.exists() and p_pt.resolve() != pt_path.resolve():
+                            shutil.copy2(p_pt, pt_path)
+                except Exception:
+                    pass
+
+        # Export ONNX
+        if has_yolo and YOLO is not None and pt_path.exists() and _validate_weight(pt_path):
             try:
-                with _cd(dst):
-                    # Ensure the .pt is present in dst (YOLO will fetch into CWD=dst if needed)
-                    m_pt = YOLO(pt_nm)  # type: ignore
-                    p_pt = Path(getattr(m_pt, "ckpt_path", pt_nm)).expanduser()
-                    if not p_pt.exists():
-                        p_pt = Path(pt_nm).expanduser()
-
-                    canon_path = dst / Path(canonical_pt).name
-                    if p_pt.exists() and p_pt.resolve() != canon_path.resolve():
-                        shutil.copy2(p_pt, canon_path)
-
-                    # Export ONNX (Ultralytics writes under CWD or runs/)
+                with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
                     try:
-                        YOLO(str(canon_path)).export(format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu")  # type: ignore
+                        YOLO(str(pt_path)).export(format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu")  # type: ignore
                     except Exception:
                         try:
-                            YOLO(str(canon_path)).export(format="onnx", dynamic=True, simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
+                            YOLO(str(pt_path)).export(format="onnx", dynamic=False, simplify=True, imgsz=640, opset=12, device="cpu")  # type: ignore
                         except Exception:
-                            # last ditch: drop dynamic as some combos fail
-                            YOLO(str(canon_path)).export(format="onnx", simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
+                            YOLO(str(pt_path)).export(format="onnx", simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
 
-                    # success path (a): file saved as target in CWD
-                    if target.exists() and _validate_weight(target):
-                        return (target.name, "exported")
+                # success path (a)
+                if target.exists() and _validate_weight(target):
+                    if engine is not None:
+                        try:
+                            engine.add(1.0)
+                        except Exception:
+                            pass
+                    return (target.name, "exported")
 
-                    # success path (b): file under runs/
-                    cand = _latest_exported_onnx()
-                    if cand and cand.exists():
+                # success path (b): look under runs/
+                cand = _latest_exported_onnx()
+                if cand and cand.exists():
+                    try:
                         shutil.copy2(cand, target)
+                    finally:
                         try:
                             shutil.rmtree(dst / "runs", ignore_errors=True)
                         except Exception:
                             pass
-                        if target.exists() and _validate_weight(target):
-                            return (target.name, "exported")
-                        else:
-                            try:
-                                target.unlink()
-                            except Exception:
-                                pass
+                if target.exists() and _validate_weight(target):
+                    if engine is not None:
+                        try:
+                            engine.add(1.0)
+                        except Exception:
+                            pass
+                    return (target.name, "exported")
             except Exception:
-                continue
+                pass
 
+    # If we reach here, we failed to produce the artifact
+    if engine is not None:
+        try:
+            engine.add(1.0)
+        except Exception:
+            pass
     return (target.name, "failed")
 
 
 def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """
+    Fetch all *names* into MODEL_DIR with an aggregated progress view.
+
+    We set the global total to len(names) and let each item contribute +1.0.
+    For downloads, bytes are scaled into that +1.0; for present/export/copy we
+    add +1.0 when done.
+    """
     results: List[Tuple[str, str]] = []
     failed: List[str] = []
-    for nm in names:
-        base, action = _fetch_one(nm, MODEL_DIR)
-        results.append((base, action))
-        if action == "failed":
-            failed.append(base)
+
+    # Fast path if progress infra is unavailable
+    if (ProgressEngine is None) or (live_percent is None):
+        for nm in names:
+            base, action = _fetch_one(nm, MODEL_DIR, None)
+            results.append((base, action))
+            if action == "failed":
+                failed.append(base)
+        return results, failed
+
+    # Narrow types for engine and context manager
+    assert ProgressEngine is not None
+    assert live_percent is not None
+
+    eng_any = ProgressEngine()
+    eng = cast(ProgressLike, eng_any)
+    with live_percent(eng, prefix="WEIGHTS"):
+        eng.set_total(float(len(names)))
+        for nm in names:
+            try:
+                eng.set_current(nm)
+            except Exception:
+                pass
+            base, action = _fetch_one(nm, MODEL_DIR, eng)
+            results.append((base, action))
+            if action == "failed":
+                failed.append(base)
     return results, failed
 
 
-def _write_manifest(selected: List[str], installed: List[str]) -> None:
+def _write_manifest(selected: List[str], installed: List[str]) -> Path:
+    """
+    Write a user-agnostic manifest:
+      • model_dir is stored *relative* to projects/argos to avoid absolute user paths
+      • paths use forward slashes for cross-platform consistency
+    """
+    repo_root = Path(__file__).resolve().parents[2]  # .../projects/argos
+    rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
+
     data: Dict[str, object] = {
-        "model_dir": str(MODEL_DIR),
+        "model_dir": rel_model_dir,
         "selected": _dedupe(selected),
         "installed": _dedupe(installed),
     }
-    (MODEL_DIR / "manifest.json").write_text(json.dumps(data, indent=2))
-
+    man = MODEL_DIR / "manifest.json"
+    man.write_text(json.dumps(data, indent=2))
+    return man
 
 # ---------------------------------------------------------------------
 # Interactive helpers
@@ -369,10 +580,8 @@ def _parse_multi(raw: str, items: Tuple[str, ...], *, aliases: Optional[Dict[str
                     seen.add(key)
                     out.append(key)
             continue
-        # alias lookup
         if aliases and t in aliases:
             t = aliases[t]
-        # allow 'v8'/'yolov8' → '8'
         if t.startswith("v") and t[1:] in items:
             t = t[1:]
         if t.startswith("yolov") and t[5:] in items:
@@ -397,7 +606,6 @@ def _build_combo(
                 for ext in formats:
                     names.append(_mk(ver, sz, task, ext))
     return _dedupe(names)
-
 
 # ---------------------------------------------------------------------
 # Menus
@@ -466,12 +674,7 @@ def _ask_size_pack() -> List[str]:
 
 def _ask_custom() -> List[str]:
     """
-    Guided, multi-select custom builder:
-    • choose one or more versions
-    • choose one or more sizes
-    • choose tasks (det/seg/pose/cls/obb)
-    • choose formats (.pt/.onnx/both)
-    • optional extras typed as raw names
+    Guided, multi-select custom builder.
     """
     # Versions
     _show_row("Versions:", VERSIONS)
@@ -526,31 +729,196 @@ def _ask_custom() -> List[str]:
 
     return _dedupe(names)
 
-
 # ---------------------------------------------------------------------
-# Quick smoke
+# Quick smoke (progress-enabled)
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Quick smoke (progress-enabled)  — ALWAYS produces fresh outputs
 # ---------------------------------------------------------------------
 def _quick_check() -> None:
     if not typer.confirm("Run a quick smoke check now?", default=False):
         return
-    task = typer.prompt("Task [detect|heatmap]", default="Use detect or heatmap?").strip().lower()
-    if task not in {"detect", "heatmap", "geojson"}:
-        task = "heatmap"
-    inp = typer.prompt("Input (If you already know your test media or run feature on 'all' to process tests/raw)", default="Type all to test feature on all media in test folder").strip()
+
+    # Accept full names and short aliases
+    raw_task = typer.prompt(
+        "Task [detect|heatmap|geojson] [d|hm|gj]", default="heatmap"
+    ).strip().lower()
+    task_alias = {
+        "d": "detect", "det": "detect", "detect": "detect",
+        "hm": "heatmap", "heatmap": "heatmap",
+        "gj": "geojson", "geojson": "geojson",
+    }
+    task = task_alias.get(raw_task, "heatmap")
+
+    inp = typer.prompt(
+        "Input (Files in tests/raw; enter a file name or 'all' to process the whole folder)",
+        default="all",
+    ).strip()
 
     py = sys.executable
-    args: List[str]
+    args: List[str] = ["-m", "panoptes.cli", ("all" if inp.lower() == "all" else inp), "--task", task]
+
+    repo_root = Path(__file__).resolve().parents[2]
+    raw_dir = repo_root / "tests" / "raw"
+    results_dir = repo_root / "tests" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Always rotate/clear previous results so we detect new files every run.
+    # Set PANOPTES_SMOKE_KEEP_PREV=1 to preserve the folder as-is.
+    keep_prev = (os.environ.get("PANOPTES_SMOKE_KEEP_PREV", "").lower() in {"1", "true", "yes"})
+    if any(results_dir.iterdir()) and not keep_prev:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = results_dir.parent / f"results.prev-{stamp}"
+        try:
+            backup.mkdir(parents=True, exist_ok=True)
+            for p in list(results_dir.iterdir()):
+                try:
+                    shutil.move(str(p), str(backup / p.name))
+                except Exception:
+                    # fallback: try to remove in place
+                    try:
+                        if p.is_file():
+                            p.unlink()
+                        else:
+                            shutil.rmtree(p, ignore_errors=True)
+                    except Exception:
+                        pass
+        except Exception:
+            # last resort: try to clear in place
+            for p in list(results_dir.iterdir()):
+                try:
+                    if p.is_file():
+                        p.unlink()
+                    else:
+                        shutil.rmtree(p, ignore_errors=True)
+                except Exception:
+                    pass
+
+    # Expected items = number of raw inputs (bounded to ≥1)
+    # Match CLI’s notion of supported inputs for a better initial estimate
+    try:
+        from panoptes import cli as _cli  # type: ignore
+        _img: Set[str] = set(cast(Iterable[str], getattr(_cli, "_IMAGE_EXTS", ())))
+        _vid: Set[str] = set(cast(Iterable[str], getattr(_cli, "_VIDEO_EXTS", ())))
+        exts: Set[str] = _img | _vid
+    except Exception:
+        exts: Set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif",
+                        ".mp4", ".mov", ".avi", ".mkv", ".webm"}
+    expected = 1
     if inp.lower() == "all":
-        args = ["-m", "panoptes.cli", "all", "--task", task]
-    else:
-        args = ["-m", "panoptes.cli", inp, "--task", task]
+        expected = sum(1 for p in raw_dir.glob("*") if p.suffix.lower() in exts)
+    expected = max(1, expected)
 
     _ok(f"→ running: {py} {' '.join(args)}")
-    try:
-        subprocess.check_call([py, *args])
-        _ok("Smoke check finished. See projects/argos/tests/results/")
-    except Exception as e:
-        _warn(f"Smoke check failed: {e!s}")
+
+    def _list_created() -> List[Path]:
+        # Flat results dir; include files only
+        return sorted([p for p in results_dir.glob("*") if p.is_file()],
+                    key=lambda p: p.name.lower())
+
+    # No progress infra? Just run it (still using cwd=repo_root) and print results.
+    if (ProgressEngine is None) or (live_percent is None):
+        try:
+            subprocess.check_call([py, *args], cwd=repo_root)
+            created = _list_created()
+            _ok("Smoke check finished.")
+            if created:
+                typer.secho("Results (Ctl + Click To Open):", bold=True)
+                for p in created:
+                    typer.echo(f"  • {_osc8(p.name, p)}")
+            else:
+                _warn("CLI ran but produced no files.")
+        except Exception as e:
+            _warn(f"Smoke check failed: {e!s}")
+        return
+
+    # Progress-enabled path: bound progress to expected so it never exceeds 100%.
+    eng_any = ProgressEngine()  # type: ignore[call-arg]
+    eng = cast(ProgressLike, eng_any)
+    with live_percent(eng, prefix=f"SMOKE {task.upper()}"):  # type: ignore[misc]
+        try:
+            eng.set_total(float(expected))
+        except Exception:
+            pass
+        try:
+            eng.set_current("starting")
+        except Exception:
+            pass
+
+        # Run CLI quiet, but from repo root so paths resolve consistently
+        proc = subprocess.Popen([py, *args],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                cwd=repo_root)
+
+        done_reported = 0
+        last_poll = 0.0
+
+        try:
+            while True:
+                rc = proc.poll()
+                now_t = time.monotonic()
+                if now_t - last_poll >= 0.25:
+                    last_poll = now_t
+                    created = _list_created()
+                    n = len(created)
+
+                    # If we produced more than initially expected, grow the total.
+                    if n > expected:
+                        try:
+                            eng.set_total(float(n))
+                        except Exception:
+                            pass
+
+                    delta = n - done_reported
+                    if delta > 0:
+                        try:
+                            eng.add(float(delta))
+                        except Exception:
+                            pass
+                        done_reported = n
+
+                    if created:
+                        try:
+                            eng.set_current(created[-1].name)
+                        except Exception:
+                            pass
+
+                if rc is not None:
+                    break
+                time.sleep(0.05)
+
+            # Final top-up (also grow total if needed)
+            created = _list_created()
+            n = len(created)
+            if n > expected:
+                try:
+                    eng.set_total(float(n))
+                except Exception:
+                    pass
+            delta = n - done_reported
+            if delta > 0:
+                try:
+                    eng.add(float(delta))
+                except Exception:
+                    pass
+                done_reported = n
+
+            if proc.returncode == 0:
+                _ok("Smoke check finished.")
+                if created:
+                    typer.secho("Results (Ctl + Click To Open):", bold=True)
+                    for p in created:
+                        typer.echo(f"  • {_osc8(p.name, p)}")
+                else:
+                    _warn("CLI ran but produced no files.")
+            else:
+                _warn(f"Smoke check failed (exit code {proc.returncode}).")
+        finally:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------
@@ -619,20 +987,27 @@ def main() -> None:
 
     installed = [n for (n, a) in results if a != "failed"]
 
-    # Summary
+    # Summary + clickable list
     typer.echo()
     _ok(f"Installed/ready: {len(installed)}")
+    if installed:
+        typer.secho("Ready (Ctl + Click To Open):", bold=True)
+        for bn in _dedupe(installed):
+            typer.echo(f"  • {_osc8(bn, MODEL_DIR / bn)}")
+
     if bad:
         _warn(f"Skipped/failed: {len(bad)}")
         for n in _dedupe(bad):
             typer.echo(f"  – {n}")
-        _warn("Those names may not be hosted by Ultralytics yet, or export failed.")
+        _warn("Those names may not be hosted yet, or export failed.")
 
-    # Manifest for reproducibility
-    _write_manifest(selected, installed)
+    # Manifest for reproducibility (user-agnostic, relative paths)
+    man = _write_manifest(selected, installed)
+    typer.echo(f"\nManifest: {_osc8('manifest.json', man)}")
 
     _quick_check()
 
 
 if __name__ == "__main__":
     main()
+

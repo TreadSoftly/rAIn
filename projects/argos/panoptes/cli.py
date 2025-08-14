@@ -1,22 +1,57 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\cli.py
 """
 panoptes.cli – unified Typer front-end (“argos”)
 
 Tasks: detect | heatmap | geojson on images **and** videos.
 Model selection is delegated to *panoptes.model_registry* and is strictly enforced.
 
-This version hardens help/man UX and adds a rich manual, examples, and a tutorial
-without changing the core task flow.
+Progress & UX (this build)
+──────────────────────────────────────────────────────────────────────────────
+• Single, pinned progress line for the whole run:
+    ARGOS DETECT — [DONE i/N • xx%] current_item
+  Falls back to an ANSI pinned-line writer when the progress package is absent.
+
+• Accurate counts for ALL/globs; % done is shown live.
+
+• At the end, prints a **clickable list** of just the basenames for outputs
+  (OSC-8 hyperlinks that open the real file path in supported terminals/editors).
+
+• While the line is active, stdout/stderr from workers is silenced unless --verbose.
+
+• Spinner writes to sys.__stderr__ so it remains visible even when stdio is redirected.
+
+Notes
+─────
+• We detect per-item outputs by diffing the results directory before/after each
+  item, so we can still list results even if the task functions don’t return paths
+  yet. When the task layer starts returning paths, we’ll prefer those.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import sys
 import textwrap
+import time
 import urllib.parse
+from contextlib import contextmanager
+from contextlib import redirect_stderr
+from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any, Final, List, Literal, Optional, cast
+from types import TracebackType
+from typing import Any
+from typing import Callable
+from typing import Final
+from typing import Iterable
+from typing import Iterator
+from typing import List
+from typing import Literal
+from typing import Optional
+from typing import Protocol
+from typing import Self
+from typing import cast
 
 import typer
 
@@ -24,9 +59,6 @@ import typer
 #  app scaffolding
 # ────────────────────────────────────────────────────────────────────────────
 
-# Recognize lots of help invocations. IMPORTANT:
-# Do NOT include "/?" except on Windows, or Click will treat "/" as an option
-# prefix and absolute paths like /tmp or /home will be parsed as options.
 _IS_WINDOWS = sys.platform.startswith("win")
 _HELP_NAMES = ["-h", "--help", "-help", "-?"] + (["/?"] if _IS_WINDOWS else [])
 
@@ -35,9 +67,6 @@ app = typer.Typer(
     rich_markup_mode="rich",
     context_settings={"help_option_names": _HELP_NAMES},
 )
-
-# NOTE: heavy imports (model registry / lambda_like) are deferred to avoid
-# initializing models when user only wants help/man.
 
 # ────────────────────────────────────────────────────────────────────────────
 #  token aliases (positional tokens, NOT click/typer flags)
@@ -59,7 +88,7 @@ _ALIAS = {
     "geojson": "geojson",
     "--geojson": "geojson",
     "-gj": "geojson",
-    # help / man as positional tokens (so `argos help` / `argos man` works)
+    # help / man
     "help": "help",
     "man": "man",
     "?": "help",
@@ -240,7 +269,7 @@ def _man_examples() -> str:
             argos hm bunny.mp4 --small
 
         Explain without running (dry-run):
-            argos --dry-run d all .jpg
+            argos --dry-run hm all .png
 
         Force weights:
             argos d fuji --det-weights projects/argos/panoptes/model/yolov8x.pt
@@ -315,7 +344,6 @@ def _tutorial_page() -> str:
         ""
     )
 
-# Topic registry for `argos man <topic>`
 _MAN_TOPICS = {
     "tasks": _man_tasks,
     "inputs": _man_inputs,
@@ -340,14 +368,12 @@ def _extract_task(tokens: List[str]) -> tuple[Optional[str], List[str]]:
     if not hits:
         return None, tokens
 
-    # If the user typed help/man as a positional token, surface it immediately
     uniq = {alias for _, alias in hits}
     if "help" in uniq or "man" in uniq:
         idx = next(i for i, a in hits if a in {"help", "man"})
         rest = tokens[:idx] + tokens[idx + 1 :]
         return _ALIAS[tokens[idx].lower()], rest
 
-    # Disallow ambiguous multi-task tokens
     uniq = {alias for _, alias in hits if alias in _VALID}
     if len(uniq) > 1:
         typer.secho(
@@ -357,7 +383,6 @@ def _extract_task(tokens: List[str]) -> tuple[Optional[str], List[str]]:
         )
         raise typer.Exit(2)
 
-    # remove the first occurrence of the single task token
     if uniq:
         idx, task = next((i, _ALIAS[t.lower()]) for i, t in hits if _ALIAS[t.lower()] in _VALID)
         rest = tokens[:idx] + tokens[idx + 1 :]
@@ -519,7 +544,166 @@ def _expand_tokens(positional: list[str], task_final: str) -> list[str]:
     return found
 
 # ────────────────────────────────────────────────────────────────────────────
-#  light wrappers for lazy imports (prevent model init during help/man)
+#  OSC-8 hyperlink helper (clickable file names)
+# ────────────────────────────────────────────────────────────────────────────
+def _as_file_uri(p: Path) -> str:
+    # Path.as_uri() handles Windows + encoding, but requires absolute path.
+    return p.resolve().as_uri()
+
+def _osc8(label: str, target_uri: str, *, yellow: bool = True) -> str:
+    ESC   = "\x1b"
+    BR_YE = "\x1b[93m"   # bright yellow
+    BOLD  = "\x1b[1m"
+    RST   = "\x1b[0m"
+    colored = f"{BR_YE}{BOLD}{label}{RST}" if yellow else label
+    return f"{ESC}]8;;{target_uri}{ESC}\\{colored}{ESC}]8;;{ESC}\\"
+
+def _clickable_basename(p: Path) -> str:
+    """
+    In VS Code terminal, return a plain absolute path so Ctrl+Click opens.
+    Else, return a bright-yellow OSC-8 link with a short label.
+    """
+    is_vscode = (os.environ.get("TERM_PROGRAM", "").lower() == "vscode") or bool(os.environ.get("VSCODE_PID"))
+    if is_vscode:
+        return str(p.resolve())  # VS Code link detector picks this up
+    return _osc8(p.name, _as_file_uri(p), yellow=True)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+#  optional progress wrapper
+# ────────────────────────────────────────────────────────────────────────────
+class SpinnerLike(Protocol):
+    def __enter__(self) -> Self: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool | None: ...
+    def update(self, **kwargs: Any) -> Self: ...
+
+_SpinnerFactory = Callable[..., SpinnerLike]
+
+try:
+    # neutral Halo/Colorama spinner (template lives in progress_ux.py)
+    from panoptes.progress import percent_spinner as _percent_spinner  # type: ignore[reportMissingTypeStubs]
+    _spinner_factory: Optional[_SpinnerFactory] = cast(_SpinnerFactory, _percent_spinner)
+except Exception:
+    _spinner_factory = None  # type: ignore[assignment]
+
+class _ConsoleSpinner:
+    """
+    Minimal pinned-line progress for when the progress package is unavailable.
+    Updates a single line with:  "{prefix} — [DONE i/N • xx%] current"
+    Writes to sys.__stderr__ to bypass redirected stdio.
+    """
+    def __init__(self, *, prefix: str, stream: Any | None = None, final_newline: bool = True) -> None:
+        self.prefix = prefix
+        self._stream = stream or getattr(sys, "__stderr__", sys.stdout)
+        self._total = 0
+        self._count = 0
+        self._current: Optional[str] = None
+        self._start = time.time()
+        self._active = False
+        self._final_newline = bool(final_newline)
+
+    def __enter__(self) -> "_ConsoleSpinner":
+        self._active = True
+        self._render()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        # finalize line; optional newline so next prints are clean
+        self._active = False
+        self._render(final=True)
+        try:
+            if self._final_newline:
+                self._stream.write("\n")
+                self._stream.flush()
+        except Exception:
+            pass
+        return False
+
+    def update(self, **kwargs: Any) -> "_ConsoleSpinner":
+        if "total" in kwargs:
+            try:
+                self._total = max(0, int(float(kwargs["total"])))
+            except Exception:
+                pass
+        if "count" in kwargs:
+            try:
+                self._count = max(0, int(float(kwargs["count"])))
+            except Exception:
+                pass
+        cur = kwargs.get("current", None)
+        if isinstance(cur, str) or cur is None:
+            self._current = cur
+        self._render()
+        return self
+
+    def _render(self, *, final: bool = False) -> None:
+        if not self._active and not final:
+            return
+        tot = max(0, self._total)
+        done = max(0, min(self._count, tot if tot else self._count))
+        pct = int(round((100.0 * done / (tot or 1)), 0)) if tot else (100 if final else 0)
+        cur = f" {self._current}" if self._current else ""
+        line = f"{self.prefix} — [DONE {done}/{tot or '?'} • {pct:>3}%]{cur}"
+        try:
+            import shutil as _sh
+            width = _sh.get_terminal_size((100, 20)).columns
+            self._stream.write("\r" + " " * (width - 1) + "\r")
+            self._stream.write(line)
+            self._stream.flush()
+        except Exception:
+            pass
+
+# import after definition to avoid early import costs
+
+@contextmanager
+def _silence_stdio(enabled: bool) -> Iterator[None]:
+    """
+    Redirect stdout/stderr to os.devnull while active when *enabled* is True.
+    This prevents child libs and workers from printing and breaking the spinner.
+    """
+    if not enabled:
+        yield
+        return
+    devnull = open(os.devnull, "w", buffering=1, encoding="utf-8", errors="ignore")
+    try:
+        with redirect_stdout(devnull), redirect_stderr(devnull):
+            yield
+    finally:
+        try:
+            devnull.close()
+        except Exception:
+            pass
+
+@contextmanager
+def _maybe_spinner(prefix: str, *, final_newline: bool = True) -> Iterator[SpinnerLike]:
+    """
+    Single pinned spinner (or a console fallback) used by the whole CLI run.
+
+    NOTE: We do NOT set any env overrides here. The rich spinner (if present)
+    marks PANOPTES_PROGRESS_ACTIVE=1 when it starts, which automatically
+    silences nested spinners. This prevents flicker/scroll.
+    """
+    stream = getattr(sys, "__stderr__", sys.stdout)  # bypass redirected sys.stderr
+    if _spinner_factory is None:
+        sp: SpinnerLike = cast(SpinnerLike, _ConsoleSpinner(prefix=prefix, stream=stream, final_newline=final_newline))
+    else:
+        # progress.percent_spinner supports final_newline
+        sp: SpinnerLike = _spinner_factory(prefix=prefix, stream=stream, final_newline=final_newline)  # type: ignore[call-arg]
+    with sp:
+        yield sp
+
+# ────────────────────────────────────────────────────────────────────────────
+#  lightweight wrappers for lazy imports
 # ────────────────────────────────────────────────────────────────────────────
 def _pick_weight(task: Literal["detect", "heatmap"], *, small: bool):
     from panoptes import model_registry as _mr  # type: ignore[reportMissingTypeStubs]
@@ -532,23 +716,70 @@ def _reinit_models(
     det_override: Optional[Path] = None,
     seg_override: Optional[Path] = None,
 ) -> None:
-    from . import lambda_like as _ll  # type: ignore[reportMissingTypeStubs]
-    _ll.reinit_models(
-        detect_small=detect_small,
-        segment_small=segment_small,
-        det_override=det_override,
-        seg_override=seg_override,
-    )
+    # silence any prints during model init unless verbose
+    with _silence_stdio(True):
+        from . import lambda_like as _ll  # type: ignore[reportMissingTypeStubs]
+        _ll.reinit_models(
+            detect_small=detect_small,
+            segment_small=segment_small,
+            det_override=det_override,
+            seg_override=seg_override,
+        )
+
+# ────────────────────────────────────────────────────────────────────────────
+#  Progress proxy: map child current → JOB so ITEM stays pinned
+# ────────────────────────────────────────────────────────────────────────────
+class _JobAwareProxy:
+    """
+    Intercepts update(current=...) from child layers and treats it as JOB,
+    so our ITEM stays the filename/URL on the main line.
+    """
+    def __init__(self, spinner: SpinnerLike) -> None:
+        self._sp = spinner
+
+    def update(self, **kw: Any) -> "_JobAwareProxy":
+        cur = kw.pop("current", None)
+        if cur is not None:
+            txt = str(cur).strip()
+            if txt:
+                kw.setdefault("job", txt)
+        self._sp.update(**kw)
+        return self
 
 def _run_single(
     src: str,
     *,
     model: str,
     task: Literal["detect", "heatmap", "geojson"],
+    progress: Optional[SpinnerLike],
+    quiet: bool,
     **kwargs: Any,
 ) -> Any:
     from . import lambda_like as _ll  # type: ignore[reportMissingTypeStubs]
-    return _ll.run_single(src, model=model, task=task, **kwargs)
+    prox = _JobAwareProxy(progress) if progress is not None else None
+    # ensure child layer never spawns a spinner; it will opportunistically
+    # update the parent spinner’s fields instead (JOB via proxy).
+    return _ll.run_single(
+        src,
+        model=model,
+        task=task,
+        progress=prox,
+        quiet=quiet,
+        **kwargs,
+    )
+
+# ────────────────────────────────────────────────────────────────────────────
+#  results tracking (for clickable list)
+# ────────────────────────────────────────────────────────────────────────────
+def _snapshot_results() -> set[Path]:
+    out: set[Path] = set()
+    base = _RESULTS_DIR
+    if not base.exists():
+        return out
+    for p in base.rglob("*"):
+        if p.is_file():
+            out.add(p.resolve())
+    return out
 
 # ────────────────────────────────────────────────────────────────────────────
 #  command
@@ -564,29 +795,32 @@ def target(  # noqa: C901
     heatmap_flag: bool = typer.Option(False, "--heatmap", help="hm is shortcut for --task heatmap | hm YourFile /or/ YourFile hm"),
     geojson_flag: bool = typer.Option(False, "--geojson", help="gj is shortcut for --task geojson | gj YourFile /or/ YourFile gj"),
     # meta/help UX
-    man_flag: bool = typer.Option(False, "--man", help="TODO: Open the full manual and exit"),
-    examples_flag: bool = typer.Option(False, "--examples", help="TODO: Show examples and exit"),
-    tutorial_flag: bool = typer.Option(False, "--tutorial", help="TODO: Show a short tutorial and exit"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="TODO: Explain what would run, then exit"),
+    man_flag: bool = typer.Option(False, "--man", help="Open the full manual and exit"),
+    examples_flag: bool = typer.Option(False, "--examples", help="Show examples and exit"),
+    tutorial_flag: bool = typer.Option(False, "--tutorial", help="Show a short tutorial and exit"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Explain what would run, then exit"),
     # model (cosmetic placeholder for compatibility)
     model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
     # heat-map tuning
-    alpha: float = typer.Option(0.40, help="TODO: Heat-map blend 0-1"),
-    cmap: str = typer.Option("COLORMAP_JET", help="TODO: OpenCV / Matplotlib colour-map"),
-    kernel_scale: float = typer.Option(5.0, "--k", "-k", help="TODO:  Area / kernel_scale (smaller  blurrier)"),
+    alpha: float = typer.Option(0.40, help="Heat-map blend 0-1"),
+    cmap: str = typer.Option("COLORMAP_JET", help="OpenCV / Matplotlib colour-map"),
+    kernel_scale: float = typer.Option(5.0, "--k", "-k", help="Area / kernel_scale (smaller → blurrier)"),
     conf: float = typer.Option(0.40, help="[detect / heat-map] confidence threshold 0-1"),
-    small: bool = typer.Option(False, "--small", "--fast", help="TODO: Use nano models for live video"),
+    small: bool = typer.Option(False, "--small", "--fast", help="Use nano models for live video"),
     # per-task override weights
     det_override: Optional[Path] = typer.Option(
         None, "--det-weights",
-        help="TODO: Force a detector weight for detect/geojson (path to .pt/.onnx).",
+        help="Force a detector weight for detect/geojson (path to .pt/.onnx).",
     ),
     seg_override: Optional[Path] = typer.Option(
         None, "--seg-weights",
-        help="TODO: Force a segmentation weight for heatmap (path to .pt/.onnx).",
+        help="Force a segmentation weight for heatmap (path to .pt/.onnx).",
     ),
+    # output control
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Chatty logs (disables single-line-only mode)"),
+    quiet: bool = typer.Option(True, "--quiet", "-q", help="Single-line progress only (default)"),
 ) -> None:
-    """TODO: Batch-process images / videos with zero manual weight fiddling."""
+    """Batch-process images / videos with zero manual weight fiddling."""
 
     # Honor meta flags first (no heavy imports)
     if man_flag:
@@ -598,6 +832,9 @@ def target(  # noqa: C901
     if tutorial_flag:
         typer.echo_via_pager(_tutorial_page())
         raise typer.Exit(0)
+
+    if verbose:
+        quiet = False
 
     if not inputs:
         typer.secho("[bold red]  no inputs given", err=True)
@@ -614,11 +851,7 @@ def target(  # noqa: C901
             typer.echo_via_pager(_full_manual())
         raise typer.Exit(0)
 
-    # Resolve a single final task with clear precedence:
-    #   1) explicit --task / -t
-    #   2) boolean flags (--detect/--heatmap/--geojson)
-    #   3) token_task found among positionals
-    #   4) default -> detect
+    # Resolve a single final task with clear precedence
     flag_tasks = [name for ok, name in [
         (detect_flag, "detect"),
         (heatmap_flag, "heatmap"),
@@ -659,7 +892,8 @@ def target(  # noqa: C901
 
     # model flag is cosmetic; kept for compatibility
     if model.lower() not in _AVAILABLE_MODELS:
-        typer.secho(f"[bold yellow] unknown --model ignored: {model}", err=True)
+        if not quiet:
+            typer.secho(f"[bold yellow] unknown --model ignored: {model}", err=True)
     model = model.lower()
 
     hm_kwargs: dict[str, Any] = dict(alpha=alpha, cmap=cmap, kernel_scale=kernel_scale, conf=conf)
@@ -687,95 +921,164 @@ def target(  # noqa: C901
                 typer.echo(f"  image:   {item}")
         raise typer.Exit(0)
 
-    # ── Heavy stuff starts here (lazy import ensures help/man stays snappy) ──
+    # ── Heavy stuff starts here ──
 
-    # Announce overall run
-    typer.secho(
-        f"[panoptes] cli: task={task_final} small={small} inputs={len(norm_inputs)}",
-        err=True,
-    )
-
-    # Initialize appropriate model(s) with optional override (applies to still-image flows)
-    if task_final == "detect":
-        _reinit_models(detect_small=small, det_override=det_override)
-    elif task_final == "heatmap":
-        _reinit_models(segment_small=small, seg_override=seg_override)
-    elif task_final == "geojson":
-        _reinit_models(detect_small=small, det_override=det_override)
-
-    # loop over inputs
-    for item in norm_inputs:
-        low = item.lower()
-
-        # videos
-        if low.endswith(tuple(_VIDEO_EXTS)):
-            if task_final == "geojson":
-                typer.secho(f"[bold yellow] skipping video for geojson: {item}", err=True)
-                continue
-
-            # choose weight (override beats registry pick)
-            ov = det_override if task_final == "detect" else (
-                seg_override if task_final == "heatmap" else None
-            )
-            weight = Path(ov) if ov is not None else _require_weight(
-                cast(Literal["detect", "heatmap"], task_final), small=small
-            )
-            typer.secho(
-                f"[panoptes] video: {item} → task={task_final} small={small} weight={weight}",
-                err=True,
-            )
-
-            if task_final == "heatmap":
-                from .predict_heatmap_mp4 import main as _heat_vid
-                _heat_vid(item, weights=weight, **hm_kwargs)
-            else:  # detect
-                from .predict_mp4 import main as _detect_vid
-                _detect_vid(item, conf=conf, weights=weight)
-            continue
-
-        # still images & URLs
-        if low.endswith(tuple(_IMAGE_EXTS)) or _is_url(item):
-            if task_final == "detect":
-                w = Path(det_override) if det_override is not None else _pick_weight("detect", small=small)
-                typer.secho(f"[panoptes] image/url: {item} → task=detect weight={w}", err=True)
-            elif task_final == "heatmap":
-                w = Path(seg_override) if seg_override is not None else _pick_weight("heatmap", small=small)
-                typer.secho(f"[panoptes] image/url: {item} → task=heatmap weight={w}", err=True)
-            else:  # geojson
-                typer.secho(f"[panoptes] image/url: {item} → task=geojson (no model required)", err=True)
-
-            _run_single(
-                item,
-                model=model,
-                task=cast(Literal["detect", "heatmap", "geojson"], task_final),
-                **hm_kwargs,
-            )
-            continue
-
-        typer.secho(f"[bold red] unsupported input: {item}", err=True)
-        raise typer.Exit(2)
-
-def _require_weight(task: Literal["detect", "heatmap"], *, small: bool) -> Path:
-    """
-    Strictly pick the weight for *task*.
-
-    Raises
-    ------
-    typer.Exit
-        If the weight is not configured or the file does not exist.
-    """
-    weight = _pick_weight(task, small=small)
-    if weight is None:
+    if not quiet:
         typer.secho(
-            f"[bold red]  no weight configured for task {task} "
-            "(edit panoptes.model_registry.WEIGHT_PRIORITY)",
+            f"[panoptes] cli: task={task_final} small={small} inputs={len(norm_inputs)}",
             err=True,
         )
-        raise typer.Exit(1)
-    return weight
+
+    # Short status spinner during model init (covers downloads) — do NOT add a newline
+    with _maybe_spinner(prefix="ARGOS INIT", final_newline=False) as sp_init:
+        sp_init.update(total=1, count=0, current="init models (may download)")
+        if task_final == "detect":
+            _reinit_models(detect_small=small, det_override=det_override)
+        elif task_final == "heatmap":
+            _reinit_models(segment_small=small, seg_override=seg_override)
+        elif task_final == "geojson":
+            _reinit_models(detect_small=small, det_override=det_override)
+        sp_init.update(count=1, current="ready")
+
+    # Progress wrapper (counts processed inputs) — SINGLE pinned spinner
+    done = 0
+    produced: list[Path] = []         # all outputs from this run
+    per_input_outs: dict[str, list[Path]] = {}  # optional grouping
+
+    prefix = task_final.upper()
+    with _maybe_spinner(prefix=f"ARGOS {prefix}", final_newline=True) as sp:
+        sp.update(total=len(norm_inputs), count=0, current=None)
+
+        # loop over inputs
+        for item in norm_inputs:
+            low = item.lower()
+            label = ("URL" if _is_url(item) else Path(item).name)
+            sp.update(current=label)
+
+            # snapshot results so we can diff per item
+            before = _snapshot_results()
+
+            # videos
+            if low.endswith(tuple(_VIDEO_EXTS)):
+                if task_final == "geojson":
+                    sp.update(current=f"skip video: {label}")
+                    done += 1
+                    sp.update(count=done)
+                    per_input_outs[label] = []
+                    continue
+
+                # choose weight (override beats registry pick)
+                ov = det_override if task_final == "detect" else (
+                    seg_override if task_final == "heatmap" else None
+                )
+                weight = Path(ov) if ov is not None else _pick_weight(
+                    cast(Literal["detect", "heatmap"], task_final), small=small
+                )
+
+                if not quiet:
+                    typer.secho(
+                        f"[panoptes] video: {item} → task={task_final} small={small} weight={weight}",
+                        err=True,
+                    )
+
+                # Show ITEM + JOB + MODEL on the progress line up-front
+                sp.update(
+                    current=label,
+                    job=("heatmap" if task_final == "heatmap" else "detect"),
+                    model=(Path(weight).name if weight else "")
+                )
+
+                # Silence worker output while spinner is live
+                with _silence_stdio(quiet):
+                    if task_final == "heatmap":
+                        from .predict_heatmap_mp4 import main as _heat_vid
+                        _heat_vid(item, weights=weight, **hm_kwargs)
+                    else:  # detect
+                        from .predict_mp4 import main as _detect_vid
+                        _detect_vid(item, conf=conf, weights=weight)
+
+                # diff results
+                after = _snapshot_results()
+                new_files = sorted((after - before), key=lambda p: p.name.lower())
+                produced.extend(new_files)
+                per_input_outs[label] = new_files
+
+                done += 1
+                sp.update(count=done)
+                continue
+
+            # still images & URLs
+            if low.endswith(tuple(_IMAGE_EXTS)) or _is_url(item):
+                # Choose (or show) model and put all three fields on the line up-front
+                if task_final == "detect":
+                    w = Path(det_override) if det_override is not None else _pick_weight("detect", small=small)
+                    model_name = Path(w).name if w else ""
+                    sp.update(current=label, job="detect", model=model_name)
+                    if not quiet:
+                        typer.secho(f"[panoptes] image/url: {item} → task=detect weight={w}", err=True)
+                elif task_final == "heatmap":
+                    w = Path(seg_override) if seg_override is not None else _pick_weight("heatmap", small=small)
+                    model_name = Path(w).name if w else ""
+                    sp.update(current=label, job="heatmap", model=model_name)
+                    if not quiet:
+                        typer.secho(f"[panoptes] image/url: {item} → task=heatmap weight={w}", err=True)
+                else:
+                    w = None
+                    sp.update(current=label, job="geojson", model="")
+                    if not quiet:
+                        typer.secho(f"[panoptes] image/url: {item} → task=geojson (no model required)", err=True)
+
+                with _silence_stdio(quiet):
+                    result = _run_single(
+                        item,
+                        model=model,
+                        task=cast(Literal["detect", "heatmap", "geojson"], task_final),
+                        progress=sp,   # child ‘current’ updates become JOB via the proxy
+                        quiet=quiet,
+                        **hm_kwargs,
+                    )
+
+                # Prefer returned paths if provided; fall back to results diff.
+                # Normalize to List[Path]
+                outs: list[Path] = []
+                try:
+                    if isinstance(result, (str, Path)):
+                        outs = [Path(result)]
+                    elif isinstance(result, (list, tuple)):
+                        iterable = cast(Iterable[object], result)
+                        outs = [Path(x) for x in iterable if isinstance(x, (str, Path))]
+                except Exception:
+                    outs = []
+
+                if not outs:
+                    after = _snapshot_results()
+                    outs = sorted((after - before), key=lambda p: p.name.lower())
+
+                produced.extend(outs)
+                per_input_outs[label] = outs
+
+                done += 1
+                sp.update(count=done)
+                continue
+
+            typer.secho(f"[bold red] unsupported input: {item}", err=True)
+            raise typer.Exit(2)
+
+    # ── Final summary with clickable file names ──────────────────────────────
+    if produced:
+        typer.echo("")  # spacer
+        typer.echo("Results (Ctl + Click To Open):")
+        for p in produced:
+            try:
+                typer.echo(f"  - {_clickable_basename(p)}")
+            except Exception:
+                typer.echo(f"  - {p.name}  ({str(p)})")
+    else:
+        typer.echo("")  # spacer
+        typer.echo("No new result files were detected.")
 
 # ────────────────────────────────────────────────────────────────────────────
-#  entry-point glue (unchanged)
+#  entry-point glue
 # ────────────────────────────────────────────────────────────────────────────
 def _prepend_argv(token: str) -> None:
     sys.argv = sys.argv[:1] + [token] + sys.argv[1:]

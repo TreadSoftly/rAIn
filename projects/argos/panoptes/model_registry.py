@@ -1,4 +1,4 @@
-# \rAIn\projects\argos\panoptes\model_registry.py
+# projects/argos/panoptes/model_registry.py
 """
 panoptes.model_registry
 --------------------------
@@ -13,16 +13,28 @@ Hard-locking rules (2025-08-07)
    ad-hoc scripts that call those helpers **directly**.
 3. If a required weight is missing we raise **RuntimeError** immediately
    – downstream code must catch or let the program abort.
-"""
 
+Progress note
+─────────────
+We wrap YOLO init in a tiny `simple_status` spinner (auto-disabled off-TTY
+or when a parent progress bar is active).
+"""
 from __future__ import annotations
 
 import functools
 import importlib
 import logging
 import sys
+import contextlib
+import os
 from pathlib import Path
 from typing import Final, Literal, Optional, Union
+
+# optional progress
+try:
+    from .progress.progress_ux import simple_status  # type: ignore
+except Exception:  # pragma: no cover
+    simple_status = None  # type: ignore
 
 # ────────────────────────────────────────────────────────────────
 #  Ultralytics import (kept soft so linting works without it)
@@ -57,11 +69,22 @@ if not _LOG.handlers:
     h = logging.StreamHandler(sys.stderr)
     h.setFormatter(logging.Formatter("%(message)s"))
     _LOG.addHandler(h)
-_LOG.setLevel(logging.INFO)
+_LOG.setLevel(logging.WARNING)
 
 
 def _say(msg: str) -> None:
     _LOG.info(f"[panoptes] {msg}")
+
+
+# Allow callers (e.g., CLI) to opt-in to chattier logs without env-vars.
+def set_log_level(level: int) -> None:
+    """Set registry logger level (e.g., logging.INFO for verbose)."""
+    _LOG.setLevel(level)
+
+
+def set_verbose(enabled: bool = True) -> None:
+    """Convenience: True -> INFO, False -> WARNING."""
+    set_log_level(logging.INFO if enabled else logging.WARNING)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -229,10 +252,18 @@ def _load(
     if _yolo_cls is None or weight is None:
         return None
     _say(f"init YOLO: task={task} path={weight}")
-    try:
-        return _yolo_cls(str(weight), task=task)
-    except TypeError:
-        return _yolo_cls(str(weight))
+
+    # spinner while Ultralytics initialises (safe no-op off-TTY or when nested)
+    cm: contextlib.AbstractContextManager[object]
+    if (simple_status is not None) and (os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"):
+        cm = simple_status(f"Initialising YOLO ({task})")  # type: ignore[assignment]
+    else:
+        cm = contextlib.nullcontext()
+    with cm:
+        try:
+            return _yolo_cls(str(weight), task=task)
+        except TypeError:
+            return _yolo_cls(str(weight))
 
 
 def _require(model: Optional[object], task: str) -> object:
@@ -335,4 +366,6 @@ __all__ = [
     "load_classifier",
     "load_pose",
     "load_obb",
+    "set_log_level",
+    "set_verbose",
 ]

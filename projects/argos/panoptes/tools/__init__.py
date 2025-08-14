@@ -1,1 +1,1 @@
-# makes 'panoptes.tools' a package
+"""panoptes.tools – package marker (intentionally empty)."""
