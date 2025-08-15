@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\progress\__init__.py
+# \rAIn\projects\argos\panoptes\progress\__init__.py
 """
 Panoptes Progress — single-line, fixed-width progress with color cycling.
 
@@ -32,7 +32,19 @@ import threading
 import time
 from contextlib import contextmanager
 from types import TracebackType
-from typing import Any, Callable, ContextManager, Iterator, Optional, Protocol, Self, TextIO, cast
+from typing import Any, Callable, ContextManager, Iterator, Optional, Protocol, TextIO, cast
+
+# NOTE: Don't hard-import typing.Self on Py<3.11 (breaks 3.9/3.10).
+# If a consumer evaluates annotations with typing.get_type_hints, ensure 'Self' resolves.
+try:  # Python 3.11+
+    from typing import Self  # type: ignore
+except Exception:  # Python <= 3.10
+    try:
+        from typing_extensions import Self  # type: ignore
+    except Exception:
+        class Self:  # type: ignore[misc]
+            """Runtime placeholder so get_type_hints doesn't explode on 'Self'."""
+            pass
 
 __all__ = [
     "ProgressEngine", "Phase", "Task", "ProgressState",
@@ -43,10 +55,10 @@ __all__ = [
 # ── 1) Engine (safe fallback) ────────────────────────────────────────────────
 try:
     from .engine import (
-        Phase,            # type: ignore
-        ProgressEngine,   # type: ignore
-        ProgressState,    # type: ignore
-        Task,             # type: ignore
+        Phase,  # type: ignore
+        ProgressEngine,  # type: ignore
+        ProgressState,  # type: ignore
+        Task,  # type: ignore
     )
 except Exception:
     class ProgressState:  # type: ignore[no-redef]
@@ -117,7 +129,7 @@ def osc8(label: str, target: str) -> str:
     return f"{ESC}]8;;{target}{ESC}\\{label}{ESC}]8;;{ESC}\\"
 
 _have_ux = True
-_ux_percent_spinner: Optional[Callable[..., "_SpinnerLike"]] = None
+_ux_percent_spinner: Optional[Callable[..., Any]] = None
 _ux_should_enable: Optional[Callable[[Any | None], bool]] = None
 
 try:
@@ -131,12 +143,13 @@ try:
 except Exception:
     _have_ux = False
 
-# ── 3) Spinner protocols ─────────────────────────────────────────────────────
+# ── 3) Spinner protocols ──────────────────────────────────────────────────────
 class _SpinnerLike(Protocol):
-    def __enter__(self) -> Self: ...
+    # Use protocol self-type to avoid relying on PEP 673 Self in all environments
+    def __enter__(self) -> "_SpinnerLike": ...
     def __exit__(self, exc_type: type[BaseException] | None,
                  exc: BaseException | None, tb: TracebackType | None) -> bool | None: ...
-    def update(self, **kwargs: Any) -> Self: ...
+    def update(self, **kwargs: Any) -> "_SpinnerLike": ...
 
 class _ProgressStateLike(Protocol):
     total_units: int
@@ -146,7 +159,7 @@ class _ProgressStateLike(Protocol):
 class _EngineLike(Protocol):
     def on_update(self, fn: Callable[[_ProgressStateLike], None]) -> Callable[[], None]: ...
 
-# ── 4) Stdlib fallback (same look/feel) ──────────────────────────────────────
+# ── 4) Stdlib fallback (same look/feel) ───────────────────────────────────────
 try:
     from colorama import Fore, Style
     from colorama import init as _colorama_init
@@ -411,7 +424,7 @@ def percent_spinner(*, prefix: str = "PROGRESS", **kwargs: Any) -> _SpinnerLike:
     tail_mode = (os.environ.get("PANOPTES_PROGRESS_TAIL", "full") or "full").lower()
     spinner_type = kwargs.pop("spinner_type", os.environ.get("PANOPTES_SPINNER", "line"))
     try:
-        interval = float(kwargs.pop("interval", os.environ.get("PANOPTES_SPINNER_INTERVAL", "0.01")))
+        interval = float(kwargs.pop("interval", os.environ.get("PANOPTES_SPINNER_INTERVAL", "0.10")))
     except Exception:
         interval = 0.10
     final_newline_env = (os.environ.get("PANOPTES_PROGRESS_FINAL_NEWLINE", "0") or "0").lower() in {"1", "true", "yes"}
@@ -433,7 +446,7 @@ def percent_spinner(*, prefix: str = "PROGRESS", **kwargs: Any) -> _SpinnerLike:
                         ux_kwargs["interval"] = interval
                 except Exception:
                     pass
-                return _ux_percent_spinner(**ux_kwargs)  # type: ignore[return-value]
+                return cast(_SpinnerLike, _ux_percent_spinner(**ux_kwargs))
         except Exception:
             pass
 

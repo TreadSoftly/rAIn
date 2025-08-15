@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\cli.py
+# \rAIn\projects\argos\panoptes\cli.py
 """
 panoptes.cli – unified Typer front-end (“argos”)
 
@@ -50,7 +50,6 @@ from typing import List
 from typing import Literal
 from typing import Optional
 from typing import Protocol
-from typing import Self
 from typing import cast
 
 import typer
@@ -573,14 +572,14 @@ def _clickable_basename(p: Path) -> str:
 #  optional progress wrapper
 # ────────────────────────────────────────────────────────────────────────────
 class SpinnerLike(Protocol):
-    def __enter__(self) -> Self: ...
+    def __enter__(self) -> "SpinnerLike": ...
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> bool | None: ...
-    def update(self, **kwargs: Any) -> Self: ...
+    def update(self, **kwargs: Any) -> "SpinnerLike": ...
 
 _SpinnerFactory = Callable[..., SpinnerLike]
 

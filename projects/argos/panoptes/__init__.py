@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\__init__.py
+# \rAIn\projects\argos\panoptes\__init__.py
 """
 Lightweight package init.
 

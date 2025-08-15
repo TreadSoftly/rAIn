@@ -1,9 +1,10 @@
+# \rAIn\projects\argos\panoptes\progress\bridges.py
 from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
 from types import TracebackType
-from typing import Any, Callable, Generator, Protocol, Self, cast
+from typing import Any, Callable, Generator, Protocol, cast
 
 # Import via the package so we get the rich spinner OR the stdlib fallback.
 from . import percent_spinner  # type: ignore
@@ -14,14 +15,14 @@ from .engine import (
 
 
 class _SpinnerLike(Protocol):
-    def __enter__(self) -> Self: ...
+    def __enter__(self) -> "_SpinnerLike": ...
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> bool | None: ...
-    def update(self, **kwargs: Any) -> Self: ...
+    def update(self, **kwargs: Any) -> "_SpinnerLike": ...
 
 
 def _bind_spinner(engine: ProgressEngine, spinner: _SpinnerLike) -> Callable[[], None]:

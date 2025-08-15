@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\panoptes\__main__.py
+# \rAIn\projects\argos\panoptes\__main__.py
 # \rAIn\projects\argos\panoptes\__main__.py
 """
 `python -m panoptes …` forwards to the Typer CLI defined in `panoptes.cli.target`.

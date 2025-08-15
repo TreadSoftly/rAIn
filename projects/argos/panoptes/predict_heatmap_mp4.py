@@ -23,6 +23,12 @@ Progress
 Output noise
 ────────────
 * Quiet by default (WARNING). Pass `verbose=true` on the CLI to get INFO logs.
+
+Compatibility
+─────────────
+* FFmpeg is preferred for robust MP4 output.
+* If FFmpeg is missing or fails, we **fall back to OpenCV** to re-encode the
+  temporary MJPG stream into an `.mp4`. As a final last-resort we keep `.avi`.
 """
 from __future__ import annotations
 
@@ -34,7 +40,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import TracebackType
-from typing import Any, ContextManager, Tuple, TypeAlias, Protocol, cast
+from typing import Any, Callable, ContextManager, Protocol, Tuple, TypeAlias, cast
 
 import cv2
 import numpy as np
@@ -55,10 +61,11 @@ except Exception:  # pragma: no cover
     live_percent = None  # type: ignore
     simple_status = None  # type: ignore
 
-# Ultralytics may be absent in some minimal environments
-try:
+# NOTE: Ultralytics is not required for segmentation-only heatmaps.
+# We keep this import guarded so environments with it don't fail.
+try:  # pragma: no cover
     from ultralytics import YOLO  # type: ignore
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover
     YOLO = None  # type: ignore
 
 # ───────────────────────── logging ──────────────────────────
@@ -96,16 +103,58 @@ def _osc8(label: str, path: Path) -> str:
     return f"{esc}]8;;{uri}{esc}\\{label}{esc}]8;;{esc}\\"
 
 
+def _fourcc(code: str) -> int:
+    """
+    Return an int FOURCC code while keeping type-checkers happy.
+    Falls back to cv2.VideoWriter.fourcc if VideoWriter_fourcc is missing in stubs.
+    """
+    fn: Callable[..., Any] = getattr(cv2, "VideoWriter_fourcc", getattr(cv2.VideoWriter, "fourcc"))
+    return cast(int, fn(*code))
+
+
 def _avi_writer(path: Path, fps: float, size: Tuple[int, int]) -> cv2.VideoWriter:
     vw = cv2.VideoWriter(
         str(path.with_suffix(".avi")),
-        cv2.VideoWriter_fourcc(*"MJPG"),  # type: ignore[attr-defined]
+        _fourcc("MJPG"),
         fps,
         size,
     )
     if not vw.isOpened():
         raise RuntimeError("❌  OpenCV cannot open any MJPG writer on this system.")
     return vw
+
+
+def _opencv_reencode_to_mp4(src_avi: Path, dst_mp4: Path, fps: float) -> bool:
+    """
+    Best-effort re-encode AVI → MP4 using OpenCV only (for systems without FFmpeg).
+    Returns True on success (MP4 created), False otherwise.
+    """
+    cap = cv2.VideoCapture(str(src_avi))
+    if not cap.isOpened():
+        return False
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # mp4v is widely supported in OpenCV builds; avc1 may be unavailable
+    fourcc: int = _fourcc("mp4v")
+    out = cv2.VideoWriter(str(dst_mp4), fourcc, fps, (w, h))
+    if not out.isOpened():
+        cap.release()
+        return False
+
+    ok_any = False
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        ok_any = True
+        out.write(frame)
+
+    cap.release()
+    out.release()
+    try:
+        return ok_any and dst_mp4.exists() and dst_mp4.stat().st_size > 0
+    except Exception:
+        return False
 
 
 # ───────────────────────── main worker ─────────────────────
@@ -122,11 +171,11 @@ def main(  # noqa: C901 – unavoidable CLI glue
     **kw: Any,
 ) -> Path:
     """
-    Overlay segmentation heat-map on *src* video and emit <stem>_heat.mp4> (or .avi if FFmpeg unavailable).
+    Overlay segmentation heat-map on *src* video and emit <stem>_heat.mp4> (or .avi if everything else fails).
     If *progress* is passed, updates its `current` label with "frame i/N", "encode mp4", "done".
     """
-    if YOLO is None:
-        raise RuntimeError("Ultralytics YOLO is not installed in this environment.")
+    # Ultralytics YOLO is optional; segmentation path does not require it.
+    # (Do NOT raise here; tests/CI may run without ultralytics installed.)
 
     if verbose:
         _LOG.setLevel(logging.INFO)
@@ -226,13 +275,16 @@ def main(  # noqa: C901 – unavoidable CLI glue
         cap.release()
         vw.release()
 
-        # ── re-encode MJPG → H.264 MP4 via FFmpeg ─────────────────────────
+        # ── re-encode MJPG → H.264 MP4 ───────────────────────────────────
         preferred = out_dir / f"{src_path.stem}_heat.mp4"
         final: Path
         if eng:
             eng.set_current("encode mp4")
         elif progress is not None:
             progress.update(current="encode mp4")
+
+        # Try FFmpeg first (if available)
+        ffmpeg_exists = shutil.which("ffmpeg") is not None
         try:
             if simple_status is not None and not ps_progress_active and use_local:
                 sp: ContextManager[None] = cast(ContextManager[None], simple_status("FFmpeg re-encode"))
@@ -241,28 +293,39 @@ def main(  # noqa: C901 – unavoidable CLI glue
                     def __enter__(self) -> None: return None
                     def __exit__(self, et: type[BaseException] | None, ex: BaseException | None, tb: TracebackType | None) -> bool: return False
                 sp = _Null2()
-            with sp:
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i", str(avi),
-                        "-c:v", "libx264",
-                        "-crf", "23",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
-                        str(preferred),
-                    ],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT,
-                )
-            avi.unlink(missing_ok=True)
-            final = preferred
+
+            if ffmpeg_exists:
+                with sp:
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i", str(avi),
+                            "-c:v", "libx264",
+                            "-crf", "23",
+                            "-pix_fmt", "yuv420p",
+                            "-movflags", "+faststart",
+                            str(preferred),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.STDOUT,
+                    )
+                # Success path
+                avi.unlink(missing_ok=True)
+                final = preferred
+            else:
+                raise FileNotFoundError("ffmpeg not found")
         except (FileNotFoundError, subprocess.CalledProcessError):
-            # FFmpeg missing or failed – ship AVI instead of lying with .mp4
-            final = out_dir / f"{src_path.stem}_heat.avi"
-            shutil.move(str(avi), str(final))
+            # FFmpeg missing or failed – try OpenCV re-encode to MP4
+            ok_mp4 = _opencv_reencode_to_mp4(avi, preferred, fps=fps)
+            if ok_mp4:
+                avi.unlink(missing_ok=True)
+                final = preferred
+            else:
+                # Final fallback: ship AVI instead of lying with .mp4
+                final = out_dir / f"{src_path.stem}_heat.avi"
+                shutil.move(str(avi), str(final))
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
