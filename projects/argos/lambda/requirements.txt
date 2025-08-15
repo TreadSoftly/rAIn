@@ -1,6 +1,6 @@
 # Argos Lambda runtime deps (Python 3.11 base image)
 
-# ONNX Runtime – Lambda's Python 3.11 image only publishes wheels up to 1.16.x
+# ONNX Runtime - Lambda's Python 3.11 image only publishes wheels up to 1.16.x
 onnxruntime==1.16.3
 
 # NumPy kept <2.0 to avoid ABI mismatches with ORT 1.16 wheels

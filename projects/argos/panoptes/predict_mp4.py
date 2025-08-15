@@ -1,12 +1,12 @@
 # \rAIn\projects\argos\panoptes\predict_mp4.py
 """
-predict_mp4.py – per-frame object-detection overlay for videos.
+predict_mp4.py - per-frame object-detection overlay for videos.
 
 Lock-down (2025-08-07)
 ────────────────────────────────────────────────────────────────────
 * Model selection is **strict**:
       1. an explicit *weights=* argument (override path)
-      2. `panoptes.model_registry.load_detector()` – which enforces
+      2. `panoptes.model_registry.load_detector()` - which enforces
          the hard-coded `WEIGHT_PRIORITY["detect"]`.
 
 * If the detector weight is missing (or Ultralytics is not installed) the
@@ -104,7 +104,7 @@ def _avi_writer(path: Path, fps: float, size: tuple[int, int]) -> cv2.VideoWrite
 
 
 # ───────────────────────── main worker ─────────────────────
-def main(  # noqa: C901 – CLI glue
+def main(  # noqa: C901 - CLI glue
     src: str | Path,
     *,
     weights: str | Path | None = None,
@@ -243,7 +243,7 @@ def main(  # noqa: C901 – CLI glue
             avi.unlink(missing_ok=True)
             final = preferred
         except (FileNotFoundError, subprocess.CalledProcessError):
-            # FFmpeg missing or failed – emit AVI instead
+            # FFmpeg missing or failed - emit AVI instead
             final = out_dir / f"{src.stem}_det.avi"
             shutil.move(str(avi), str(final))
 

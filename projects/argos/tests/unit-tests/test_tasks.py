@@ -91,7 +91,7 @@ def test_geojson_puts_to_s3(monkeypatch: Any) -> None:
         assert all("id" in f["properties"] for f in geo["features"])
 
 # ────────────────────────────────────────────────────────────────────
-# ❷  Bulk helper – local samples  +  remote GeoJSON URLs
+# ❷  Bulk helper - local samples  +  remote GeoJSON URLs
 # ────────────────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parents[2]  # …/projects/argos

@@ -127,7 +127,7 @@ all detect
 <tr><td style="padding:0 .5em;">•</td><td>Tracking</td></tr>
 <tr><td style="padding:0 .5em;">•</td><td>Detection + ID Boxes + Confidence Percentage</td></tr>
 <tr><td style="padding:0 .5em;">•</td><td>Segmented Multi-Color + ID With/and/Without Boxes + Confidence Percentage</td></tr>
-<tr><td style="padding:0 .5em;">•</td><td>Only Segmented Highlights – No ID / No Confidence Percentage</td></tr>
+<tr><td style="padding:0 .5em;">•</td><td>Only Segmented Highlights - No ID / No Confidence Percentage</td></tr>
 
 </table>
 

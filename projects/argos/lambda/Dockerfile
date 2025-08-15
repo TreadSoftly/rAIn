@@ -26,7 +26,7 @@ COPY panoptes/ /var/task/panoptes/
 # Ensure we don't accidentally include *.pt from the earlier copy
 RUN rm -rf /var/task/panoptes/model && mkdir -p /var/task/panoptes/model
 
-# Model weights – ONNX only to keep image light (no Torch)
+# Model weights - ONNX only to keep image light (no Torch)
 # NOTE: these COPY lines require that matching files exist locally.
 COPY panoptes/model/*.onnx /var/task/panoptes/model/
 # COPY panoptes/model/*.pt /var/task/panoptes/model/   # ← intentionally omitted in Lambda

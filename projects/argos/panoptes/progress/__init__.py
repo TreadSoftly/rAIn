@@ -12,7 +12,7 @@ Env knobs
   PANOPTES_PROGRESS_WIDTH            int (default 75)
   PANOPTES_PROGRESS_TAIL             full | short | min   (default full)
   PANOPTES_SPINNER                   line|dots|arrow|bounce (default line)
-  PANOPTES_SPINNER_INTERVAL          seconds (default 0.10)
+  PANOPTES_SPINNER_INTERVAL          seconds (default 0.01)
   PANOPTES_PROGRESS_FINAL_NEWLINE    0/1, true/false (default 0 → no newline)
   PANOPTES_PROGRESS_FORCE            1 to force nested spinners to print
 
@@ -252,8 +252,8 @@ class _FixedLineFormatter:
 
         head = f"{color}{B}{self.prefix}{Z} "
 
-        tail_full  = f"{G}{B} [DONE:{count:>{w}}/{total:{w}}] [PROGRESS:{pct:6.2f}%]{Z}"
-        tail_short = f"{G}{B} [DONE:{count}/{total}] [{pct:5.1f}%]{Z}"
+        tail_full  = f"{G}{B} [{count:>{w}}/{total:{w}}] [{pct:6.2f}%]{Z}"
+        tail_short = f"{G}{B} [{count}/{total}] [{pct:5.1f}%]{Z}"
         tail_min   = f"{G}{B} [{count}/{total}] [{int(round(pct))}%]{Z}"
 
         preferred = {"full": tail_full, "short": tail_short, "min": tail_min}.get(self.tail_mode, tail_full)
@@ -268,9 +268,9 @@ class _FixedLineFormatter:
         mid_budget = max(3, self.cols - _vis_len(head) - _vis_len(tail))
 
         # Build mid with per-value fitting (preserve colours)
-        itm_open, itm_close = f"{G}{B}[ITEM:{Z}{R}{B}", f"{Z}{G}{B}]"
-        job_open, job_close = f"{G}{B}[JOB:{Z}{R}{B}",  f"{Z}{G}{B}]"
-        mdl_open, mdl_close = f"{G}{B}[MODEL:{Z}{R}{B}", f"{Z}{G}{B}]"
+        itm_open, itm_close = f"{G}{B}[File:{Z}{R}{B}", f"{Z}{G}{B}]"
+        job_open, job_close = f"{G}{B}[Job:{Z}{R}{B}",  f"{Z}{G}{B}]"
+        mdl_open, mdl_close = f"{G}{B}[Model:{Z}{R}{B}", f"{Z}{G}{B}]"
 
         segments: list[tuple[str, str, str]] = []
         if item:
@@ -424,9 +424,9 @@ def percent_spinner(*, prefix: str = "PROGRESS", **kwargs: Any) -> _SpinnerLike:
     tail_mode = (os.environ.get("PANOPTES_PROGRESS_TAIL", "full") or "full").lower()
     spinner_type = kwargs.pop("spinner_type", os.environ.get("PANOPTES_SPINNER", "line"))
     try:
-        interval = float(kwargs.pop("interval", os.environ.get("PANOPTES_SPINNER_INTERVAL", "0.10")))
+        interval = float(kwargs.pop("interval", os.environ.get("PANOPTES_SPINNER_INTERVAL", "0.01")))
     except Exception:
-        interval = 0.10
+        interval = 0.01
     final_newline_env = (os.environ.get("PANOPTES_PROGRESS_FINAL_NEWLINE", "0") or "0").lower() in {"1", "true", "yes"}
 
     parent_active = (

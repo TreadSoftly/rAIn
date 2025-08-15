@@ -8,5 +8,5 @@ def test_segmenter_present():
     degrade heat-maps to red rectangles.
     """
     assert load_segmenter() is not None, (
-        "No segmentation weights were loaded – heat-maps will not show masks!"
+        "No segmentation weights were loaded - heat-maps will not show masks!"
     )

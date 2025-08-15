@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 $ErrorActionPreference = "Stop"
 
 function _Here {
@@ -25,7 +25,7 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
 
 # Delegate to the root installer launcher. Root script handles:
 # - Git LFS warmup
-# - Python detection (PS 5.1–safe)
+# - Python detection (PS 5.1-safe)
 # - Command normalization and project inference
 & (Join-Path $Root 'installers\run.ps1') @Args
 exit $LASTEXITCODE

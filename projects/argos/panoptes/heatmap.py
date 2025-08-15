@@ -76,7 +76,7 @@ _dbg("heatmap module init: segmenter ready (see registry log for weight)")
 __all__ = ["heatmap_overlay"]
 
 # ---------------------------------------------------------------------- #
-# helper – normalise *img* into a BGR ndarray we can paint on            #
+# helper - normalise *img* into a BGR ndarray we can paint on            #
 # ---------------------------------------------------------------------- #
 def _to_bgr(img: Image.Image | np.ndarray[Any, Any] | str | Path | tuple[int, int]) -> NDArray[np.uint8]:
     if isinstance(img, np.ndarray):
@@ -105,7 +105,7 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
     alpha: float = 0.4,
     return_mask: bool = False,
     cmap: str = "COLORMAP_JET",  # accepted for CLI parity
-    kernel_scale: float = 5.0,  # ditto – currently unused
+    kernel_scale: float = 5.0,  # ditto - currently unused
     **_: Any,
 ) -> Union[Image.Image, NDArray[np.uint8]]:
     """

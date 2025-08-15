@@ -12,7 +12,7 @@ Hard-locking rules (2025-08-07)
    ``load_detector/segmenter`` is retained exclusively for unit-tests or
    ad-hoc scripts that call those helpers **directly**.
 3. If a required weight is missing we raise **RuntimeError** immediately
-   – downstream code must catch or let the program abort.
+   - downstream code must catch or let the program abort.
 
 Progress note
 ─────────────
@@ -298,7 +298,7 @@ def pick_weight(
 
 
 def load_detector(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO* detector – honouring the override when provided."""
+    """Return a *YOLO* detector - honouring the override when provided."""
     if override is not None:
         chosen = Path(override).expanduser()
         _say(f"task=detect small={small} override={chosen}")
@@ -310,7 +310,7 @@ def load_detector(*, small: bool = False, override: Optional[Union[str, Path]] =
 
 
 def load_segmenter(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO-Seg* model – abort if no suitable weight is found."""
+    """Return a *YOLO-Seg* model - abort if no suitable weight is found."""
     if override is not None:
         chosen = Path(override).expanduser()
         _say(f"task=heatmap small={small} override={chosen}")
@@ -322,7 +322,7 @@ def load_segmenter(*, small: bool = False, override: Optional[Union[str, Path]] 
 
 
 def load_classifier(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO-Cls* model – abort if no suitable weight is found."""
+    """Return a *YOLO-Cls* model - abort if no suitable weight is found."""
     if override is not None:
         chosen = Path(override).expanduser()
         _say(f"task=classify small={small} override={chosen}")
@@ -334,7 +334,7 @@ def load_classifier(*, small: bool = False, override: Optional[Union[str, Path]]
 
 
 def load_pose(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO-Pose* model – abort if no suitable weight is found."""
+    """Return a *YOLO-Pose* model - abort if no suitable weight is found."""
     if override is not None:
         chosen = Path(override).expanduser()
         _say(f"task=pose small={small} override={chosen}")
@@ -346,7 +346,7 @@ def load_pose(*, small: bool = False, override: Optional[Union[str, Path]] = Non
 
 
 def load_obb(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO-OBB* model – abort if no suitable weight is found."""
+    """Return a *YOLO-OBB* model - abort if no suitable weight is found."""
     if override is not None:
         chosen = Path(override).expanduser()
         _say(f"task=obb small={small} override={chosen}")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Argos bootstrap – zero-touch, idempotent, fast.
+Argos bootstrap - zero-touch, idempotent, fast.
 
 What it does (one-time on first run):
   • creates a private venv OUTSIDE the repo (no .venv mess)

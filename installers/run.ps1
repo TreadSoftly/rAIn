@@ -80,7 +80,7 @@ if ($sawBuild) {
 }
 
 if ($proj -eq 'argos') {
-  # PS 5.1–safe Python detection
+  # PS 5.1-safe Python detection
   $pyExe  = $null
   $pyArgs = @()
   $cmd = Get-Command py -ErrorAction SilentlyContinue

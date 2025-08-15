@@ -340,11 +340,11 @@ def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> T
     We prefer our own downloader (byte-accurate progress) and only fall
     back to Ultralytics when needed (and silence its tqdm bars).
     Possible actions:
-      • "present"   – already existed in dst
-      • "download"  – fetched via direct URL (Argos progress)
-      • "copied"    – YOLO fetched elsewhere; we copied into dst
-      • "exported"  – exported ONNX from a matching .pt
-      • "failed"    – nothing worked
+      • "present"   - already existed in dst
+      • "download"  - fetched via direct URL (Argos progress)
+      • "copied"    - YOLO fetched elsewhere; we copied into dst
+      • "exported"  - exported ONNX from a matching .pt
+      • "failed"    - nothing worked
     """
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
@@ -517,7 +517,7 @@ def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
 
     eng_any = ProgressEngine()
     eng = cast(ProgressLike, eng_any)
-    with live_percent(eng, prefix="WEIGHTS"):
+    with live_percent(eng, prefix="FETCHING MODELS"):
         eng.set_total(float(len(names)))
         for nm in names:
             try:
@@ -618,24 +618,29 @@ def _ensure_env_hint() -> None:
 
 
 def _menu() -> int:
-    """Loop until user selects a valid option (0–4)."""
+    """Loop until user selects a valid option (0-4)."""
     while True:
         typer.echo(
             textwrap.dedent(
                 """
-                What would you like to install?
+                ~ Argos ~ The Many Eyed Sentinel
+                An intelligent visual detection system.
 
+                What would you like to install?
                 1) Default Argos pack
                 2) Full pack (ALL versions/sizes; ALL tasks; .pt + .onnx)
-                3) Size pack (choose 1 version/size/tasks/formats)
+                3) Size pack (choose one version/size/tasks/formats)
                 4) Custom builder (multi-select; preview; extras)
                 0) Exit
                 """
             ).strip()
         )
-        pick = typer.prompt("Pick [0–4, ? for help]", default="1").strip().lower()
+        pick = typer.prompt("Pick [0-4, ? for help]", default="1 or ?").strip().lower()
         if pick in {"?", "h", "help"}:
-            typer.echo("Tips: numbers or names are fine in the builder; 'all' works at every step.")
+            typer.echo("Typing numbers or names are fine in the builder.")
+            typer.echo("What you are chosing to download are model weights for types of visual detection that Argos can perform.")
+            typer.echo("YOLO models are named by version (v8, v11, v12), size (n/s/m/l/x), task (det/seg/pose/cls/obb), and format (.pt/.onnx).")
+            typer.echo("Choosing the default pack (1) is a good starting point for most users.")
             continue
         try:
             choice = int(pick)
@@ -643,7 +648,7 @@ def _menu() -> int:
                 return choice
         except ValueError:
             pass
-        typer.secho("Invalid choice. Try 0–4 or '?' for help.", fg="yellow")
+        typer.secho("Invalid choice. Try 0-4 or '?' for help.", fg="yellow")
 
 
 def _ask_size_pack() -> List[str]:
@@ -835,7 +840,7 @@ def _quick_check() -> None:
     # Progress-enabled path: bound progress to expected so it never exceeds 100%.
     eng_any = ProgressEngine()  # type: ignore[call-arg]
     eng = cast(ProgressLike, eng_any)
-    with live_percent(eng, prefix=f"SMOKE {task.upper()}"):  # type: ignore[misc]
+    with live_percent(eng, prefix=f"ARGOS TESTING {task.upper()}"):  # type: ignore[misc]
         try:
             eng.set_total(float(expected))
         except Exception:
@@ -998,7 +1003,7 @@ def main() -> None:
     if bad:
         _warn(f"Skipped/failed: {len(bad)}")
         for n in _dedupe(bad):
-            typer.echo(f"  – {n}")
+            typer.echo(f"  - {n}")
         _warn("Those names may not be hosted yet, or export failed.")
 
     # Manifest for reproducibility (user-agnostic, relative paths)

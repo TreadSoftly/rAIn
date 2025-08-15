@@ -1,11 +1,11 @@
 # \rAIn\projects\argos\lambda\heatmap.py
 """
-lambda.heatmap  – server-side segmentation overlay helper
+lambda.heatmap  - server-side segmentation overlay helper
 =========================================================
 
 Lock-down (2025-08-07)
 ────────────────────────────────────────────────────────────────────────
-* **Strict weights** – only the path(s) declared in
+* **Strict weights** - only the path(s) declared in
   `panoptes.model_registry.WEIGHT_PRIORITY["heatmap"]` are consulted.
 * A segmentation model is loaded once, at import-time, via
   `load_segmenter()`; if the weight is missing the **module import aborts**

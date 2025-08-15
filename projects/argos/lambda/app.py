@@ -4,7 +4,7 @@ AWS-Lambda entry-point for the Argos demo
 
 Lock-down (2025-08-07)
 ────────────────────────────────────────────────────────────────────
-* **Strict weights** – the only files ever consulted are those
+* **Strict weights** - the only files ever consulted are those
   referenced in `panoptes.model_registry.WEIGHT_PRIORITY`.
 * No `panoptes_*` environment variables, no directory walks.
 * Prefer small/fast weights in Lambda for cold-starts.
@@ -168,7 +168,7 @@ def _fetch_image(src: str, timeout: int = 10) -> Image.Image:
 
 def _run_inference(img: Image.Image) -> NDArray[np.float32]:
     """
-    Run object detection – returns ndarray [N,6] (x1,y1,x2,y2,conf,cls).
+    Run object detection - returns ndarray [N,6] (x1,y1,x2,y2,conf,cls).
     *Never* returns None; if a dummy detector is in use this yields (0,6).
     """
     with _status_ctx("detect"):
@@ -187,7 +187,7 @@ def _run_inference(img: Image.Image) -> NDArray[np.float32]:
     return arr.astype(np.float32).reshape(-1, 6)
 
 
-# ✨ PUBLIC alias – unit-tests monkey-patch this symbol directly
+# ✨ PUBLIC alias - unit-tests monkey-patch this symbol directly
 run_inference = _run_inference  # noqa: E305
 
 

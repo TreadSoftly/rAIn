@@ -1,10 +1,10 @@
 # \rAIn\projects\argos\panoptes\predict_heatmap_mp4.py
 """
-predict_heatmap_mp4.py – per-frame segmentation / heat-map overlay for videos.
+predict_heatmap_mp4.py - per-frame segmentation / heat-map overlay for videos.
 
 Lock-down (2025-08-07)
 ────────────────────────────────────────────────────────────────────
-* A **segmentation** weight is mandatory – either:
+* A **segmentation** weight is mandatory - either:
       1. an explicit *weights=* argument whose filename contains “-seg”
       2. the hard-coded  WEIGHT_PRIORITY["heatmap"]  entry.
 
@@ -158,7 +158,7 @@ def _opencv_reencode_to_mp4(src_avi: Path, dst_mp4: Path, fps: float) -> bool:
 
 
 # ───────────────────────── main worker ─────────────────────
-def main(  # noqa: C901 – unavoidable CLI glue
+def main(  # noqa: C901 - unavoidable CLI glue
     src: str | Path,
     *,
     weights: str | Path | None = None,
@@ -317,7 +317,7 @@ def main(  # noqa: C901 – unavoidable CLI glue
             else:
                 raise FileNotFoundError("ffmpeg not found")
         except (FileNotFoundError, subprocess.CalledProcessError):
-            # FFmpeg missing or failed – try OpenCV re-encode to MP4
+            # FFmpeg missing or failed - try OpenCV re-encode to MP4
             ok_mp4 = _opencv_reencode_to_mp4(avi, preferred, fps=fps)
             if ok_mp4:
                 avi.unlink(missing_ok=True)

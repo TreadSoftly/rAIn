@@ -43,7 +43,7 @@ class ArgosStack(Stack):
     def __init__(self, scope: Construct, id: str, **kwargs: Any) -> None:
         super().__init__(scope, id, **kwargs)
 
-        # ── S3 bucket – uploads (optionally) trigger inference ───────────────
+        # ── S3 bucket - uploads (optionally) trigger inference ───────────────
         bucket_in = s3.Bucket(
             self,
             "InputBucket",

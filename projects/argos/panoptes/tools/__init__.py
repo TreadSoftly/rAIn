@@ -1,1 +1,1 @@
-"""panoptes.tools – package marker (intentionally empty)."""
+"""panoptes.tools - package marker (intentionally empty)."""

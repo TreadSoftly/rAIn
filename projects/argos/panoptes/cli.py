@@ -1,6 +1,6 @@
 # \rAIn\projects\argos\panoptes\cli.py
 """
-panoptes.cli – unified Typer front-end (“argos”)
+panoptes.cli - unified Typer front-end (“argos”)
 
 Tasks: detect | heatmap | geojson on images **and** videos.
 Model selection is delegated to *panoptes.model_registry* and is strictly enforced.
@@ -222,8 +222,8 @@ def _man_models() -> str:
 def _man_tuning() -> str:
     return textwrap.dedent("""
     TUNING
-        --conf FLOAT         [detect/heatmap] confidence threshold 0–1 (default 0.40)
-        --alpha FLOAT        heat-map blend 0–1 (default 0.40)
+        --conf FLOAT         [detect/heatmap] confidence threshold 0-1 (default 0.40)
+        --alpha FLOAT        heat-map blend 0-1 (default 0.40)
         --cmap NAME          OpenCV/Matplotlib colour-map (default COLORMAP_JET)
         -k / --k FLOAT       σ area / kernel_scale (smaller → blurrier)
         --small / --fast     use nano models for live video
