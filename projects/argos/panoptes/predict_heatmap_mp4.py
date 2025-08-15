@@ -40,7 +40,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, ContextManager, Protocol, Tuple, TypeAlias, cast
+from typing import Any, Callable, ContextManager, Protocol, Tuple, Union, cast
 
 import cv2
 import numpy as np
@@ -83,7 +83,7 @@ def _say(msg: str) -> None:
 
 
 # ───────────────────────── helpers ──────────────────────────
-CLIVal: TypeAlias = bool | int | float | str
+CLIVal = Union[bool, int, float, str]
 
 class SpinnerLike(Protocol):
     def update(self, **kwargs: Any) -> "SpinnerLike": ...
