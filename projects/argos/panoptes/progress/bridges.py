@@ -23,6 +23,7 @@ class _SpinnerLike(Protocol):
     ) -> bool | None: ...
     def update(self, **kwargs: Any) -> Self: ...
 
+
 def _bind_spinner(engine: ProgressEngine, spinner: _SpinnerLike) -> Callable[[], None]:
     """Subscribe engine → spinner; return unsubscribe."""
     def on_update(st: ProgressState) -> None:
@@ -40,25 +41,90 @@ def _bind_spinner(engine: ProgressEngine, spinner: _SpinnerLike) -> Callable[[],
     except Exception:
         return lambda: None
 
+
+class _NullSpinner:
+    """
+    No-op spinner used as a safe fallback when rich spinner initialization
+    fails (e.g., invalid handle on Windows under pytest capture).
+    """
+    def __enter__(self) -> "_NullSpinner":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool | None:
+        return False
+
+    def update(self, **kwargs: Any) -> "_NullSpinner":
+        return self
+
+
 @contextmanager
 def live_percent(engine: ProgressEngine, *, prefix: str = "PROGRESS") -> Generator[_SpinnerLike, None, None]:
     """
     Context manager that opens a percent spinner and keeps it in sync with engine.
     Yields the spinner (with optional `.engine` attr attached).
+
+    Robust against environments where the underlying stream is not a valid
+    handle (e.g., Windows + pytest capture). Falls back to a no-op spinner.
     """
-    sp = percent_spinner(prefix=prefix, stream=getattr(sys, "__stderr__", sys.stderr))  # prefer real stderr
+    # Prefer real stderr so progress remains visible even when stdio is redirected
+    stream = getattr(sys, "__stderr__", sys.stderr)
+
+    # Try to create the rich spinner
+    sp = percent_spinner(prefix=prefix, stream=stream)  # type: ignore[call-arg]
     sp_typed = cast(_SpinnerLike, sp)
     try:
         setattr(sp_typed, "engine", engine)  # optional introspection
     except Exception:
         pass
 
+    # Bind updates to the spinner
     unsub = _bind_spinner(engine, sp_typed)
+
+    # Attempt to enter the spinner; if that fails, fall back to a Null spinner
+    entered = False
     try:
-        with sp_typed:
+        try:
+            sp_typed.__enter__()  # may raise (e.g., invalid stream handle)
+            entered = True
+        except Exception:
+            # Unbind the failed spinner and switch to a safe no-op
+            try:
+                unsub()
+            except Exception:
+                pass
+            null_sp = _NullSpinner()
+            unsub2 = _bind_spinner(engine, null_sp)
+            try:
+                with null_sp:
+                    yield null_sp
+            finally:
+                try:
+                    unsub2()
+                except Exception:
+                    pass
+            return
+
+        # If we got here, the rich spinner is active
+        try:
             yield sp_typed
-    finally:
+        finally:
+            try:
+                if entered:
+                    sp_typed.__exit__(None, None, None)
+            finally:
+                try:
+                    unsub()
+                except Exception:
+                    pass
+    except Exception:
+        # Ensure we always unbind on unexpected errors
         try:
             unsub()
         except Exception:
             pass
+        raise

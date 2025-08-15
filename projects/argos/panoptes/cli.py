@@ -944,6 +944,7 @@ def target(  # noqa: C901
     done = 0
     produced: list[Path] = []         # all outputs from this run
     per_input_outs: dict[str, list[Path]] = {}  # optional grouping
+    printed_json = False              # if True, suppress trailing summary on stdout
 
     prefix = task_final.upper()
     with _maybe_spinner(prefix=f"ARGOS {prefix}", final_newline=True) as sp:
@@ -1028,7 +1029,12 @@ def target(  # noqa: C901
                     if not quiet:
                         typer.secho(f"[panoptes] image/url: {item} → task=geojson (no model required)", err=True)
 
-                with _silence_stdio(quiet):
+                # For geojson + remote URL, do NOT silence stdout — the worker prints JSON to stdout.
+                suppress_stdio = quiet
+                if task_final == "geojson" and _is_url(item):
+                    suppress_stdio = False
+
+                with _silence_stdio(suppress_stdio):
                     result = _run_single(
                         item,
                         model=model,
@@ -1037,6 +1043,10 @@ def target(  # noqa: C901
                         quiet=quiet,
                         **hm_kwargs,
                     )
+
+                # Mark that JSON was printed for remote-URL geojson so we don't add any trailing text.
+                if task_final == "geojson" and _is_url(item):
+                    printed_json = True
 
                 # Prefer returned paths if provided; fall back to results diff.
                 # Normalize to List[Path]
@@ -1065,17 +1075,19 @@ def target(  # noqa: C901
             raise typer.Exit(2)
 
     # ── Final summary with clickable file names ──────────────────────────────
-    if produced:
-        typer.echo("")  # spacer
-        typer.echo("Results (Ctl + Click To Open):")
-        for p in produced:
-            try:
-                typer.echo(f"  - {_clickable_basename(p)}")
-            except Exception:
-                typer.echo(f"  - {p.name}  ({str(p)})")
-    else:
-        typer.echo("")  # spacer
-        typer.echo("No new result files were detected.")
+    # If we already printed GeoJSON to stdout (URL case), do NOT print any summary text.
+    if not printed_json:
+        if produced:
+            typer.echo("")  # spacer
+            typer.echo("Results (Ctl + Click To Open):")
+            for p in produced:
+                try:
+                    typer.echo(f"  - {_clickable_basename(p)}")
+                except Exception:
+                    typer.echo(f"  - {p.name}  ({str(p)})")
+        else:
+            typer.echo("")  # spacer
+            typer.echo("No new result files were detected.")
 
 # ────────────────────────────────────────────────────────────────────────────
 #  entry-point glue
