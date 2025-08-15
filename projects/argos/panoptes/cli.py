@@ -29,6 +29,24 @@ Notes
 
 from __future__ import annotations
 
+# ────────────────────────────────────────────────────────────────────────────
+#  Py<3.11 compatibility: ensure typing.Self exists so imports in submodules
+#  like "from typing import Self" won't crash under Python 3.9/3.10.
+#  We install a shim onto the typing module *before* importing anything else
+#  that might rely on it.
+# ────────────────────────────────────────────────────────────────────────────
+try:
+    # Python 3.11+ — already present
+    from typing import Self as _ArgosTypingSelf  # type: ignore
+except Exception:
+    try:
+        from typing_extensions import Self as _ArgosTypingSelf  # type: ignore
+    except Exception:
+        class _ArgosTypingSelf:  # minimal placeholder
+            pass
+    import typing as _argos_typing_mod
+    setattr(_argos_typing_mod, "Self", _ArgosTypingSelf)
+
 import fnmatch
 import os
 import re
