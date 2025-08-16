@@ -11,7 +11,6 @@ $env:PANOPTES_PROGRESS_ACTIVE = '0'
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 
-# Robust script location (works even if pasted into a console)
 function _Here {
   if ($PSCommandPath) { return (Split-Path -Parent $PSCommandPath) }
   if ($MyInvocation.MyCommand.Path) { return (Split-Path -Parent $MyInvocation.MyCommand.Path) }
@@ -35,14 +34,21 @@ function Ensure-GitLFS {
 }
 
 # Parse args
-$proj = $null; $tokens = @(); $sawBuild = $false
+$proj = $null; $tokens = @(); $sawBuild = $false; $liveMode = $false
+$foundL = $false; $foundV = $false
 foreach ($a in $Args) {
   $la = $a.ToLowerInvariant()
   if     ($la -in @('run','me')) { continue }
   elseif ($la -in @('build','package','pack')) { $sawBuild = $true }
   elseif ($la -in @('argos','argos:run','run:argos','argos:build','build:argos')) { $proj = 'argos' }
-  else { $tokens += $a }
+  elseif ($la -in @('lv','livevideo','live','video','ldv','lvd')) { $liveMode = $true }
+  else {
+    if ($la -eq 'l') { $foundL = $true }
+    if ($la -eq 'v') { $foundV = $true }
+    $tokens += $a
+  }
 }
+if (-not $liveMode -and $foundL -and $foundV) { $liveMode = $true }
 
 # Infer project from CWD
 $cwd = (Get-Location).Path
@@ -79,21 +85,19 @@ if ($sawBuild) {
   return
 }
 
-if ($proj -eq 'argos') {
-  # PS 5.1-safe Python detection
-  $pyExe  = $null
-  $pyArgs = @()
-  $cmd = Get-Command py -ErrorAction SilentlyContinue
-  if ($cmd) { $pyExe = $cmd.Source; $pyArgs = @('-3') }
-  if (-not $pyExe) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue; if ($cmd) { $pyExe = $cmd.Source } }
-  if (-not $pyExe) { $cmd = Get-Command python  -ErrorAction SilentlyContinue; if ($cmd) { $pyExe = $cmd.Source } }
-  if (-not $pyExe) { throw "Python 3 not found." }
+# PS 5.1-safe Python detection
+$pyExe  = $null
+$pyArgs = @()
+$cmd = Get-Command py -ErrorAction SilentlyContinue
+if ($cmd) { $pyExe = $cmd.Source; $pyArgs = @('-3') }
+if (-not $pyExe) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue; if ($cmd) { $pyExe = $cmd.Source } }
+if (-not $pyExe) { $cmd = Get-Command python  -ErrorAction SilentlyContinue; if ($cmd) { $pyExe = $cmd.Source } }
+if (-not $pyExe) { throw "Python 3 not found." }
 
-  & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes > $null 2>&1
-  $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
-  $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
-  & $vpy -m panoptes.cli @tokens
-  return
-}
+& $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes > $null 2>&1
+$vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
+$env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
-throw "Unknown project: $proj"
+$pyMod = if ($liveMode) { 'panoptes.live.cli' } else { 'panoptes.cli' }
+& $vpy -m $pyMod @tokens
+return

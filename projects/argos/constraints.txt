@@ -1,3 +1,4 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\constraints.txt
 # projects/argos/constraints.txt
 
 # Resolver anchors used by CI across Linux/macOS/Windows.
@@ -9,8 +10,10 @@ torchvision==0.20.1
 # Torchaudio (only if [audio] extra is installed)
 torchaudio==2.5.1
 
-# OpenCV wheel compatible with NumPy<2.3 and also publishes NP2 wheels
-opencv-python-headless==4.11.0.86
+# OpenCV wheels (GUI on Win/macOS; headless on Linux)
+opencv-python==4.11.0.86          ; platform_system == "Windows"
+opencv-python==4.11.0.86          ; platform_system == "Darwin"
+opencv-python-headless==4.11.0.86 ; platform_system == "Linux"
 
 # NumPy: allow 1.26 or NP2 across Pythons (TV 0.20 cpu wheels need NP>=2.1 on 3.9/3.11)
 numpy>=1.26,<2.3

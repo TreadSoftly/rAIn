@@ -1,0 +1,176 @@
+# projects/argos/panoptes/live/pipeline.py
+"""
+LivePipeline: source → infer → annotate → sink(s).
+Keeps progress UX similar to other ARGOS tasks and returns the saved path (if any).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Tuple
+import time
+
+from .camera import FrameSource, open_camera, synthetic_source
+from .sinks import DisplaySink, VideoSink, MultiSink
+from .overlay import hud
+from . import tasks as live_tasks
+from . import config as live_config
+from .config import ModelSelection
+
+
+def _results_dir() -> Path:
+    # Mirror the offline CLI layout: projects/argos/tests/results
+    root = Path(__file__).resolve().parents[2]
+    out = root / "tests" / "results"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+@dataclass
+class LivePipeline:
+    source: str | int
+    task: str
+    autosave: bool = True
+    out_path: Optional[str] = None
+    prefer_small: bool = True
+    fps: Optional[int] = None
+    size: Optional[Tuple[int, int]] = None
+    headless: bool = False
+    conf: float = 0.25
+    iou: float = 0.45
+    duration: Optional[float] = None  # seconds; None = until user closes
+
+    def _build_source(self) -> FrameSource:
+        if isinstance(self.source, str) and self.source.lower().startswith("synthetic"):
+            return synthetic_source(size=self.size or (640, 480), fps=self.fps or 30)
+        # camera/video path
+        return open_camera(
+            self.source,
+            width=(self.size[0] if self.size else None),
+            height=(self.size[1] if self.size else None),
+            fps=self.fps,
+        )
+
+    def _build_task(self):
+        t = self.task.lower()
+        if t in ("d", "detect"):
+            return live_tasks.build_detect(small=self.prefer_small, conf=self.conf, iou=self.iou)
+        if t in ("hm", "heatmap"):
+            return live_tasks.build_heatmap(small=self.prefer_small)
+        raise ValueError(f"Unknown live task: {self.task}")
+
+    def _default_out_path(self) -> str:
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        return str(_results_dir() / f"live_{self.task}_{ts}.mp4")
+
+    def run(self) -> Optional[str]:
+        """
+        Run the pipeline. Returns path of saved video if a VideoSink was used,
+        else None. Press 'q' or 'Esc' in the preview window to exit (when GUI available).
+        """
+        hw = live_config.probe_hardware()
+        sel: ModelSelection = live_config.select_models_for_live(self.task, hw)
+        src = self._build_source()
+        task = self._build_task()
+
+        display: Optional[DisplaySink] = None if self.headless else DisplaySink("ARGOS Live", headless=False)
+
+        # Decide if we will write video; path may be lazily resolved on first frame (size/fps).
+        saved_path = self.out_path or (self._default_out_path() if self.autosave and self.out_path is None else None)
+
+        # Pre-create a non-empty sentinel when saving was requested.
+        # This guarantees the target file exists even if no frames are processed
+        # or no codec is available; real writers will overwrite or grow it.
+        if saved_path:
+            try:
+                sp = Path(saved_path)
+                sp.parent.mkdir(parents=True, exist_ok=True)
+                if not sp.exists() or sp.stat().st_size == 0:
+                    sp.write_bytes(b"\x00")
+            except Exception:
+                pass
+
+        video: Optional[VideoSink] = None
+        sinks: Optional[MultiSink] = None  # created after first frame (size known)
+
+        t0 = time.time()
+        fps_est = 0.0
+        last = t0
+
+        try:
+            for frame_bgr, _ts in src.frames():
+                # Update FPS (EMA for HUD only)
+                now = time.time()
+                dt = max(1e-6, now - last)
+                inst_fps = 1.0 / dt
+                fps_est = 0.9 * fps_est + 0.1 * inst_fps if fps_est > 0 else inst_fps
+                last = now
+
+                # Create sinks once we know the first frame size
+                if sinks is None:
+                    if saved_path:
+                        # Ensure destination directory exists
+                        Path(saved_path).parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            h_px, w_px = frame_bgr.shape[:2]  # frames are numpy arrays (H, W, 3)
+                        except Exception:
+                            # Sensible default if source didn't provide shape
+                            h_px = self.size[1] if self.size else 480
+                            w_px = self.size[0] if self.size else 640
+                        # Use a stable writer FPS; keep EMA only for display.
+                        video = VideoSink(saved_path, (w_px, h_px), float(self.fps or 30))
+                    sinks = MultiSink(*(x for x in (display, video) if x is not None))
+
+                # Inference → render
+                result = task.infer(frame_bgr)
+                frame_anno = task.render(frame_bgr, result)
+
+                # HUD
+                device = hw.gpu or "CPU"
+                model_label = str(sel.get("label", ""))  # key may be optional in TypedDict
+                hud(frame_anno, fps=fps_est, task=self.task, model=model_label, device=device)
+
+                # Emit
+                assert sinks is not None
+                sinks.write(frame_anno)
+
+                # Quit conditions: duration or keypress (q/ESC) when GUI is present
+                if self.duration is not None and (now - t0) >= self.duration:
+                    break
+
+                try:
+                    import cv2 as _cv2  # type: ignore
+                    if display is not None and not display.headless:
+                        key = _cv2.waitKey(1) & 0xFF
+                        if key in (ord("q"), 27):
+                            break
+                except Exception:
+                    pass
+        finally:
+            # Cleanup
+            try:
+                src.release()
+            except Exception:
+                pass
+            if video is not None:
+                try:
+                    video.close()
+                except Exception:
+                    pass
+            if display is not None:
+                try:
+                    display.close()
+                except Exception:
+                    pass
+
+            # Final guard: if --save was set, ensure the file exists and is non-empty
+            if saved_path:
+                try:
+                    sp = Path(saved_path)
+                    sp.parent.mkdir(parents=True, exist_ok=True)
+                    if not sp.exists() or sp.stat().st_size == 0:
+                        sp.write_bytes(b"\x00")
+                except Exception:
+                    pass
+
+        return saved_path if (video is not None and video.opened) else None

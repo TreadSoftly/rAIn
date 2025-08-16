@@ -25,7 +25,9 @@ ensure_git_lfs() {
   fi
 }
 
-proj=""; tokens=(); saw_build=0
+proj=""; tokens=(); saw_build=0; live_mode=0
+found_L=0; found_V=0
+
 while (($#)); do
   t="$1"; shift
   lt="${t,,}"
@@ -33,9 +35,20 @@ while (($#)); do
     run|me) ;;
     build|package|pack) saw_build=1 ;;
     argos|argos:run|run:argos|argos:build|build:argos) proj="argos" ;;
+
+    # --- broadened live detection ---
+    lv|livevideo|live|video|ldv|lvd) live_mode=1 ;;
+    l) found_L=1; tokens+=("$t") ;;   # keep token; live CLI will ignore 'l'/'v'
+    v) found_V=1; tokens+=("$t") ;;
+
     *) tokens+=("$t") ;;
   esac
 done
+
+# Spaced form "l d v" → live if both l and v appeared
+if [[ $live_mode -eq 0 && $found_L -eq 1 && $found_V -eq 1 ]]; then
+  live_mode=1
+fi
 
 cwd="$(pwd)"
 if [[ -z "${proj:-}" ]]; then
@@ -80,7 +93,12 @@ if [[ "$proj" == "argos" ]]; then
   "$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes >/dev/null 2>&1 || true
   VPY="$("$PY" "$ROOT/projects/argos/bootstrap.py" --print-venv)"
   export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
-  exec "$VPY" -m panoptes.cli "${tokens[@]}"
+
+  PY_MOD="panoptes.cli"
+  if [[ $live_mode -eq 1 ]]; then
+    PY_MOD="panoptes.live.cli"
+  fi
+  exec "$VPY" -m "$PY_MOD" "${tokens[@]}"
 fi
 
 echo "Unknown project: $proj" >&2

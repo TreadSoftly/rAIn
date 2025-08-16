@@ -35,5 +35,5 @@ if ! grep -Fq '# rAIn installers on PATH' "$PROFILE" 2>/dev/null; then
   } >> "$PROFILE"
 fi
 
-echo "✅ Added to PATH in $PROFILE"
-echo "→ Open a new terminal (or 'source' your profile) to use: build, all, argos, d/detect, hm/heatmap, gj/geojson"
+echo " Added to PATH in $PROFILE"
+echo " Open a new terminal (or 'source' your profile) to use: build, all, argos, d/detect, hm/heatmap, gj/geojson, lv/livevideo"

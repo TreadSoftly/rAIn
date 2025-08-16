@@ -31,6 +31,9 @@ rem --- Parse args ---
 set "PROJ="
 set "SAW_BUILD=0"
 set "TOKENS="
+set "MODE_LIVE=0"
+set "FOUND_L=0"
+set "FOUND_V=0"
 
 :parse
 if "%~1"=="" goto afterparse
@@ -46,11 +49,25 @@ if /I "%~1"=="run:argos"   set "PROJ=argos" & shift & goto parse
 if /I "%~1"=="argos:build" set "PROJ=argos" & set "SAW_BUILD=1" & shift & goto parse
 if /I "%~1"=="build:argos" set "PROJ=argos" & set "SAW_BUILD=1" & shift & goto parse
 
+rem ---- broadened live detection ----
+if /I "%~1"=="lv"         set "MODE_LIVE=1" & shift & goto parse
+if /I "%~1"=="livevideo"  set "MODE_LIVE=1" & shift & goto parse
+if /I "%~1"=="live"       set "MODE_LIVE=1" & shift & goto parse
+if /I "%~1"=="video"      set "MODE_LIVE=1" & shift & goto parse
+if /I "%~1"=="ldv"        set "MODE_LIVE=1" & shift & goto parse
+if /I "%~1"=="lvd"        set "MODE_LIVE=1" & shift & goto parse
+if /I "%~1"=="l"          set "FOUND_L=1"
+if /I "%~1"=="v"          set "FOUND_V=1"
+
 set "TOKENS=%TOKENS% %1"
 shift
 goto parse
 
 :afterparse
+if "%MODE_LIVE%"=="0" (
+  if "%FOUND_L%"=="1" if "%FOUND_V%"=="1" set "MODE_LIVE=1"
+)
+
 echo %CD% | findstr /I "\\projects\\argos" >NUL && set "PROJ=argos"
 
 if not defined PROJ (
@@ -90,5 +107,9 @@ if not defined PY (
 %PY% "%ROOT%\projects\argos\bootstrap.py" --ensure --yes >NUL 2>&1
 for /f "usebackq delims=" %%V in (`%PY% "%ROOT%\projects\argos\bootstrap.py" --print-venv`) do set "VPY=%%V"
 set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
-"%VPY%" -m panoptes.cli %TOKENS%
+
+rem ---- module switch ----
+if "%MODE_LIVE%"=="1" ( set "PYMOD=panoptes.live.cli" ) else ( set "PYMOD=panoptes.cli" )
+
+"%VPY%" -m %PYMOD% %TOKENS%
 exit /b %ERRORLEVEL%

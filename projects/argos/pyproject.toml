@@ -1,3 +1,4 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\pyproject.toml
 [build-system]
 requires      = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
@@ -27,7 +28,9 @@ dependencies = [
   "onnx>=1.12,<1.18",
 
   # ── Imaging / numerics ──
-  "opencv-python-headless>=4.11,<4.12",
+  "opencv-python>=4.11,<4.12 ; platform_system == 'Windows'",
+  "opencv-python>=4.11,<4.12 ; platform_system == 'Darwin'",
+  "opencv-python-headless>=4.11,<4.12 ; platform_system == 'Linux'",
   "numpy!=2.0.*,>=1.26,<2.3",
   "pillow>=10.0,<12.0",
   "pillow-avif-plugin>=1.4",
@@ -69,15 +72,21 @@ onnx-tools = [
 progress-ui = ["halo>=0.0.31", "colorama>=0.4.6"]
 
 [project.scripts]
-target  = "panoptes.cli:main"
-argos   = "panoptes.cli:main"
-d       = "panoptes.cli:main_detect"
-detect  = "panoptes.cli:main_detect"
-hm      = "panoptes.cli:main_heatmap"
-heatmap = "panoptes.cli:main_heatmap"
-gj      = "panoptes.cli:main_geojson"
-geojson = "panoptes.cli:main_geojson"
-all     = "panoptes.cli:main_all"
+target      = "panoptes.cli:main"
+argos       = "panoptes.cli:main"
+d           = "panoptes.cli:main_detect"
+detect      = "panoptes.cli:main_detect"
+hm          = "panoptes.cli:main_heatmap"
+heatmap     = "panoptes.cli:main_heatmap"
+gj          = "panoptes.cli:main_geojson"
+geojson     = "panoptes.cli:main_geojson"
+all         = "panoptes.cli:main_all"
+
+# Live shortcuts
+lv          = "panoptes.live.cli:main"
+live        = "panoptes.live.cli:main"
+livevideo   = "panoptes.live.cli:main"
+argos-live  = "panoptes.live.cli:main"
 
 [tool.hatch.build]
 include = [

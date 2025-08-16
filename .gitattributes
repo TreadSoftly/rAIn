@@ -1,3 +1,4 @@
+# .gitattributes  (repo root)
 # Let Git normalize text automatically
 * text=auto
 
@@ -28,6 +29,10 @@ installers/pack           text eol=lf
 /heatmap                  text eol=lf
 /gj                       text eol=lf
 /geojson                  text eol=lf
+/lv                       text eol=lf
+/livevideo                text eol=lf
+installers/lv             text eol=lf
+installers/livevideo      text eol=lf
 /projects/argos/argos     text eol=lf
 /projects/argos/run       text eol=lf
 /projects/argos/build     text eol=lf

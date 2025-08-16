@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export TERM="${TERM:-xterm-256color}"
+export PYTHONUTF8=1
+export PYTHONUNBUFFERED=1
+export FORCE_COLOR=1
+export PANOPTES_NESTED_PROGRESS=1
+export PANOPTES_PROGRESS_ACTIVE=0
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$HERE/run" argos lv "$@"
