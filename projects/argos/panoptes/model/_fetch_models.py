@@ -109,12 +109,17 @@ DEFAULT_PACK: List[str] = [
     # DETECT
     "yolov8x.pt",
     "yolo11x.pt",
+    "yolo12x.pt",
     "yolo12x.onnx",
+    "yolov8n.onnx",
+    "yolo11n.onnx",
+    "yolo12n.onnx",
 
     # SEG
     "yolo11x-seg.pt",
     "yolo11m-seg.pt",
     "yolov8n-seg.pt",
+    "yolo11n-seg.onnx",
 
     # POSE
     "yolo11s-pose.pt",
