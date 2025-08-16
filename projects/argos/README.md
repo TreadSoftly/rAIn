@@ -6,7 +6,7 @@
 
 <div align="center">
 
-### Install → Run (Quickstart)
+### Summary Hitlist
 
 <table align="center" cellpadding="6" style="border-collapse:collapse; text-align:left;">
   <tr><td>•</td><td><b>Clone</b> → open a terminal in the repo root.</td></tr>
@@ -16,6 +16,8 @@
 </table>
 
 </div>
+
+<br>
 
 <div align="center">
 
@@ -50,7 +52,11 @@ cd rAIn
 
 ```
 
-###### Once you run the .\build or ./build you can just rerun a regular command "build" or "build argos" or "argos build" to get the build selection process again
+<div align="center">
+
+###### NOTE: Once You Run The .\build Or ./build Command You Can Rerun A Regular "build" Command To Get To The Build Selection Process Again.
+
+</div>
 
 <br>
 
@@ -65,7 +71,11 @@ argos -h
 
 ```
 
+<div align="center">
+
 > or
+
+</div>
 
 ```
 argos ?
@@ -76,7 +86,8 @@ argos ?
 
 <div align="center">
 
-> To practice with the media in the tests/raw folder copy and paste: >
+> To Practice With The Media In the Tests/Raw Folder Copy & Paste The Detect Or Heatmap Shorthand Commands: >
+> Please Note You Can Put Your Own Media In The Tests/Raw Folder For Processing!
 
 </div>
 
@@ -100,11 +111,64 @@ all detect
 
 ```
 
+<br> 
+
 <div align="center">
 
-> IMPORTANT: = To Process Your Own Media Files Locate /tests/raw/ Folder And Place Your Media There. Then Run The Desired Commands As Shown Above To Process The Media. Results Will Be Placed In /tests/results/ Folder.
+# Process Your Own Media
+<table align="center" cellpadding="6" style="border-collapse:collapse; text-align:left;">
+  <tr>
+    <td>•</td>
+    <td>
+      <b>IMPORTANT:</b> = To Process Your Own Media Files Locate <code>/tests/raw/</code> Folder And Place Your Media There. Then Run The Desired Commands As Shown Above To Process The Media. Results Will Be Placed In <code>/tests/results/</code> Folder.
+    </td>
+  </tr>
+</table>
 
 </div>
+
+
+<br>
+
+<div align="center">
+  
+# Live Video Webcam Feature
+
+</div>
+
+<div align="center">
+
+> To Use Your Webcam For Live Video Use These Commands: >
+
+</div>
+
+```
+lv d
+
+```
+
+```
+lv hm
+
+```
+
+<div align="center">
+
+> Or Using Full Syntax: >
+
+</div>
+
+```
+livevideo detect
+
+```
+
+```
+livevideo heatmap
+
+```
+
+<br>
 
 <div align="center">
 
@@ -200,10 +264,10 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 
 <!-- Row 1 -->
 <tr>
-<td align="center"><img src="https://github.com/user-attachments/assets/db45bc31-3b7d-4001-b868-eb37589de66c" width="300" alt="Image"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/84fac12c-2ddd-4d2e-8f5c-3a92dd8661b7" width="300" alt="Image"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/c8f90d41-beab-4ac8-ae62-df0c4814c3d6" width="300" alt="Image"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/c2957623-577e-4cf6-b772-038fc6292a2a" width="300" alt="Image"></td>
+  <td align="center"><img src="https://github.com/user-attachments/assets/db45bc31-3b7d-4001-b868-eb37589de66c" width="300" alt="Image"></td>
+  <td align="center"><img src="https://github.com/user-attachments/assets/84fac12c-2ddd-4d2e-8f5c-3a92dd8661b7" width="300" alt="Image"></td>
+  <td align="center"><img src="https://github.com/user-attachments/assets/c8f90d41-beab-4ac8-ae62-df0c4814c3d6" width="300" alt="Image"></td>
+  <td align="center"><img src="https://github.com/user-attachments/assets/655da834-ef00-4de3-879a-8db7011dd608" width="300" alt="Image"></td>
 </tr>
 
 <!-- Row 2 -->
@@ -230,13 +294,14 @@ Segmented Highlights + Tracking | -No ID / -No Confidence Percentages
 <td align="center"><img src="https://github.com/user-attachments/assets/a6d52775-0134-4a8e-9d11-474518d09c89" width="300" alt="Image"></td>
 </tr>
 
-<!-- Row 5 (unchanged) -->
+<!-- Row 5 -->
 <tr>
-<td align="center"><img src="https://github.com/user-attachments/assets/b09a82d2-f930-4204-a732-e437234e551d" width="300" alt="Image"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/fc02e090-3869-4421-be44-6ae5337b109c" width="300" alt="Image"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/d1d7a3d8-25a4-48e4-a6a3-4834bfbe324e" width="300" alt="Image"></td>
-<td align="center"><img src="https://github.com/user-attachments/assets/9a48d1c7-0c7a-4ff6-8d22-a776cd8afe08" width="300" alt="Image"></td>
+  <td align="center"><img src="https://github.com/user-attachments/assets/b09a82d2-f930-4204-a732-e437234e551d" width="300" alt="Image"></td>
+  <td align="center"><img src="https://github.com/user-attachments/assets/fc02e090-3869-4421-be44-6ae5337b109c" width="300" alt="Image"></td>
+  <td align="center"><img src="https://github.com/user-attachments/assets/a27779db-c78b-4968-b920-ce6c641bdb87" width="300" alt="Image"></td>
+  <td align="center"><img src="https://github.com/user-attachments/assets/de3014a9-240e-4ae8-a20c-210d8ab1963c" width="300" alt="Image"></td>
 </tr>
+
 
 </table> <!-- closes the main Image Gallery table -->
 
