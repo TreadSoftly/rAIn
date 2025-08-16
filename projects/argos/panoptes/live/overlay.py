@@ -9,7 +9,7 @@ If OpenCV is missing, these become no-ops and simply return the input frame.
 
 from __future__ import annotations
 
-from typing import Optional, Mapping, cast
+from typing import Optional, Mapping
 
 try:
     import numpy as np
@@ -63,22 +63,49 @@ def draw_boxes_bgr(
 
 def draw_heatmap_bgr(frame: NDArrayU8, mask: NDArrayU8) -> NDArrayU8:
     """
-    Composite a single-channel mask (0..255) over frame as a heatmap.
+    Composite a single-channel mask (0..255) over the frame as a heatmap.
+
+    Only blend where mask > 0. Background remains the original BGR frame.
     """
     frame = _ensure_np(frame)
-    if cv2 is None:
-        # simple alpha blend if OpenCV is absent
-        alpha = 0.4
-        # normalize mask to 0..1
-        m = (mask.astype("float32") / 255.0)[..., None]
-        # tint red-ish
-        tint = frame.copy()
-        tint[..., 2] = 255
-        return (frame * (1 - alpha * m) + tint * (alpha * m)).astype(frame.dtype)
 
-    hm = cv2.applyColorMap(mask.astype("uint8"), cv2.COLORMAP_JET)
-    out = cv2.addWeighted(frame, 0.6, hm, 0.4, 0.0)
-    return cast(NDArrayU8, out)
+    if np is None:
+        return frame
+
+    # OpenCV path: colorize mask with JET and do per-pixel alpha blend
+    if cv2 is not None:
+        mask_u8 = mask.astype("uint8")
+
+        # Colorize the mask (BGR heatmap)
+        hm = cv2.applyColorMap(mask_u8, cv2.COLORMAP_JET)
+
+        # Ensure shapes match the frame
+        H, W = int(frame.shape[0]), int(frame.shape[1])
+        if hm.shape[:2] != (H, W):
+            hm = cv2.resize(hm, (W, H), interpolation=cv2.INTER_NEAREST)
+
+        # Per-pixel alpha scaled by mask intensity (0..alpha_max)
+        alpha_max = 0.4
+        a = (mask_u8.astype("float32") / 255.0) * alpha_max  # (H, W)
+        a3 = a[..., None]  # (H, W, 1)
+
+        # Blend only where mask > 0
+        frame_f = frame.astype("float32")
+        hm_f = hm.astype("float32")
+        out_f = frame_f * (1.0 - a3) + hm_f * a3
+        # Guarantee uint8 dtype for the return type
+        out_u8: NDArrayU8 = np.clip(out_f, 0, 255).astype(np.uint8)
+        return out_u8
+
+    # NumPy fallback (no cv2): red-ish tint, masked only
+    alpha_max = 0.4
+    a = (mask.astype("float32") / 255.0) * alpha_max
+    a3 = a[..., None]
+    tint = frame.copy()
+    tint[..., 2] = 255  # boost red channel
+    out_float = (frame.astype("float32") * (1.0 - a3) + tint.astype("float32") * a3)
+    out_u8: NDArrayU8 = out_float.astype(np.uint8)
+    return out_u8
 
 
 def hud(

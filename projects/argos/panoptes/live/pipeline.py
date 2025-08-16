@@ -68,10 +68,13 @@ class LivePipeline:
         Run the pipeline. Returns path of saved video if a VideoSink was used,
         else None. Press 'q' or 'Esc' in the preview window to exit (when GUI available).
         """
+        # Build the task first, so we can surface its chosen model label in the HUD.
+        task = self._build_task()
+
         hw = live_config.probe_hardware()
         sel: ModelSelection = live_config.select_models_for_live(self.task, hw)
+
         src = self._build_source()
-        task = self._build_task()
 
         display: Optional[DisplaySink] = None if self.headless else DisplaySink("ARGOS Live", headless=False)
 
@@ -123,11 +126,16 @@ class LivePipeline:
 
                 # Inference → render
                 result = task.infer(frame_bgr)
-                frame_anno = task.render(frame_bgr, result)
+                # Draw on a copy so display/write stays BGR even if model touched input.
+                try:
+                    frame_for_draw = frame_bgr.copy()
+                except Exception:
+                    frame_for_draw = frame_bgr
+                frame_anno = task.render(frame_for_draw, result)
 
                 # HUD
                 device = hw.gpu or "CPU"
-                model_label = str(sel.get("label", ""))  # key may be optional in TypedDict
+                model_label = getattr(task, "label", "") or str(sel.get("label", ""))
                 hud(frame_anno, fps=fps_est, task=self.task, model=model_label, device=device)
 
                 # Emit
