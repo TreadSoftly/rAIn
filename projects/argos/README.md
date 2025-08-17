@@ -45,13 +45,6 @@ cd rAIn
 
 ```
 
-> Bash
-
-```
-./build
-
-```
-
 <div align="center">
 
 ###### NOTE: Once You Run The .\build Or ./build Command You Can Rerun A Regular "build" Command To Get To The Build Selection Process Again.
