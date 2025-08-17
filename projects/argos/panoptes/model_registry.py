@@ -110,7 +110,7 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 _DETECT_LIST: list[Path] = [
     MODEL_DIR / "yolov8x.pt",    # MAIN (stable, wide support)
     MODEL_DIR / "yolo11x.pt",    # BACKUP (newer, larger)
-    MODEL_DIR / "yolo12x.onnx",  # extra fast/dev if exported
+    MODEL_DIR / "yolov8n.onnx",  # Fast/Dev/Test | For Live Video | Small Devices
     MODEL_DIR / "yolo12x.pt",
     MODEL_DIR / "yolo11x.onnx",
     MODEL_DIR / "yolov8x.onnx",
@@ -123,30 +123,26 @@ _DETECT_LIST: list[Path] = [
     MODEL_DIR / "yolo11n.pt",
     MODEL_DIR / "yolo11n.onnx",
     MODEL_DIR / "yolov8n.pt",
-    MODEL_DIR / "yolov8n.onnx",
 ]
 
 # SEGMENTATION (heatmaps)
 _HEATMAP_LIST: list[Path] = [
     MODEL_DIR / "yolo11x-seg.pt",   # MAIN
-    MODEL_DIR / "yolo11x-seg.onnx",
+    MODEL_DIR / "yolo11x-seg.onnx", # BACKUP
+    MODEL_DIR / "yolov8n-seg.onnx", # Fast/Dev/Test | For Live Video | Small Devices
+    MODEL_DIR / "yolov8x-seg.pt",
     MODEL_DIR / "yolo11s-seg.pt",
     MODEL_DIR / "yolo11s-seg.onnx",
-    MODEL_DIR / "yolov8x-seg.pt",
     MODEL_DIR / "yolov8x-seg.onnx",
-    # Note: YOLO12 -seg weights may not be hosted by Ultralytics yet; keep near bottom.
-    MODEL_DIR / "yolo12s-seg.onnx",
-    MODEL_DIR / "yolo12s-seg.pt",
     MODEL_DIR / "yolo11n-seg.pt",
     MODEL_DIR / "yolo11n-seg.onnx",
     MODEL_DIR / "yolov8n-seg.pt",
-    MODEL_DIR / "yolov8n-seg.onnx",
 ]
 
 # CLASSIFICATION
 _CLASSIFY_LIST: list[Path] = [
-    MODEL_DIR / "yolo11x-cls.pt",
     MODEL_DIR / "yolov8x-cls.pt",
+    MODEL_DIR / "yolo11x-cls.pt",
     MODEL_DIR / "yolo11s-cls.pt",
     MODEL_DIR / "yolov8s-cls.pt",
     MODEL_DIR / "yolo11n-cls.pt",
@@ -155,8 +151,8 @@ _CLASSIFY_LIST: list[Path] = [
 
 # POSE (keypoints)
 _POSE_LIST: list[Path] = [
-    MODEL_DIR / "yolo11x-pose.pt",
     MODEL_DIR / "yolov8x-pose.pt",
+    MODEL_DIR / "yolo11x-pose.pt",
     MODEL_DIR / "yolo11s-pose.pt",
     MODEL_DIR / "yolov8s-pose.pt",
     MODEL_DIR / "yolo11n-pose.pt",
@@ -165,8 +161,8 @@ _POSE_LIST: list[Path] = [
 
 # OBB (oriented boxes)
 _OBB_LIST: list[Path] = [
-    MODEL_DIR / "yolo11x-obb.pt",
     MODEL_DIR / "yolov8x-obb.pt",
+    MODEL_DIR / "yolo11x-obb.pt",
     MODEL_DIR / "yolo11s-obb.pt",
     MODEL_DIR / "yolov8s-obb.pt",
     MODEL_DIR / "yolo11n-obb.pt",
@@ -175,35 +171,33 @@ _OBB_LIST: list[Path] = [
 
 # “small / fast” (live video / tiny devices)
 _DETECT_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolo12n.onnx",
-    MODEL_DIR / "yolov8n.pt",
-    MODEL_DIR / "yolo11n.pt",
-    MODEL_DIR / "yolov8n.onnx",
-    MODEL_DIR / "yolo11n.onnx",
+    MODEL_DIR / "yolov8n.onnx", # MAIN
+    MODEL_DIR / "yolo11n.onnx", # BACKUP
+    MODEL_DIR / "yolov8n.pt",   # Large File Main
+    MODEL_DIR / "yolo11n.pt",   # Large File Backup
+    MODEL_DIR / "yolo11n.onnx", # Catch-All Backup
 ]
 
 _HEATMAP_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolo12s-seg.onnx",
-    MODEL_DIR / "yolo11n-seg.onnx",
     MODEL_DIR / "yolov8n-seg.onnx",
-    MODEL_DIR / "yolo12s-seg.pt",
-    MODEL_DIR / "yolo11n-seg.pt",
+    MODEL_DIR / "yolo11n-seg.onnx",
     MODEL_DIR / "yolov8n-seg.pt",
+    MODEL_DIR / "yolo11n-seg.pt",
 ]
 
 _CLASSIFY_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolo11n-cls.pt",
     MODEL_DIR / "yolov8n-cls.pt",
+    MODEL_DIR / "yolo11n-cls.pt",
 ]
 
 _POSE_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolo11n-pose.pt",
     MODEL_DIR / "yolov8n-pose.pt",
+    MODEL_DIR / "yolo11n-pose.pt",
 ]
 
 _OBB_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolo11n-obb.pt",
     MODEL_DIR / "yolov8n-obb.pt",
+    MODEL_DIR / "yolo11n-obb.pt",
 ]
 
 WEIGHT_PRIORITY: dict[str, list[Path]] = {

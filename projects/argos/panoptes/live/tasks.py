@@ -42,8 +42,8 @@ from panoptes.model_registry import (  # type: ignore[reportMissingTypeStubs]
 #   • Set to an absolute path or MODEL_DIR / "file.pt"
 #   • Leave as None to let model_registry choose via WEIGHT_PRIORITY
 # ─────────────────────────────────────────────────────────────────────
-LIVE_DETECT_OVERRIDE: Optional[Union[str, Path]]  = MODEL_DIR / "yolo12n.onnx"
-LIVE_HEATMAP_OVERRIDE: Optional[Union[str, Path]] = MODEL_DIR / "yolo11n-seg.onnx"
+LIVE_DETECT_OVERRIDE: Optional[Union[str, Path]]  = MODEL_DIR / "yolov8n.onnx"
+LIVE_HEATMAP_OVERRIDE: Optional[Union[str, Path]] = MODEL_DIR / "yolov8n-seg.onnx"
 
 
 class TaskAdapter(Protocol):

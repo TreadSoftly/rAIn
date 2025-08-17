@@ -110,32 +110,37 @@ DEFAULT_PACK: List[str] = [
     "yolov8x.pt",
     "yolo11x.pt",
     "yolo12x.pt",
-    "yolo12x.onnx",
+    # LIGHT/DEV/TEST Live Video/Small Deivce
+    "yolov8n.pt",
     "yolov8n.onnx",
+    "yolo11n.pt",
     "yolo11n.onnx",
+    "yolo12n.pt",
     "yolo12n.onnx",
 
     # SEG
+    "yolov8x-seg.pt",
+    "yolov8n-seg.onnx",
     "yolo11x-seg.pt",
-    "yolo11m-seg.pt",
-    "yolov8n-seg.pt",
     "yolo11n-seg.onnx",
 
     # POSE
-    "yolo11s-pose.pt",
-    "yolov8n-pose.pt",
+    "yolov8x-pose.pt",
+    "yolov8n-pose.onnx",
+    "yolo11x-pose.pt",
+    "yolo11n-pose.onnx",
 
     # CLS
-    "yolo11s-cls.pt",
-    "yolov8n-cls.pt",
+    "yolov8x-cls.pt",
+    "yolov8n-cls.onnx",
+    "yolo11x-cls.pt",
+    "yolo11n-cls.onnx",
 
     # OBB
-    "yolo11s-obb.pt",
-    "yolov8n-obb.pt",
-
-    # LIGHT/DEV extras
-    "yolo12m.onnx",
-    "yolo12n.onnx",
+    "yolov8x-obb.pt",
+    "yolov8n-obb.onnx",
+    "yolo11x-obb.pt",
+    "yolo11n-obb.onnx",
 ]
 
 # ---------------------------------------------------------------------
@@ -146,9 +151,9 @@ def _mk(ver: str, size: str, task: str, ext: str) -> str:
     Construct official Ultralytics-style names.
 
     Ultralytics naming:
-      • YOLOv8:  yolov8{s}.pt / yolov8{s}-seg.pt / -pose / -cls / -obb
-      • YOLO11:  yolo11{s}.pt / yolo11{s}-seg.pt / -pose / -cls / -obb
-      • YOLO12:  yolo12{s}.pt / yolo12{s}-seg.pt / -pose / -cls / -obb
+    • YOLOv8:  yolov8{s}.pt / yolov8{s}-seg.pt / -pose / -cls / -obb
+    • YOLO11:  yolo11{s}.pt / yolo11{s}-seg.pt / -pose / -cls / -obb
+    • YOLO12:  yolo12{s}.pt / yolo12{s}-seg.pt / -pose / -cls / -obb
     """
     base = f"yolov{ver}{size}" if ver == "8" else f"yolo{ver}{size}"
     suf = {"det": "", "seg": "-seg", "pose": "-pose", "cls": "-cls", "obb": "-obb"}[task]
@@ -258,9 +263,9 @@ def _looks_like_text_header(bs: bytes) -> bool:
 def _validate_weight(p: Path) -> bool:
     """
     Basic sanity for .pt / .onnx:
-      - exists
-      - size ≥ 1MB (avoid truncated blobs)
-      - not an HTML/JSON error page
+    - exists
+    - size ≥ 1MB (avoid truncated blobs)
+    - not an HTML/JSON error page
     """
     try:
         if not p.exists():
