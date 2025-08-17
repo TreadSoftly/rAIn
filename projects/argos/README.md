@@ -9,9 +9,9 @@
 ### Summary Hitlist
 
 <table align="center" cellpadding="6" style="border-collapse:collapse; text-align:left;">
-  <tr><td>•</td><td><b>Clone</b> → open a terminal in the repo root.</td></tr>
-  <tr><td>•</td><td><b>Zero-touch bootstrap</b>: first run auto-creates a venv, installs Torch (CPU if no CUDA), installs the project editable, fetches chosen weights, and writes launchers.</td></tr>
-  <tr><td>•</td><td><b>Media in</b> → put images/videos in <code>projects/argos/tests/raw/</code>. (Assets live in <code>tests/assets</code>.)</td></tr>
+  <tr><td>•</td><td><b>git clone https://github.com/TreadSoftly/rAIn.git</b> → Open A Terminal In The Repo Root.</td></tr>
+  <tr><td>•</td><td><b>Zero-Touch Bootstrap Automation</b>: First Run Auto-Creates .venv, Installs Torch (CPU If No CUDA), Installs The Project Editable, Fetches Chosen Weights, & Writes Launchers.</td></tr>
+  <tr><td>•</td><td><b>Media in</b> → Put Your Images/Videos In <code>projects/argos/tests/raw/</code>.</td></tr>
   <tr><td>•</td><td><b>Results out</b> → processed files land in <code>projects/argos/tests/results/</code> with helpful suffixes (e.g., <code>_boxes</code>, <code>_heat</code>).</td></tr>
 </table>
 
@@ -87,6 +87,11 @@ argos ?
 <div align="center">
 
 > To Practice With The Media In the Tests/Raw Folder Copy & Paste The Detect Or Heatmap Shorthand Commands: >
+
+</div>
+
+<div align="center">
+  
 > Please Note You Can Put Your Own Media In The Tests/Raw Folder For Processing!
 
 </div>
@@ -123,9 +128,29 @@ all detect
       <b>IMPORTANT:</b> = To Process Your Own Media Files Locate <code>/tests/raw/</code> Folder And Place Your Media There. Then Run The Desired Commands As Shown Above To Process The Media. Results Will Be Placed In <code>/tests/results/</code> Folder.
     </td>
   </tr>
+  <tr>
+    <td>•</td>
+    <td>
+      <code>d &lt;YOURFILE&gt;</code> or <code>detect &lt;YOURFILE&gt;</code> = Run object detection on your file.
+    </td>
+  </tr>
+  <tr>
+    <td>•</td>
+    <td>
+      <code>hm &lt;YOURFILE&gt;</code> or <code>heatmap &lt;YOURFILE&gt;</code> = Generate a heatmap overlay for your file.
+    </td>
+  </tr>
+  <tr>
+    <td>•</td>
+    <td>
+      <code>lv d</code>, <code>livevideo detect</code>, <code>lv hm</code>, or <code>livevideo heatmap</code> = Run live video stream with detection or heatmap.
+    </td>
+  </tr>
 </table>
 
 </div>
+
+
 
 
 <br>
