@@ -12,7 +12,7 @@
   <tr><td>•</td><td><b>git clone https://github.com/TreadSoftly/rAIn.git</b> → Open A Terminal In The Repo Root.</td></tr>
   <tr><td>•</td><td><b>Zero-Touch Bootstrap Automation</b>: First Run Auto-Creates .venv, Installs Torch (CPU If No CUDA), Installs The Project Editable, Fetches Chosen Weights, & Writes Launchers.</td></tr>
   <tr><td>•</td><td><b>Media in</b> → Put Your Images/Videos In <code>projects/argos/tests/raw/</code>.</td></tr>
-  <tr><td>•</td><td><b>Results out</b> → processed files land in <code>projects/argos/tests/results/</code> with helpful suffixes (e.g., <code>_boxes</code>, <code>_heat</code>).</td></tr>
+  <tr><td>•</td><td><b>Results out</b> → processed files land in <code>projects/argos/tests/results/</code> with helpful suffixes (e.g., <code>_boxes</code>, <code>_heat</code>, <code>_cls</code>, <code>_pose</code>).</td></tr>
 </table>
 
 </div>
@@ -95,7 +95,7 @@ d mildrone
 ```
 
 ```
-assets heatmap
+detect assets
 
 ```
 
@@ -105,7 +105,27 @@ hm all
 ```
 
 ```
-all detect
+heatmap mildrone
+
+```
+
+```
+pse camo
+
+```
+
+```
+pose all
+
+```
+
+```
+clf assets
+
+```
+
+```
+classify robodog
 
 ```
 
@@ -136,7 +156,19 @@ all detect
   <tr>
     <td>•</td>
     <td>
-      <code>lv d</code>, <code>livevideo detect</code>, <code>lv hm</code>, or <code>livevideo heatmap</code> = Run live video stream with detection or heatmap.
+      <code>clf &lt;YOURFILE&gt;</code> or <code>classify &lt;YOURFILE&gt;</code> = Run object classification on your file.
+    </td>
+  </tr>
+  <tr>
+    <td>•</td>
+    <td>
+      <code>pse &lt;YOURFILE&gt;</code> or <code>pose &lt;YOURFILE&gt;</code> = Generate a pose overlay for your file.
+    </td>
+  </tr>
+  <tr>
+    <td>•</td>
+    <td>
+      Run Video Stream With Detection, Heatmap, Classify Or Pose = <code>lv d</code> Or <code>livevideo detect</code>, <code>lv hm</code> Or <code>livevideo heatmap</code>, <code>lv clf</code> Or <code>livevideo classify</code>, <code>lv pse</code> Or <code>livevideo pose</code>
     </td>
   </tr>
 </table>
@@ -170,6 +202,16 @@ lv hm
 
 ```
 
+```
+lv clf
+
+```
+
+```
+lv pse
+
+```
+
 <div align="center">
 
 > Or Using Full Syntax: >
@@ -183,6 +225,16 @@ livevideo detect
 
 ```
 livevideo heatmap
+
+```
+
+```
+livevideo classify
+
+```
+
+```
+livevideo pose
 
 ```
 
