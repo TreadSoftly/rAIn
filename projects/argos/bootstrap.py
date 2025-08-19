@@ -7,7 +7,7 @@ What it does (one-time on first run):
   • auto-selects CPU-only Torch when CUDA isn’t present
   • installs your project in editable mode (+dev extras)
   • fetches model weights via Ultralytics (no git/LFS)
-    - preset: all | default | nano (ARGOS_WEIGHT_PRESET)
+    - preset: all | default | nano | perception (ARGOS_WEIGHT_PRESET)
     - or interactively: pick specific files from a list
     - exports missing .onnx from matching .pt when needed
   • writes portable launchers:  argos  |  argos.ps1  |  argos.cmd
@@ -35,7 +35,7 @@ from os import PathLike
 from pathlib import Path
 from typing import (
     Any,
-    Callable,  # added
+    Callable,
     Dict,
     Literal,  # pyright: ignore[reportUnusedImport]
     Mapping,
@@ -52,8 +52,8 @@ from typing import (
 # Optional: Progress UI (safe fallbacks if deps missing / CI / non-TTY)
 # ──────────────────────────────────────────────────────────────
 try:
-    from panoptes.progress import (  # type: ignore
-        ProgressEngine,  # type: ignore
+    from panoptes.progress import ( # type: ignore
+        ProgressEngine,  # type: ignore; type: ignore
         live_percent,
     )
 except Exception:
@@ -278,8 +278,9 @@ def _pip_install_editable_if_needed(*, reinstall: bool = False) -> None:
 # ──────────────────────────────────────────────────────────────
 # Weights helpers
 # ──────────────────────────────────────────────────────────────
-def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str]]:
-    """Return (model_dir, all_names, default_names, nano_names) from registry.
+def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str], list[str]]:
+    """
+    Return (model_dir, all_names, default_names, nano_names, perception_names) from registry.
     Robust against noisy stdout on CI by writing JSON to a temp file.
 
     Works on *first run* even before the venv exists by:
@@ -300,20 +301,27 @@ def uniq(xs):
             seen.add(x); out.append(x)
     return out
 
+def first_or_none(lst):
+    return lst[0] if lst else None
+
+# Build name families from registry
 all_names=[]
 for _, paths in WEIGHT_PRIORITY.items():
     for p in paths:
         all_names.append(Path(p).name)
 
-def first_or_none(lst): return lst[0] if lst else None
 detect_first  = first_or_none(WEIGHT_PRIORITY.get('detect', []))
 heatmap_first = first_or_none(WEIGHT_PRIORITY.get('heatmap', []))
+pose_first    = first_or_none(WEIGHT_PRIORITY.get('pose', []))
+obb_first     = first_or_none(WEIGHT_PRIORITY.get('obb', []))
 
-default_names = [Path(detect_first).name if detect_first else None,
-                 Path(heatmap_first).name if heatmap_first else None]
+def to_name(p):
+    return Path(p).name if p else None
 
-nano_names = [Path(p).name for p in WEIGHT_PRIORITY.get('detect_small', []) +
+default_names = [to_name(detect_first), to_name(heatmap_first)]
+nano_names    = [Path(p).name for p in WEIGHT_PRIORITY.get('detect_small', []) +
                                WEIGHT_PRIORITY.get('heatmap_small', [])]
+perception_names = [to_name(detect_first), to_name(heatmap_first), to_name(pose_first), to_name(obb_first)]
 
 out_path = Path(sys.argv[-1])
 out_path.write_text(json.dumps({
@@ -321,6 +329,7 @@ out_path.write_text(json.dumps({
     'all': uniq(all_names),
     'default': uniq(default_names),
     'nano': uniq(nano_names),
+    'perception': uniq([x for x in perception_names if x]),
 }), encoding='utf-8')
 """
     # Use a named temp file (closed) so Windows can reopen it in the child.
@@ -351,7 +360,6 @@ out_path.write_text(json.dumps({
 
     def _to_str_list(v: Any) -> list[str]:
         if isinstance(v, list):
-            # Avoid PEP 604 unions at runtime (Py3.9): no `object | None` here.
             vv = cast(list[Any], v)
             return [str(x) for x in vv if x is not None]
         return []
@@ -362,6 +370,7 @@ out_path.write_text(json.dumps({
         _to_str_list(meta.get("all")),
         _to_str_list(meta.get("default")),
         _to_str_list(meta.get("nano")),
+        _to_str_list(meta.get("perception")),
     )
 
 
@@ -396,25 +405,31 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
     Ensure weights exist under panoptes.model_registry.WEIGHT_PRIORITY.
 
     Preset (env or arg):
-    - "all"     → everything listed
-    - "default" → first detect + first heatmap   (DEFAULT)
-    - "nano"    → detect_small + heatmap_small
+    - "all"         → everything listed
+    - "default"     → first detect + first heatmap   (DEFAULT)
+    - "nano"        → detect_small + heatmap_small
+    - "perception"  → detect + heatmap + pose + obb (first in each family)
 
     • Downloads *.pt via Ultralytics
     • Builds missing *.onnx by exporting from the matching *.pt
     """
-    model_dir, all_names, default_names, nano_names = _probe_weight_presets()
+    model_dir, all_names, default_names, nano_names, perception_names = _probe_weight_presets()
 
     # choose names
     env_preset = (os.getenv("ARGOS_WEIGHT_PRESET") or "").strip().lower()
-    # DEFAULT changed to "default" so we only ensure the two primary .pt weights
+    # DEFAULT remains "default" so we only ensure the two primary .pt weights for a quick first-run
     choice = (preset or env_preset or "default").lower()
     if explicit_names is not None:
         want_names = [n for n in explicit_names if n]
     else:
-        if choice not in {"all", "default", "nano"}:
+        if choice not in {"all", "default", "nano", "perception"}:
             choice = "default"
-        want_names = {"all": all_names, "default": default_names, "nano": nano_names}[choice]
+        want_names = {
+            "all": all_names,
+            "default": default_names,
+            "nano": nano_names,
+            "perception": perception_names,
+        }[choice]
 
     need = [n for n in want_names if n and not (model_dir / n).exists()]
     if not need:
@@ -646,17 +661,21 @@ def _print_help(cpu_only: bool) -> None:
 Environment
   • Venv:   {py.parent}
   • Torch:  {'CPU-only' if cpu_only else 'auto'}
-  • Models: panoptes/model/  (Ultralytics fetched; preset={os.getenv('ARGOS_WEIGHT_PRESET','default')})
+  • Models: panoptes/model/  (Ultralytics fetched; preset={{default|nano|perception}}; env ARGOS_WEIGHT_PRESET)
 
 Quick start (no venv activation)
   Windows PowerShell:
-      .\\argos.ps1 tests\\assets\\shibuya.jpg hm --alpha 0.5
+      .\\argos.ps1 tests\\assets\\assets.jpg hm --alpha 0.5
+      .\\argos.ps1 tests\\assets\\assets.jpg obb
 
   Windows (double-click / cmd):
-      argos.cmd tests\\assets\\shibuya.jpg d
+      argos.cmd tests\\assets\\assets.jpg d
+      argos.cmd tests\\assets\\assets.jpg pse
 
   Linux / macOS:
-      ./argos tests/assets/shibuya.jpg heatmap --alpha 0.5
+      ./argos tests/assets/assets.jpg heatmap --alpha 0.5
+      ./argos tests/assets/assets.jpg pose
+      ./argos tests/assets/assets.jpg classify --topk 3 --annotate
 
   GeoJSON from URL (with #lat…_lon…):
       ./argos "https://…/image.jpg#lat37.8199_lon-122.4783" --task geojson
@@ -665,13 +684,13 @@ Power users
   • Makefile shortcuts (inside projects/argos):
       make install     # pip install -e "projects/argos[dev]"
       make test        # run pytest
-      make run         # example CLI invocation
+      make run         # example CLI invocation (see Makefile for options)
 
   • Direct module:
-      {py} -m panoptes.cli tests/assets/shibuya.jpg heatmap
+      {py} -m panoptes.cli tests/assets/assets.jpg heatmap
 
 CI / CD
-  • Use ARGOS_WEIGHT_PRESET=[all|default|nano] and run:
+  • Use ARGOS_WEIGHT_PRESET=[all|default|nano|perception] and run:
       python projects/argos/bootstrap.py --ensure --yes
 """
     _print(textwrap.dedent(msg).rstrip())
@@ -685,25 +704,29 @@ def _first_run_menu() -> tuple[Optional[str], Optional[list[str]], bool]:
     Ask the user which weights to fetch.
     Returns (preset, explicit_names, skip_weights)
     """
-    model_dir, all_names = _probe_weight_presets()[:2]
+    model_dir, all_names, _d, _n, perception_names = _probe_weight_presets()
     _print("\nModel weights will be placed under: " + str(model_dir))
     _print("\nChoose what to fetch now:")
     _print("  [1] All listed weights")
     _print("  [2] Default pair (first detect + first heatmap)  ← recommended")
     _print("  [3] Nano pair (fastest for laptops & CI)")
-    _print("  [4] Pick from list")
-    _print("  [5] Skip for now")
+    _print("  [4] Perception set (detect + heatmap + pose + obb)")
+    _print("  [5] Pick from list")
+    _print("  [6] Skip for now")
     while True:
-        ans = input("Selection [1-5, default 2]: ").strip()
+        ans = input("Selection [1-6, default 2]: ").strip()
         if not ans or ans == "2":
             return ("default", None, False)
         if ans == "1":
             return ("all", None, False)
         if ans == "3":
             return ("nano", None, False)
-        if ans == "5":
-            return (None, None, True)
         if ans == "4":
+            # If any of the 4 are unavailable in the registry, fall back to default behavior handled downstream
+            return ("perception", None, False) if perception_names else ("default", None, False)
+        if ans == "6":
+            return (None, None, True)
+        if ans == "5":
             _print("\nAvailable files:")
             for i, n in enumerate(all_names, 1):
                 _print(f"  {i:>2}. {n}")
@@ -719,7 +742,7 @@ def _first_run_menu() -> tuple[Optional[str], Optional[list[str]], bool]:
                 pass
             _print("Invalid selection. Try again.")
         else:
-            _print("Please enter 1, 2, 3, 4 or 5.")
+            _print("Please enter 1, 2, 3, 4, 5 or 6.")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -731,7 +754,7 @@ def _first_run() -> bool:
 
 def _write_sentinel() -> None:
     SENTINEL.parent.mkdir(parents=True, exist_ok=True)
-    SENTINEL.write_text(json.dumps({"version": 4}, indent=2), encoding="utf-8")
+    SENTINEL.write_text(json.dumps({"version": 5}, indent=2), encoding="utf-8")
 
 
 def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
@@ -758,7 +781,7 @@ def _ensure(
     Core ensure pipeline with optional progress output.
     Uses ProgressEngine when available; otherwise prints plain messages.
     """
-    steps: list[tuple[str, Callable[[], None]]] = [  # fixed annotation
+    steps: list[tuple[str, Callable[[], None]]] = [
         ("Create venv", _create_venv),
         ("Install Torch", lambda: _install_torch_if_needed(cpu_only)),
         ("Install Argos (editable)", lambda: _pip_install_editable_if_needed(reinstall=reinstall)),
@@ -792,7 +815,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--ensure", action="store_true", help="Ensure env non-interactively (fast, idempotent)")
     p.add_argument("--print-venv", action="store_true", help="Print venv python path")
     p.add_argument("--cpu", dest="cpu_only", action="store_true", help="Force CPU-only Torch")
-    p.add_argument("--weights-preset", choices=["all", "default", "nano"], help="Preset for weights (overrides env)")
+    p.add_argument("--weights-preset", choices=["all", "default", "nano", "perception"], help="Preset for weights (overrides env)")
     p.add_argument("--reinstall", action="store_true", help="Force reinstall of Argos editable package")
     p.add_argument("--yes", action="store_true", help="Assume Yes to prompts (non-interactive)")
     args, _ = p.parse_known_args(argv)

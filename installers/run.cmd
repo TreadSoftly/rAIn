@@ -27,49 +27,93 @@ set "FORCE_COLOR=1"
 set "PANOPTES_NESTED_PROGRESS=1"
 set "PANOPTES_PROGRESS_ACTIVE=0"
 
-rem --- Parse args ---
+rem --- Parse args (preserving quotes safely) ---
 set "PROJ="
 set "SAW_BUILD=0"
-set "TOKENS="
 set "MODE_LIVE=0"
 set "FOUND_L=0"
 set "FOUND_V=0"
+set "TOKENS="
+set "CRUMB="
+set "OPNORM="
 
 :parse
 if "%~1"=="" goto afterparse
 
+rem Skip wrappers
 if /I "%~1"=="run"         shift & goto parse
 if /I "%~1"=="me"          shift & goto parse
+
+rem Build
 if /I "%~1"=="build"       set "SAW_BUILD=1" & shift & goto parse
 if /I "%~1"=="package"     set "SAW_BUILD=1" & shift & goto parse
 if /I "%~1"=="pack"        set "SAW_BUILD=1" & shift & goto parse
+
+rem Project token
 if /I "%~1"=="argos"       set "PROJ=argos" & shift & goto parse
 if /I "%~1"=="argos:run"   set "PROJ=argos" & shift & goto parse
 if /I "%~1"=="run:argos"   set "PROJ=argos" & shift & goto parse
 if /I "%~1"=="argos:build" set "PROJ=argos" & set "SAW_BUILD=1" & shift & goto parse
 if /I "%~1"=="build:argos" set "PROJ=argos" & set "SAW_BUILD=1" & shift & goto parse
 
-rem ---- broadened live detection ----
+rem Live aliases
 if /I "%~1"=="lv"         set "MODE_LIVE=1" & shift & goto parse
 if /I "%~1"=="livevideo"  set "MODE_LIVE=1" & shift & goto parse
 if /I "%~1"=="live"       set "MODE_LIVE=1" & shift & goto parse
 if /I "%~1"=="video"      set "MODE_LIVE=1" & shift & goto parse
 if /I "%~1"=="ldv"        set "MODE_LIVE=1" & shift & goto parse
 if /I "%~1"=="lvd"        set "MODE_LIVE=1" & shift & goto parse
-if /I "%~1"=="l"          set "FOUND_L=1"
-if /I "%~1"=="v"          set "FOUND_V=1"
 
-set "TOKENS=%TOKENS% %1"
+rem "crumb" tokens that can combine to mean live mode
+if /I "%~1"=="l"          set "FOUND_L=1" & set "CRUMB=%CRUMB% "%~1"" & shift & goto parse
+if /I "%~1"=="v"          set "FOUND_V=1" & set "CRUMB=%CRUMB% "%~1"" & shift & goto parse
+
+rem First-op detection (don't add it to TOKENS; we'll front-load later)
+if not defined OPNORM (
+  if /I "%~1"=="d"          set "OPNORM=d"  & shift & goto parse
+  if /I "%~1"=="detect"     set "OPNORM=d"  & shift & goto parse
+  if /I "%~1"=="-d"         set "OPNORM=d"  & shift & goto parse
+  if /I "%~1"=="--detect"   set "OPNORM=d"  & shift & goto parse
+
+  if /I "%~1"=="hm"         set "OPNORM=hm" & shift & goto parse
+  if /I "%~1"=="heatmap"    set "OPNORM=hm" & shift & goto parse
+  if /I "%~1"=="-hm"        set "OPNORM=hm" & shift & goto parse
+  if /I "%~1"=="--hm"       set "OPNORM=hm" & shift & goto parse
+  if /I "%~1"=="-heatmap"   set "OPNORM=hm" & shift & goto parse
+  if /I "%~1"=="--heatmap"  set "OPNORM=hm" & shift & goto parse
+
+  if /I "%~1"=="gj"         set "OPNORM=gj" & shift & goto parse
+  if /I "%~1"=="geojson"    set "OPNORM=gj" & shift & goto parse
+  if /I "%~1"=="-gj"        set "OPNORM=gj" & shift & goto parse
+  if /I "%~1"=="--gj"       set "OPNORM=gj" & shift & goto parse
+  if /I "%~1"=="-geojson"   set "OPNORM=gj" & shift & goto parse
+  if /I "%~1"=="--geojson"  set "OPNORM=gj" & shift & goto parse
+
+  if /I "%~1"=="classify"   set "OPNORM=classify" & shift & goto parse
+  if /I "%~1"=="clf"        set "OPNORM=classify" & shift & goto parse
+  if /I "%~1"=="pose"       set "OPNORM=pose"     & shift & goto parse
+  if /I "%~1"=="pse"        set "OPNORM=pose"     & shift & goto parse
+  if /I "%~1"=="obb"        set "OPNORM=obb"      & shift & goto parse
+  if /I "%~1"=="object"     set "OPNORM=obb"      & shift & goto parse
+)
+
+rem Otherwise, accumulate token preserving quotes
+set "TOKENS=%TOKENS% "%~1""
 shift
 goto parse
 
 :afterparse
 if "%MODE_LIVE%"=="0" (
-  if "%FOUND_L%"=="1" if "%FOUND_V%"=="1" set "MODE_LIVE=1"
+  if "%FOUND_L%"=="1" if "%FOUND_V%"=="1" (
+    set "MODE_LIVE=1"
+  ) else (
+    rem Not live; put crumbs back in front (safe; rare case)
+    set "TOKENS=%CRUMB%%TOKENS%"
+  )
 )
 
+rem Infer project from cwd if not given
 echo %CD% | findstr /I "\\projects\\argos" >NUL && set "PROJ=argos"
-
 if not defined PROJ (
   if /I "%CD%"=="%ROOT%" goto needproj
   if /I "%CD%"=="%PROJ_DIR%" goto needproj
@@ -83,7 +127,9 @@ exit /b 2
 :gotproj
 if "%SAW_BUILD%"=="1" (
   if exist "%ROOT%\installers\build.cmd" (
-    call "%ROOT%\installers\build.cmd" %PROJ% %TOKENS%
+    set "TOKENS_FINAL=%TOKENS%"
+    if defined OPNORM set "TOKENS_FINAL=""%OPNORM%""%TOKENS%"
+    call "%ROOT%\installers\build.cmd" %PROJ% %TOKENS_FINAL%
     exit /b %ERRORLEVEL%
   ) else (
     echo Build script not found: installers\build.cmd
@@ -111,5 +157,9 @@ set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
 rem ---- module switch ----
 if "%MODE_LIVE%"=="1" ( set "PYMOD=panoptes.live.cli" ) else ( set "PYMOD=panoptes.cli" )
 
-"%VPY%" -m %PYMOD% %TOKENS%
+rem Front-load op if we detected one
+set "TOKENS_FINAL=%TOKENS%"
+if defined OPNORM set "TOKENS_FINAL=""%OPNORM%""%TOKENS%"
+
+"%VPY%" -m %PYMOD% %TOKENS_FINAL%
 exit /b %ERRORLEVEL%

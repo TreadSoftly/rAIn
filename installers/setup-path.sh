@@ -12,8 +12,10 @@ else
   read -rp "Add '$TARGET' to PATH in your shell profile? [y/n] " REPLY
   REPLY="${REPLY:-Y}"
 fi
-REPLY="${REPLY,,}"
-if [[ "$REPLY" != "y" && "$REPLY" != "yes" ]]; then
+
+# Bash-3/macOS-safe lowercase
+REPLY_LC="$(printf '%s' "$REPLY" | tr '[:upper:]' '[:lower:]')"
+if [[ "$REPLY_LC" != "y" && "$REPLY_LC" != "yes" ]]; then
   echo "Skipped."
   exit 0
 fi
@@ -36,4 +38,7 @@ if ! grep -Fq '# rAIn installers on PATH' "$PROFILE" 2>/dev/null; then
 fi
 
 echo " Added to PATH in $PROFILE"
-echo " Open a new terminal (or 'source' your profile) to use: build, all, argos, d/detect, hm/heatmap, gj/geojson, lv/livevideo"
+echo " Open a new terminal (or 'source' your profile) to use:"
+echo "   • build, all, argos"
+echo "   • d/detect, hm/heatmap, gj/geojson, lv/livevideo"
+echo "   • classify/clf, pose/pse, obb/object"

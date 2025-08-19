@@ -42,6 +42,9 @@ if (-not (Select-String -LiteralPath $PROFILE -SimpleMatch $marker -Quiet)) {
 
 if (-not $Quiet) {
   Write-Host " Added. New terminals will also see the change."
-  Write-Host " Commands available: build, all, argos, d/detect, hm/heatmap, gj/geojson, lv/livevideo"
+  Write-Host " Commands available:"
+  Write-Host "   • build, all, argos"
+  Write-Host "   • d/detect, hm/heatmap, gj/geojson, lv/livevideo"
+  Write-Host "   • classify/clf, pose/pse, obb/object"
 }
 return

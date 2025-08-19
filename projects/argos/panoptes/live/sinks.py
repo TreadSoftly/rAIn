@@ -160,7 +160,6 @@ class VideoSink:
                 pass
 
         # Final guard: ensure a non-empty file exists at the requested path
-        # even if no writer could be opened (or produced zero bytes).
         try:
             if not os.path.exists(self.path):
                 with open(self.path, "wb") as f:

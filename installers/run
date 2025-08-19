@@ -9,6 +9,9 @@ export FORCE_COLOR=1
 export PANOPTES_NESTED_PROGRESS=1
 export PANOPTES_PROGRESS_ACTIVE=0
 
+# Case-insensitive matching (works on macOS bash 3.2+)
+shopt -s nocasematch || true
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 PROJ_DIR="$ROOT/projects"
@@ -25,31 +28,49 @@ ensure_git_lfs() {
   fi
 }
 
-proj=""; tokens=(); saw_build=0; live_mode=0
-found_L=0; found_V=0
+proj=""
+tokens=()
+saw_build=0
+live_mode=0
+found_L=0
+found_V=0
 
+# ---- Parse argv -------------------------------------------------------------
 while (($#)); do
   t="$1"; shift
-  lt="${t,,}"
-  case "$lt" in
+  case "$t" in
     run|me) ;;
+
     build|package|pack) saw_build=1 ;;
+
     argos|argos:run|run:argos|argos:build|build:argos) proj="argos" ;;
 
-    # --- broadened live detection ---
+    # Live aliases
     lv|livevideo|live|video|ldv|lvd) live_mode=1 ;;
-    l) found_L=1; tokens+=("$t") ;;   # keep token; live CLI will ignore 'l'/'v'
+
+    # Single-letter crumbs that can combine to mean live mode; keep order in tokens
+    l) found_L=1; tokens+=("$t") ;;
     v) found_V=1; tokens+=("$t") ;;
 
     *) tokens+=("$t") ;;
   esac
 done
 
-# Spaced form "l d v" → live if both l and v appeared
+# Spaced form "l v" → live; if triggered, drop one 'l' and one 'v' from argv
 if [[ $live_mode -eq 0 && $found_L -eq 1 && $found_V -eq 1 ]]; then
   live_mode=1
+  new=()
+  skip_l=1
+  skip_v=1
+  for x in "${tokens[@]}"; do
+    if [[ $skip_l -eq 1 && "$x" == l ]]; then skip_l=0; continue; fi
+    if [[ $skip_v -eq 1 && "$x" == v ]]; then skip_v=0; continue; fi
+    new+=("$x")
+  done
+  tokens=("${new[@]}")
 fi
 
+# Infer project from cwd if not explicitly given
 cwd="$(pwd)"
 if [[ -z "${proj:-}" ]]; then
   case "$cwd" in *"/projects/argos"*) proj="argos" ;; esac
@@ -63,31 +84,35 @@ fi
 
 ensure_git_lfs
 
-normalize_tokens() {
-  local -a in=("$@") out=()
-  local op="" op_idx=-1 tok low
-  for i in "${!in[@]}"; do
-    tok="${in[$i]}"; low="${tok,,}"
-    case "$low" in
-      d|detect|-d|--detect) op="d"; op_idx=$i; break ;;
-      hm|heatmap|-hm|--hm|-heatmap|--heatmap) op="hm"; op_idx=$i; break ;;
-      gj|geojson|-gj|--gj|-geojson|--geojson) op="gj"; op_idx=$i; break ;;
-      *) ;;
-    esac
+# ---- Normalize operation position: INPUT op  ->  op INPUT -------------------
+# Supported ops: d/detect, hm/heatmap, gj/geojson, classify/clf, pose/pse, obb/object
+op=""
+op_idx=-1
+for i in "${!tokens[@]}"; do
+  tok="${tokens[$i]}"
+  case "$tok" in
+    d|detect|-d|--detect) op="d"; op_idx=$i; break ;;
+    hm|heatmap|-hm|--hm|-heatmap|--heatmap) op="hm"; op_idx=$i; break ;;
+    gj|geojson|-gj|--gj|-geojson|--geojson) op="gj"; op_idx=$i; break ;;
+    classify|clf) op="classify"; op_idx=$i; break ;;
+    pose|pse) op="pose"; op_idx=$i; break ;;
+    obb|object) op="obb"; op_idx=$i; break ;;
+  esac
+done
+if [[ "$op_idx" -gt 0 ]]; then
+  new=("$op")
+  for j in "${!tokens[@]}"; do
+    [[ $j -ne $op_idx ]] && new+=("${tokens[$j]}")
   done
-  if [[ "$op_idx" -gt 0 ]]; then
-    out+=("$op")
-    for j in "${!in[@]}"; do [[ $j -ne $op_idx ]] && out+=("${in[$j]}"); done
-    in=("${out[@]}")
-  fi
-  printf '%s\n' "${in[@]}"
-}
-mapfile -t tokens < <(normalize_tokens "${tokens[@]}")
+  tokens=("${new[@]}")
+fi
 
+# ---- Build handoff ----------------------------------------------------------
 if [[ "$saw_build" -eq 1 ]]; then
   exec "$ROOT/installers/build" "$proj" "${tokens[@]}"
 fi
 
+# ---- Launch Python module ---------------------------------------------------
 if [[ "$proj" == "argos" ]]; then
   PY="$(command -v python3 || command -v python)"
   "$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes >/dev/null 2>&1 || true
@@ -95,9 +120,7 @@ if [[ "$proj" == "argos" ]]; then
   export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
 
   PY_MOD="panoptes.cli"
-  if [[ $live_mode -eq 1 ]]; then
-    PY_MOD="panoptes.live.cli"
-  fi
+  [[ $live_mode -eq 1 ]] && PY_MOD="panoptes.live.cli"
   exec "$VPY" -m "$PY_MOD" "${tokens[@]}"
 fi
 

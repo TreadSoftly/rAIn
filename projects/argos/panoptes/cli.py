@@ -2,7 +2,7 @@
 """
 panoptes.cli - unified Typer front-end (“argos”)
 
-Tasks: detect | heatmap | geojson on images **and** videos.
+Tasks: detect | heatmap | geojson | classify | pose | obb on images **and** videos.
 Model selection is delegated to *panoptes.model_registry* and is strictly enforced.
 
 Progress & UX (this build)
@@ -105,12 +105,26 @@ _ALIAS = {
     "geojson": "geojson",
     "--geojson": "geojson",
     "-gj": "geojson",
+    # classify
+    "cls": "classify",
+    "classify": "classify",
+    "--classify": "classify",
+    "-cls": "classify",
+    # pose (keypoints)
+    "pose": "pose",
+    "--pose": "pose",
+    "-pose": "pose",
+    "kp": "pose",
+    # oriented bounding boxes
+    "obb": "obb",
+    "--obb": "obb",
+    "-obb": "obb",
     # help / man
     "help": "help",
     "man": "man",
     "?": "help",
 }
-_VALID = {"detect", "heatmap", "geojson"}
+_VALID = {"detect", "heatmap", "geojson", "classify", "pose", "obb"}
 
 _URL_RE = re.compile(r"^(https?://.+|data:image/[^;]+;base64,.+)$", re.I)
 
@@ -154,23 +168,29 @@ def _man_header() -> str:
     =================================
 
     NAME
-        argos — detect, heatmap, and geojson over images & videos
+        argos — detect, heatmap, geojson, classify, pose, and obb over images & videos
 
     SYNOPSIS
-        argos [INPUT ...] [d|hm|gj] [OPTIONS]
+        argos [INPUT ...] [d|hm|gj|cls|pose|obb] [OPTIONS]
         argos [OPTIONS] INPUT ...
 
     DESCRIPTION
         A zero-fiddling front-end over Panoptes tasks:
-          • detect   — object detection boxes
-          • heatmap  — segmentation heat-map overlay
-          • geojson  — polygon extraction to GeoJSON (images only)
+          • detect    — object detection boxes
+          • heatmap   — segmentation heat-map overlay
+          • geojson   — polygon extraction to GeoJSON (images only)
+          • classify  — top-K image classification overlay
+          • pose      — 2D keypoints + COCO-like skeleton (K=17)
+          • obb       — oriented bounding boxes (quads)
 
         You can put task tokens anywhere:
             argos mildrone d
             detect mildrone.avif
             d mildrone
             hm camo
+            cls fuji
+            pose human
+            obb ship
             argos -d all
             argos --heatmap all .jpg
 
@@ -184,22 +204,29 @@ def _man_header() -> str:
             d *
             hm *.png
             gj all .jpg
+            cls *.jpg
+            pose all
+            obb all .png
             argos all d
     """).strip("\n")
 
 def _man_tasks() -> str:
     return textwrap.dedent("""
     TASKS
-        detect   Boxes over images or videos.
-        heatmap  Segmentation heat-map overlay (images & videos).
-        geojson  Extract polygons from images as GeoJSON (videos are skipped).
+        detect    Boxes over images or videos.
+        heatmap   Segmentation heat-map overlay (images & videos).
+        geojson   Extract polygons from images as GeoJSON (videos are skipped).
+        classify  Top-K label card on images or per-frame in videos.
+        pose      Draw keypoints and (if K==17) COCO-like skeleton.
+        obb       Draw oriented bounding boxes (quads), fallback to AABB.
     """).strip("\n")
 
 def _man_inputs() -> str:
     return textwrap.dedent(f"""
     INPUTS
         • Plain filenames or stems (we search known dirs)
-        • URLs (http/https or data:image/* base64)
+        • URLs (http/https or data:image/* base64) — URL mode currently supported
+          for detect/heatmap/geojson; classify/pose/obb expect local files.
         • Globs: "*.jpg", "*"
         • ALL:   "all" (optionally followed by ".ext"/"ext"/"*.ext")
 
@@ -211,10 +238,13 @@ def _man_models() -> str:
     return textwrap.dedent("""
     MODEL SELECTION
         Weights are picked by the model registry strictly (no silent fallbacks).
-        Use --small/--fast to prefer lightweight models for live video.
+        Use --small/--fast to prefer lightweight models for live video (detect/heatmap).
         Per-task override:
-          --det-weights PATH   (detect/geojson)
-          --seg-weights PATH   (heatmap)
+          --det-weights  PATH   (detect/geojson)
+          --seg-weights  PATH   (heatmap)
+          --cls-weights  PATH   (classify)
+          --pose-weights PATH   (pose)
+          --obb-weights  PATH   (obb)
 
         If a required weight is missing, the command exits with code 1.
     """).strip("\n")
@@ -222,11 +252,13 @@ def _man_models() -> str:
 def _man_tuning() -> str:
     return textwrap.dedent("""
     TUNING
-        --conf FLOAT         [detect/heatmap] confidence threshold 0-1 (default 0.40)
-        --alpha FLOAT        heat-map blend 0-1 (default 0.40)
-        --cmap NAME          OpenCV/Matplotlib colour-map (default COLORMAP_JET)
-        -k / --k FLOAT       σ area / kernel_scale (smaller → blurrier)
-        --small / --fast     use nano models for live video
+        --conf FLOAT            confidence threshold 0-1 (default 0.40; used by detect/heatmap/pose/obb/classify*)
+        --iou  FLOAT            IoU threshold (default 0.45; used by pose/obb where applicable)
+        --alpha FLOAT           heat-map blend 0-1 (default 0.40)
+        --cmap NAME             OpenCV/Matplotlib colour-map (default COLORMAP_JET)
+        -k / --k FLOAT          σ area / kernel_scale (smaller → blurrier; heatmap)
+        --topk INT              top-K labels for classify (default 1)
+        --small / --fast        use nano models for live video (detect/heatmap)
     """).strip("\n")
 
 def _man_outputs() -> str:
@@ -235,6 +267,8 @@ def _man_outputs() -> str:
         Results are written under:
             {_RESULTS_DIR}
         (File names mirror the input stem with task-specific suffixes.)
+        You can optionally override the output directory for image overlays with:
+            --out-dir PATH
     """).strip("\n")
 
 def _man_windows() -> str:
@@ -251,6 +285,9 @@ def _man_shortcuts() -> str:
         d         -> prepends "d"        e.g., `d all`
         hm        -> prepends "hm"       e.g., `hm all`
         gj        -> prepends "gj"       e.g., `gj fuji`
+        cls       -> prepends "cls"      e.g., `cls beach.jpg`
+        pose      -> prepends "pose"     e.g., `pose person.png`
+        obb       -> prepends "obb"      e.g., `obb ship.png`
         detect    -> prepends "d"        e.g., `detect midtown`
         heatmap   -> prepends "hm"       e.g., `heatmap all .jpg`
         geojson   -> prepends "gj"
@@ -276,14 +313,32 @@ def _man_examples() -> str:
             argos gj fuji
             argos geojson assets.jpg
 
+        Classification:
+            argos cls fuji.jpg
+            argos classify all .png --topk 3
+
+        Pose (keypoints + skeleton):
+            argos pose runner.jpg
+            argos pose all --conf 0.30 --iou 0.45
+
+        Oriented Bounding Boxes:
+            argos obb ship.png
+            argos obb all .jpg
+
         Batch from test set:
             argos d all
             argos hm *.png
             argos gj all .jpg
+            argos cls all .jpg
+            argos pose all
+            argos obb all
 
         Video:
             argos d bunny.mp4
             argos hm bunny.mp4 --small
+            argos cls bunny.mp4
+            argos pose bunny.mp4
+            argos obb bunny.mp4
 
         Explain without running (dry-run):
             argos --dry-run hm all .png
@@ -291,6 +346,9 @@ def _man_examples() -> str:
         Force weights:
             argos d fuji --det-weights projects/argos/panoptes/model/yolov8x.pt
             argos hm camo --seg-weights projects/argos/panoptes/model/yolov8x-seg.pt
+            argos cls fuji --cls-weights weights/classify.pt
+            argos pose runner --pose-weights weights/pose.pt
+            argos obb ship --obb-weights weights/obb.pt
     """).strip("\n")
 
 def _full_manual() -> str:
@@ -321,12 +379,18 @@ def _examples_page() -> str:
         "  argos hm camo",
         "  argos d mildrone",
         "  argos gj fuji",
+        "  argos cls fuji.jpg",
+        "  argos pose runner.jpg",
+        "  argos obb ship.png",
         "  argos d bunny.mp4",
         "",
         "Globs / ALL:",
         "  argos d all",
         "  argos hm *.png",
         "  argos gj all .jpg",
+        "  argos cls all .jpg",
+        "  argos pose all",
+        "  argos obb all .png",
         "",
         "Samples available in tests/raw:",
         dynamic,
@@ -350,10 +414,19 @@ def _tutorial_page() -> str:
         "3) Extract polygons",
         "   argos gj fuji",
         "",
-        "4) Batch a whole folder",
+        "4) Classify an image",
+        "   argos cls fuji.jpg --topk 3",
+        "",
+        "5) Pose estimation",
+        "   argos pose runner.jpg",
+        "",
+        "6) Oriented boxes",
+        "   argos obb ship.png",
+        "",
+        "7) Batch a whole folder",
         "   argos hm all .jpg --small",
         "",
-        "5) Video in nano mode",
+        "8) Video in nano mode",
         "   argos hm bunny.mp4 --small",
         "",
         "Pro tip: not sure what would run?",
@@ -726,6 +799,18 @@ def _pick_weight(task: Literal["detect", "heatmap"], *, small: bool):
     from panoptes import model_registry as _mr  # type: ignore[reportMissingTypeStubs]
     return _mr.pick_weight(task, small=small)
 
+def _load_classifier(override: Optional[Path] = None):
+    from panoptes import model_registry as _mr  # type: ignore[reportMissingTypeStubs]
+    return _mr.load_classifier(override=override)
+
+def _load_pose(override: Optional[Path] = None):
+    from panoptes import model_registry as _mr  # type: ignore[reportMissingTypeStubs]
+    return _mr.load_pose(override=override)
+
+def _load_obb(override: Optional[Path] = None):
+    from panoptes import model_registry as _mr  # type: ignore[reportMissingTypeStubs]
+    return _mr.load_obb(override=override)
+
 def _reinit_models(
     *,
     detect_small: Optional[bool] = None,
@@ -788,14 +873,18 @@ def _run_single(
 # ────────────────────────────────────────────────────────────────────────────
 #  results tracking (for clickable list)
 # ────────────────────────────────────────────────────────────────────────────
-def _snapshot_results() -> set[Path]:
+def _snapshot_results(bases: Optional[list[Path]] = None) -> set[Path]:
+    """
+    Snapshot all files beneath the given base directories (defaults to _RESULTS_DIR).
+    """
+    base_dirs = bases or [_RESULTS_DIR]
     out: set[Path] = set()
-    base = _RESULTS_DIR
-    if not base.exists():
-        return out
-    for p in base.rglob("*"):
-        if p.is_file():
-            out.add(p.resolve())
+    for base in base_dirs:
+        if not base.exists():
+            continue
+        for p in base.rglob("*"):
+            if p.is_file():
+                out.add(p.resolve())
     return out
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -803,14 +892,17 @@ def _snapshot_results() -> set[Path]:
 # ────────────────────────────────────────────────────────────────────────────
 @app.command()
 def target(  # noqa: C901
-    inputs: List[str] = typer.Argument(..., metavar="INPUT [d|hm|gj|FLAGS|help|man]"),
+    inputs: List[str] = typer.Argument(..., metavar="INPUT [d|hm|gj|cls|pose|obb|FLAGS|help|man]"),
     *,
     # flexible: explicit task name
-    task: Optional[str] = typer.Option(None, "--task", "-t", help="- task detect /or/ -t d | -t heatmap /or/ -task d | -t geojson /or/ -t -gj"),
+    task: Optional[str] = typer.Option(None, "--task", "-t", help="- task detect | heatmap | geojson | classify | pose | obb"),
     # convenience boolean flags for task selection
     detect_flag: bool = typer.Option(False, "--detect", "-d", help="d is shortcut for --task detect | d YourFile /or/ YourFile d"),
     heatmap_flag: bool = typer.Option(False, "--heatmap", help="hm is shortcut for --task heatmap | hm YourFile /or/ YourFile hm"),
     geojson_flag: bool = typer.Option(False, "--geojson", help="gj is shortcut for --task geojson | gj YourFile /or/ YourFile gj"),
+    classify_flag: bool = typer.Option(False, "--classify", "--cls", help="cls is shortcut for --task classify | cls YourFile /or/ YourFile cls"),
+    pose_flag: bool = typer.Option(False, "--pose", help="pose is shortcut for --task pose | pose YourFile /or/ YourFile pose"),
+    obb_flag: bool = typer.Option(False, "--obb", help="obb is shortcut for --task obb | obb YourFile /or/ YourFile obb"),
     # meta/help UX
     man_flag: bool = typer.Option(False, "--man", help="Open the full manual and exit"),
     examples_flag: bool = typer.Option(False, "--examples", help="Show examples and exit"),
@@ -818,12 +910,14 @@ def target(  # noqa: C901
     dry_run: bool = typer.Option(False, "--dry-run", help="Explain what would run, then exit"),
     # model (cosmetic placeholder for compatibility)
     model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
-    # heat-map tuning
+    # heat-map + general tuning
     alpha: float = typer.Option(0.40, help="Heat-map blend 0-1"),
     cmap: str = typer.Option("COLORMAP_JET", help="OpenCV / Matplotlib colour-map"),
     kernel_scale: float = typer.Option(5.0, "--k", "-k", help="Area / kernel_scale (smaller → blurrier)"),
-    conf: float = typer.Option(0.40, help="[detect / heat-map] confidence threshold 0-1"),
-    small: bool = typer.Option(False, "--small", "--fast", help="Use nano models for live video"),
+    conf: float = typer.Option(0.40, help="[detect/heatmap/pose/obb/classify] confidence threshold 0-1"),
+    iou: float = typer.Option(0.45, help="[pose/obb] IoU threshold 0-1"),
+    topk: int = typer.Option(1, "--topk", help="[classify] number of top labels to show per image/frame"),
+    small: bool = typer.Option(False, "--small", "--fast", help="Use nano models for live video (detect/heatmap)"),
     # per-task override weights
     det_override: Optional[Path] = typer.Option(
         None, "--det-weights",
@@ -833,7 +927,20 @@ def target(  # noqa: C901
         None, "--seg-weights",
         help="Force a segmentation weight for heatmap (path to .pt/.onnx).",
     ),
+    cls_override: Optional[Path] = typer.Option(
+        None, "--cls-weights",
+        help="Force a classifier weight for classify (path to .pt/.onnx).",
+    ),
+    pose_override: Optional[Path] = typer.Option(
+        None, "--pose-weights",
+        help="Force a pose weight for pose (path to .pt/.onnx).",
+    ),
+    obb_override: Optional[Path] = typer.Option(
+        None, "--obb-weights",
+        help="Force an OBB weight for obb (path to .pt/.onnx).",
+    ),
     # output control
+    out_dir: Optional[Path] = typer.Option(None, "--out-dir", help="Write image overlay outputs to this directory (defaults to tests/results)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Chatty logs (disables single-line-only mode)"),
     quiet: bool = typer.Option(True, "--quiet", "-q", help="Single-line progress only (default)"),
 ) -> None:
@@ -873,6 +980,9 @@ def target(  # noqa: C901
         (detect_flag, "detect"),
         (heatmap_flag, "heatmap"),
         (geojson_flag, "geojson"),
+        (classify_flag, "classify"),
+        (pose_flag, "pose"),
+        (obb_flag, "obb"),
     ] if ok]
     if len(flag_tasks) > 1:
         typer.secho(f"[bold red]  conflicting flags set: {', '.join(flag_tasks)}", err=True)
@@ -914,6 +1024,9 @@ def target(  # noqa: C901
     model = model.lower()
 
     hm_kwargs: dict[str, Any] = dict(alpha=alpha, cmap=cmap, kernel_scale=kernel_scale, conf=conf)
+    cls_kwargs: dict[str, Any] = dict(conf=conf, topk=int(max(1, topk)))
+    pose_kwargs: dict[str, Any] = dict(conf=conf, iou=iou)
+    obb_kwargs: dict[str, Any] = dict(conf=conf, iou=iou)
 
     # normalize/resolve (supports ALL/globs)
     norm_inputs = _expand_tokens(positional, task_final)
@@ -946,7 +1059,11 @@ def target(  # noqa: C901
             err=True,
         )
 
+    # Prepare output base directories for snapshots
+    snapshot_bases: list[Path] = sorted({ _RESULTS_DIR, (out_dir or _RESULTS_DIR) }, key=lambda p: str(p))
+
     # Short status spinner during model init (covers downloads) — do NOT add a newline
+    model_cls = model_pose = model_obb = None
     with _maybe_spinner(prefix="ARGOS INIT", final_newline=False) as sp_init:
         sp_init.update(total=1, count=0, current="init models (may download)")
         if task_final == "detect":
@@ -955,6 +1072,13 @@ def target(  # noqa: C901
             _reinit_models(segment_small=small, seg_override=seg_override)
         elif task_final == "geojson":
             _reinit_models(detect_small=small, det_override=det_override)
+        elif task_final == "classify":
+            # Strict registry load with optional override
+            model_cls = _load_classifier(override=cls_override)
+        elif task_final == "pose":
+            model_pose = _load_pose(override=pose_override)
+        elif task_final == "obb":
+            model_obb = _load_obb(override=obb_override)
         sp_init.update(count=1, current="ready")
 
     # Progress wrapper (counts processed inputs) — SINGLE pinned spinner
@@ -973,8 +1097,8 @@ def target(  # noqa: C901
             label = ("URL" if _is_url(item) else Path(item).name)
             sp.update(current=label)
 
-            # snapshot results so we can diff per item
-            before = _snapshot_results()
+            # snapshot results so we can diff per item (cover both default and custom out dirs)
+            before = _snapshot_results(snapshot_bases)
 
             # videos
             if low.endswith(tuple(_VIDEO_EXTS)):
@@ -985,24 +1109,32 @@ def target(  # noqa: C901
                     per_input_outs[label] = []
                     continue
 
-                # choose weight (override beats registry pick)
-                ov = det_override if task_final == "detect" else (
-                    seg_override if task_final == "heatmap" else None
-                )
-                weight = Path(ov) if ov is not None else _pick_weight(
-                    cast(Literal["detect", "heatmap"], task_final), small=small
-                )
+                # choose weight override for video workers (override beats registry pick)
+                if task_final == "heatmap":
+                    weight = Path(seg_override) if seg_override is not None else _pick_weight("heatmap", small=small)
+                elif task_final == "detect":
+                    weight = Path(det_override) if det_override is not None else _pick_weight("detect", small=small)
+                elif task_final == "classify":
+                    weight = Path(cls_override) if cls_override is not None else None  # worker will use registry if None
+                elif task_final == "pose":
+                    weight = Path(pose_override) if pose_override is not None else None
+                elif task_final == "obb":
+                    weight = Path(obb_override) if obb_override is not None else None
+                else:
+                    weight = None
 
                 if not quiet:
                     typer.secho(
-                        f"[panoptes] video: {item} → task={task_final} small={small} weight={weight}",
+                        f"[panoptes] video: {item} → task={task_final} "
+                        f"{'small='+str(small)+' ' if task_final in {'detect','heatmap'} else ''}"
+                        f"weight={weight}",
                         err=True,
                     )
 
                 # Show ITEM + JOB + MODEL on the progress line up-front
                 sp.update(
                     current=label,
-                    job=("heatmap" if task_final == "heatmap" else "detect"),
+                    job=task_final,
                     model=(Path(weight).name if weight else "")
                 )
 
@@ -1011,12 +1143,21 @@ def target(  # noqa: C901
                     if task_final == "heatmap":
                         from .predict_heatmap_mp4 import main as _heat_vid
                         _heat_vid(item, weights=weight, **hm_kwargs)
-                    else:  # detect
+                    elif task_final == "detect":
                         from .predict_mp4 import main as _detect_vid
                         _detect_vid(item, conf=conf, weights=weight)
+                    elif task_final == "classify":
+                        from .predict_classify_mp4 import main as _cls_vid
+                        _cls_vid(item, weights=weight, topk=int(max(1, topk)), conf=conf)
+                    elif task_final == "pose":
+                        from .predict_pose_mp4 import main as _pose_vid
+                        _pose_vid(item, weights=weight, conf=conf, iou=iou)
+                    elif task_final == "obb":
+                        from .predict_obb_mp4 import main as _obb_vid
+                        _obb_vid(item, weights=weight, conf=conf, iou=iou)
 
                 # diff results
-                after = _snapshot_results()
+                after = _snapshot_results(snapshot_bases)
                 new_files = sorted((after - before), key=lambda p: p.name.lower())
                 produced.extend(new_files)
                 per_input_outs[label] = new_files
@@ -1027,7 +1168,12 @@ def target(  # noqa: C901
 
             # still images & URLs
             if low.endswith(tuple(_IMAGE_EXTS)) or _is_url(item):
-                # Choose (or show) model and put all three fields on the line up-front
+                # URL support is limited to detect/heatmap/geojson in this build.
+                if _is_url(item) and task_final in {"classify", "pose", "obb"}:
+                    typer.secho(f"[bold red] URL inputs currently unsupported for task {task_final}; download the file first.", err=True)
+                    raise typer.Exit(2)
+
+                # Choose (or show) model and put fields on the line up-front
                 if task_final == "detect":
                     w = Path(det_override) if det_override is not None else _pick_weight("detect", small=small)
                     model_name = Path(w).name if w else ""
@@ -1040,26 +1186,62 @@ def target(  # noqa: C901
                     sp.update(current=label, job="heatmap", model=model_name)
                     if not quiet:
                         typer.secho(f"[panoptes] image/url: {item} → task=heatmap weight={w}", err=True)
-                else:
-                    w = None
-                    sp.update(current=label, job="geojson", model="")
+                elif task_final == "classify":
+                    sp.update(current=label, job="classify", model="")
                     if not quiet:
-                        typer.secho(f"[panoptes] image/url: {item} → task=geojson (no model required)", err=True)
+                        typer.secho(f"[panoptes] image: {item} → task=classify", err=True)
+                elif task_final == "pose":
+                    sp.update(current=label, job="pose", model="")
+                    if not quiet:
+                        typer.secho(f"[panoptes] image: {item} → task=pose", err=True)
+                elif task_final == "obb":
+                    sp.update(current=label, job="obb", model="")
+                    if not quiet:
+                        typer.secho(f"[panoptes] image: {item} → task=obb", err=True)
+                else:
+                    # geojson (image or URL) — uses the detector backbone underneath
+                    w = Path(det_override) if det_override is not None else _pick_weight("detect", small=small)
+                    model_name = Path(w).name if w else ""
+                    sp.update(current=label, job="geojson", model=model_name)
+                    if not quiet:
+                        typer.secho(f"[panoptes] image/url: {item} → task=geojson weight={w}", err=True)
 
                 # For geojson + remote URL, do NOT silence stdout — the worker prints JSON to stdout.
                 suppress_stdio = quiet
                 if task_final == "geojson" and _is_url(item):
                     suppress_stdio = False
 
+                # Execute task
                 with _silence_stdio(suppress_stdio):
-                    result = _run_single(
-                        item,
-                        model=model,
-                        task=cast(Literal["detect", "heatmap", "geojson"], task_final),
-                        progress=sp,   # child ‘current’ updates become JOB via the proxy
-                        quiet=quiet,
-                        **hm_kwargs,
-                    )
+                    result = None
+                    if task_final in {"detect", "heatmap", "geojson"}:
+                        result = _run_single(
+                            item,
+                            model=model,
+                            task=cast(Literal["detect", "heatmap", "geojson"], task_final),
+                            progress=sp,   # child ‘current’ updates become JOB via the proxy
+                            quiet=quiet,
+                            **hm_kwargs,
+                        )
+                    elif task_final == "classify":
+                        # Strict model via registry (preloaded) with explicit out_dir
+                        from . import classify as _cls_mod  # type: ignore
+                        result = _cls_mod.run_image(
+                            item, out_dir=(out_dir or _RESULTS_DIR),
+                            model=model_cls, progress=sp, **cls_kwargs
+                        )
+                    elif task_final == "pose":
+                        from . import pose as _pose_mod  # type: ignore
+                        result = _pose_mod.run_image(
+                            item, out_dir=(out_dir or _RESULTS_DIR),
+                            model=model_pose, progress=sp, **pose_kwargs
+                        )
+                    elif task_final == "obb":
+                        from . import obb as _obb_mod  # type: ignore
+                        result = _obb_mod.run_image(
+                            item, out_dir=(out_dir or _RESULTS_DIR),
+                            model=model_obb, progress=sp, **obb_kwargs
+                        )
 
                 # Mark that JSON was printed for remote-URL geojson so we don't add any trailing text.
                 if task_final == "geojson" and _is_url(item):
@@ -1078,7 +1260,7 @@ def target(  # noqa: C901
                     outs = []
 
                 if not outs:
-                    after = _snapshot_results()
+                    after = _snapshot_results(snapshot_bases)
                     outs = sorted((after - before), key=lambda p: p.name.lower())
 
                 produced.extend(outs)
@@ -1130,6 +1312,18 @@ def main_heatmap() -> None:  # pragma: no cover
 
 def main_geojson() -> None:  # pragma: no cover
     _prepend_argv("gj")
+    main()
+
+def main_classify() -> None:  # pragma: no cover
+    _prepend_argv("cls")
+    main()
+
+def main_pose() -> None:  # pragma: no cover
+    _prepend_argv("pose")
+    main()
+
+def main_obb() -> None:  # pragma: no cover
+    _prepend_argv("obb")
     main()
 
 def main_all() -> None:  # pragma: no cover

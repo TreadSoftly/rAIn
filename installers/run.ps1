@@ -33,8 +33,8 @@ function Ensure-GitLFS {
   }
 }
 
-# Parse args
-$proj = $null; $tokens = @(); $sawBuild = $false; $liveMode = $false
+# Parse args (keep 'l' and 'v' in tokens to preserve order; drop later if live)
+$proj = $null; $tokens = New-Object System.Collections.Generic.List[string]; $sawBuild = $false; $liveMode = $false
 $foundL = $false; $foundV = $false
 foreach ($a in $Args) {
   $la = $a.ToLowerInvariant()
@@ -45,10 +45,21 @@ foreach ($a in $Args) {
   else {
     if ($la -eq 'l') { $foundL = $true }
     if ($la -eq 'v') { $foundV = $true }
-    $tokens += $a
+    $tokens.Add($a) | Out-Null
   }
 }
-if (-not $liveMode -and $foundL -and $foundV) { $liveMode = $true }
+if (-not $liveMode -and $foundL -and $foundV) {
+  $liveMode = $true
+  $new = New-Object System.Collections.Generic.List[string]
+  $skipL = $true; $skipV = $true
+  foreach ($t in $tokens) {
+    $key = $t.ToLowerInvariant()
+    if ($skipL -and $key -eq 'l') { $skipL = $false; continue }
+    if ($skipV -and $key -eq 'v') { $skipV = $false; continue }
+    $new.Add($t) | Out-Null
+  }
+  $tokens = $new
+}
 
 # Infer project from CWD
 $cwd = (Get-Location).Path
@@ -67,6 +78,9 @@ $opsMap = @{
   'd'='d'; 'detect'='d'; '-d'='d'; '--detect'='d';
   'hm'='hm'; 'heatmap'='hm'; '-hm'='hm'; '--hm'='hm'; '-heatmap'='hm'; '--heatmap'='hm';
   'gj'='gj'; 'geojson'='gj'; '-gj'='gj'; '--gj'='gj'; '-geojson'='gj'; '--geojson'='gj';
+  'classify'='classify'; 'clf'='classify';
+  'pose'='pose'; 'pse'='pose';
+  'obb'='obb'; 'object'='obb';
 }
 $opIdx = -1; $opNorm = $null
 for ($i=0; $i -lt $tokens.Count; $i++) {
@@ -81,7 +95,7 @@ if ($opIdx -gt 0) {
 }
 
 if ($sawBuild) {
-  & (Join-Path $ROOT 'installers\build.ps1') $proj @tokens
+  & (Join-Path $ROOT 'installers\build.ps1') $proj @($tokens)
   return
 }
 
@@ -99,5 +113,5 @@ $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
 $pyMod = if ($liveMode) { 'panoptes.live.cli' } else { 'panoptes.cli' }
-& $vpy -m $pyMod @tokens
+& $vpy -m $pyMod @($tokens)
 return

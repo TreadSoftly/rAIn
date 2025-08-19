@@ -10,12 +10,18 @@ from .pipeline import LivePipeline
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 
-# allow short and long spellings
+# allow short and long spellings (only tokens you authorized)
 _TASK_CHOICES = {
     "d": "detect",
     "detect": "detect",
     "hm": "heatmap",
     "heatmap": "heatmap",
+    "clf": "classify",
+    "classify": "classify",
+    "pse": "pse",
+    "pose": "pose",
+    "obb": "obb",
+    "object": "obb",
 }
 
 # Tokens that indicate "live intent" and should be ignored as a source
@@ -38,7 +44,7 @@ def run(
     tokens: List[str] = typer.Argument(
         None,
         metavar="[TASK] [SOURCE]",
-        help="Optionally provide task (d|detect|hm|heatmap) and source (camera index, path, or 'synthetic').",
+        help="Task (d|detect|hm|heatmap|clf|classify|pse|pose|obb|object) and source (camera index, path, or 'synthetic').",
     ),
     *,
     duration: Optional[float] = typer.Option(None, "--duration", help="Seconds to run; default until quit."),
@@ -47,8 +53,8 @@ def run(
     fps: Optional[int] = typer.Option(None, "--fps", help="Target FPS for writer (default 30)."),
     width: Optional[int] = typer.Option(None, "--width", help="Capture width hint."),
     height: Optional[int] = typer.Option(None, "--height", help="Capture height hint."),
-    conf: float = typer.Option(0.25, "--conf", help="Detector confidence (detect only)."),
-    iou: float = typer.Option(0.45, "--iou", help="Detector IOU (detect only)."),
+    conf: float = typer.Option(0.25, "--conf", help="Detector confidence (detect/pose/obb where applicable)."),
+    iou: float = typer.Option(0.45, "--iou", help="Detector IOU (detect/obb where applicable)."),
     small: bool = typer.Option(True, "--small/--no-small", help="Prefer small models for live."),
 ) -> None:
     """Launch the live webcam/video pipeline."""
@@ -67,12 +73,6 @@ def run(
                         break
 
     # Flexible positional parsing:
-    #   - run hm synthetic
-    #   - hm synthetic
-    #   - synthetic d
-    #   - d 0
-    #   - (nothing) => defaults
-    #   - extra live markers like: lv | live | video | ldv | lvd | l d v (ignored)
     task_tok: Optional[str] = None
     source_tok: Optional[str] = None
 
@@ -87,7 +87,7 @@ def run(
         if low in _LIVE_MARKERS:
             continue
 
-        # First task token wins, the rest of tokens are for source
+        # First recognized task token wins, the next token becomes the source
         if low in _TASK_CHOICES and task_tok is None:
             task_tok = low
             continue

@@ -49,10 +49,16 @@ def select_models_for_live(task: str, hw: HardwareInfo) -> ModelSelection:
     Pick small/fast defaults. This is a *placeholder* that you can later route
     through your central panoptes model registry. We do not download weights.
     """
-    # You can thread anything you like through here; the pipeline/tasks only
-    # expect 'label' (user-friendly) and optional 'names' for class labels.
     if task.lower() in ("detect", "d"):
         return {"label": "fast-contour (no-ML)", "names": {}}
     if task.lower() in ("heatmap", "hm"):
         return {"label": "laplacian-heatmap (no-ML)", "names": {}}
+    if task.lower() in ("classify", "clf"):
+        return {"label": "simple-classify (no-ML)", "names": {}}
+    if task.lower() in ("pose",):
+        return {"label": "simple-pose (no-ML)", "names": {}}
+    if task.lower() in ("pse",):
+        return {"label": "simple-pse (no-ML)", "names": {}}
+    if task.lower() in ("obb", "object"):
+        return {"label": "simple-obb (no-ML)", "names": {}}
     return {"label": "custom", "names": {}}

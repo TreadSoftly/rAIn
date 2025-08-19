@@ -110,9 +110,11 @@ DEFAULT_PACK: List[str] = [
     "yolov8x.pt",
     "yolo11x.pt",
     "yolo12x.pt",
-    # LIGHT/DEV/TEST Live Video/Small Deivce
+    "yolo12x.onnx",
     "yolov8n.pt",
     "yolov8n.onnx",
+    "yolov8s.pt"
+    "yolov8s.onnx",
     "yolo11n.pt",
     "yolo11n.onnx",
     "yolo12n.pt",
@@ -121,14 +123,22 @@ DEFAULT_PACK: List[str] = [
     # SEG
     "yolov8x-seg.pt",
     "yolov8n-seg.onnx",
+    "yolov8s-seg.pt",
+    "yolov8s-seg.onnx",
     "yolo11x-seg.pt",
     "yolo11n-seg.onnx",
+    "yolo11s-seg.pt",
+    "yolo11s-seg.onnx",
 
     # POSE
     "yolov8x-pose.pt",
     "yolov8n-pose.onnx",
+    "yolov8s-pose.pt",
+    "yolov8s-pose.onnx",
     "yolo11x-pose.pt",
     "yolo11n-pose.onnx",
+    "yolo11s-pose.pt",
+    "yolo11s-pose.onnx",
 
     # CLS
     "yolov8x-cls.pt",
@@ -139,8 +149,12 @@ DEFAULT_PACK: List[str] = [
     # OBB
     "yolov8x-obb.pt",
     "yolov8n-obb.onnx",
+    "yolov8s-obb.pt",
+    "yolov8s-obb.onnx",
     "yolo11x-obb.pt",
     "yolo11n-obb.onnx",
+    "yolo11s-obb.pt",
+    "yolo11s-obb.onnx",
 ]
 
 # ---------------------------------------------------------------------

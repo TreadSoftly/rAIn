@@ -30,5 +30,9 @@ lint:
 #  Quick manual sanity-run (edit the target image to taste)
 # --------------------------------------------------------------------------- #
 run:
-	# Example CLI invocation - feel free to customise
-	target tests/assets/shibuya.jpg hm --alpha 0.5
+	# Example CLI invocations - feel free to customise:
+	#   target tests/assets/assets.jpg hm
+	#   target tests/assets/assets.jpg pse
+	#   target tests/assets/assets.jpg clf --topk 3 --annotate
+	#   target tests/assets/assets.jpg obb
+	target tests/assets/assets.jpg hm

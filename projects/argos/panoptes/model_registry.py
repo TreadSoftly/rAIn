@@ -4,71 +4,44 @@ panoptes.model_registry
 --------------------------
 *Single* source-of-truth for every weight-selection decision.
 
-Hard-locking rules (2025-08-07)
+Hard-locking rules
 ────────────────────────────────────────────────────────────────────────
 1. **Only** the paths listed in ``WEIGHT_PRIORITY`` are ever considered.
 2. No directory scans, no implicit “-seg” discovery, no env-variable
    overrides (`panoptes_*`).  The *override=* argument in
-   ``load_detector/segmenter`` is retained exclusively for unit-tests or
-   ad-hoc scripts that call those helpers **directly**.
+   ``load_detector/segmenter/...`` is retained for unit-tests and ad‑hoc use.
 3. If a required weight is missing we raise **RuntimeError** immediately
    - downstream code must catch or let the program abort.
-
-Progress note
-─────────────
-We wrap YOLO init in a tiny `simple_status` spinner (auto-disabled off-TTY
-or when a parent progress bar is active).
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import importlib
 import logging
-import sys
-import contextlib
 import os
+import sys
 from pathlib import Path
-from typing import Final, Literal, Optional, Union
+from typing import Final, Optional, Union
 
-# optional progress
+
+# ────────────────────────────────────────────────────────────────
+#  Optional progress (safe to import even if progress module absent)
+# ────────────────────────────────────────────────────────────────
 try:
     from .progress.progress_ux import simple_status  # type: ignore
 except Exception:  # pragma: no cover
     simple_status = None  # type: ignore
 
-# ────────────────────────────────────────────────────────────────
-#  Ultralytics import (kept soft so linting works without it)
-# ────────────────────────────────────────────────────────────────
-try:
-    _ultra_mod = importlib.import_module("ultralytics")
-    _yolo_cls = getattr(_ultra_mod, "YOLO", None)
-    try:
-        # Ultralytics may expose a loguru Logger (has .remove()) or std logging.Logger
-        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
-        remover = getattr(_ULTRA_LOGGER, "remove", None)
-        if callable(remover):
-            remover()  # silence loguru banner
-        else:
-            # stdlib logger: clear handlers if any
-            handlers = list(getattr(_ULTRA_LOGGER, "handlers", []))
-            remove_handler = getattr(_ULTRA_LOGGER, "removeHandler", None)
-            for h in handlers:
-                if callable(remove_handler):
-                    remove_handler(h)
-    except Exception:
-        pass
-except Exception:  # pragma: no cover
-    _yolo_cls = None
-YOLO = _yolo_cls
 
 # ────────────────────────────────────────────────────────────────
-#  logging (explicit, human-friendly, no stack noise)
+#  Logging (explicit, human-friendly, no stack noise)
 # ────────────────────────────────────────────────────────────────
 _LOG = logging.getLogger("panoptes.model_registry")
 if not _LOG.handlers:
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(h)
+    _h = logging.StreamHandler(sys.stderr)
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    _LOG.addHandler(_h)
 _LOG.setLevel(logging.WARNING)
 
 
@@ -76,7 +49,6 @@ def _say(msg: str) -> None:
     _LOG.info(f"[panoptes] {msg}")
 
 
-# Allow callers (e.g., CLI) to opt-in to chattier logs without env-vars.
 def set_log_level(level: int) -> None:
     """Set registry logger level (e.g., logging.INFO for verbose)."""
     _LOG.setLevel(level)
@@ -88,139 +60,132 @@ def set_verbose(enabled: bool = True) -> None:
 
 
 # ────────────────────────────────────────────────────────────────
-#  Canonical model folders
+#  Model folder(s)
 # ────────────────────────────────────────────────────────────────
-_ROOT: Final[Path] = Path(__file__).resolve().parent  # …/panoptes
-_MODEL_DIR_A = _ROOT / "model"  # packaged weights (preferred)
-_MODEL_DIR_B = _ROOT.parent / "model"  # legacy path (fallback)
+_ROOT: Final[Path] = Path(__file__).resolve().parent            # …/panoptes
+_MODEL_DIR_A = _ROOT / "model"                                  # packaged weights (preferred)
+_MODEL_DIR_B = _ROOT.parent / "model"                           # legacy path (fallback)
 
 # Prefer packaged dir; only fall back to legacy if it already exists
 MODEL_DIR: Final[Path] = _MODEL_DIR_A if _MODEL_DIR_A.exists() or not _MODEL_DIR_B.exists() else _MODEL_DIR_B
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+
 # ────────────────────────────────────────────────────────────────
 #  *** WEIGHT SELECTION TABLE ***
 #  Edit this ONE place if you add/rename checkpoints
-#
 #  Only list **real** upstream files you actually keep in panoptes/model.
-#  (No placeholders. No names that don’t exist.)
 # ────────────────────────────────────────────────────────────────
 
 # DETECTION (boxes)
 _DETECT_LIST: list[Path] = [
-    MODEL_DIR / "yolov8x.pt",    # MAIN (stable, wide support)
-    MODEL_DIR / "yolo11x.pt",    # BACKUP (newer, larger)
-    MODEL_DIR / "yolov8n.onnx",  # Fast/Dev/Test | For Live Video | Small Devices
-    MODEL_DIR / "yolo12x.pt",
+    MODEL_DIR / "yolov8x.pt",
+    MODEL_DIR / "yolo11x.pt",
     MODEL_DIR / "yolo11x.onnx",
-    MODEL_DIR / "yolov8x.onnx",
-    MODEL_DIR / "yolo11s.pt",
     MODEL_DIR / "yolo11s.onnx",
+    MODEL_DIR / "yolo12x.pt",
     MODEL_DIR / "yolov8s.pt",
     MODEL_DIR / "yolov8s.onnx",
-    MODEL_DIR / "yolo12n.onnx",
-    MODEL_DIR / "yolo12n.pt",
+    MODEL_DIR / "yolo11s.pt",
+    MODEL_DIR / "yolov8n.pt",
+    MODEL_DIR / "yolov8n.onnx",
     MODEL_DIR / "yolo11n.pt",
     MODEL_DIR / "yolo11n.onnx",
-    MODEL_DIR / "yolov8n.pt",
+    MODEL_DIR / "yolo12n.onnx",
+    MODEL_DIR / "yolo12n.pt",
 ]
 
 # SEGMENTATION (heatmaps)
 _HEATMAP_LIST: list[Path] = [
-    MODEL_DIR / "yolo11x-seg.pt",   # MAIN
-    MODEL_DIR / "yolo11x-seg.onnx", # BACKUP
-    MODEL_DIR / "yolov8n-seg.onnx", # Fast/Dev/Test | For Live Video | Small Devices
     MODEL_DIR / "yolov8x-seg.pt",
+    MODEL_DIR / "yolo11x-seg.pt",
+    MODEL_DIR / "yolo11x-seg.onnx",
+    MODEL_DIR / "yolov8x-seg.onnx",
     MODEL_DIR / "yolo11s-seg.pt",
     MODEL_DIR / "yolo11s-seg.onnx",
-    MODEL_DIR / "yolov8x-seg.onnx",
     MODEL_DIR / "yolo11n-seg.pt",
     MODEL_DIR / "yolo11n-seg.onnx",
     MODEL_DIR / "yolov8n-seg.pt",
+    MODEL_DIR / "yolov8n-seg.onnx",
 ]
 
 # CLASSIFICATION
 _CLASSIFY_LIST: list[Path] = [
-    MODEL_DIR / "yolov8x-cls.pt",
     MODEL_DIR / "yolo11x-cls.pt",
-    MODEL_DIR / "yolo11s-cls.pt",
+    MODEL_DIR / "yolov8x-cls.pt",
     MODEL_DIR / "yolov8s-cls.pt",
-    MODEL_DIR / "yolo11n-cls.pt",
+    MODEL_DIR / "yolo11s-cls.pt",
     MODEL_DIR / "yolov8n-cls.pt",
+    MODEL_DIR / "yolo11n-cls.pt",
 ]
 
 # POSE (keypoints)
 _POSE_LIST: list[Path] = [
-    MODEL_DIR / "yolov8x-pose.pt",
     MODEL_DIR / "yolo11x-pose.pt",
-    MODEL_DIR / "yolo11s-pose.pt",
+    MODEL_DIR / "yolov8x-pose.pt",
     MODEL_DIR / "yolov8s-pose.pt",
-    MODEL_DIR / "yolo11n-pose.pt",
+    MODEL_DIR / "yolo11s-pose.pt",
     MODEL_DIR / "yolov8n-pose.pt",
+    MODEL_DIR / "yolo11n-pose.pt",
 ]
 
 # OBB (oriented boxes)
 _OBB_LIST: list[Path] = [
-    MODEL_DIR / "yolov8x-obb.pt",
     MODEL_DIR / "yolo11x-obb.pt",
-    MODEL_DIR / "yolo11s-obb.pt",
+    MODEL_DIR / "yolov8x-obb.pt",
     MODEL_DIR / "yolov8s-obb.pt",
-    MODEL_DIR / "yolo11n-obb.pt",
+    MODEL_DIR / "yolo11s-obb.pt",
     MODEL_DIR / "yolov8n-obb.pt",
+    MODEL_DIR / "yolo11n-obb.pt",
 ]
 
 # “small / fast” (live video / tiny devices)
 _DETECT_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolov8n.onnx", # MAIN
-    MODEL_DIR / "yolo11n.onnx", # BACKUP
-    MODEL_DIR / "yolov8n.pt",   # Large File Main
-    MODEL_DIR / "yolo11n.pt",   # Large File Backup
-    MODEL_DIR / "yolo11n.onnx", # Catch-All Backup
+    MODEL_DIR / "yolov8s.onnx",
+    MODEL_DIR / "yolo11s.onnx",
+    MODEL_DIR / "yolo12s.onnx",
+    MODEL_DIR / "yolo11n.onnx",
+    MODEL_DIR / "yolo11n.pt",
 ]
 
 _HEATMAP_SMALL_LIST: list[Path] = [
     MODEL_DIR / "yolov8n-seg.onnx",
     MODEL_DIR / "yolo11n-seg.onnx",
-    MODEL_DIR / "yolov8n-seg.pt",
     MODEL_DIR / "yolo11n-seg.pt",
+    MODEL_DIR / "yolov8n-seg.pt",
 ]
 
 _CLASSIFY_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolov8n-cls.pt",
-    MODEL_DIR / "yolo11n-cls.pt",
+    MODEL_DIR / "yolo11x-cls.pt",
+    MODEL_DIR / "yolov8x-cls.pt",
 ]
 
 _POSE_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolov8n-pose.pt",
-    MODEL_DIR / "yolo11n-pose.pt",
+    MODEL_DIR / "yolo11s-pose.onnx",
+    MODEL_DIR / "yolov8s-pose.onnx",
 ]
 
 _OBB_SMALL_LIST: list[Path] = [
-    MODEL_DIR / "yolov8n-obb.pt",
-    MODEL_DIR / "yolo11n-obb.pt",
+    MODEL_DIR / "yolo11s-obb.onnx",
+    MODEL_DIR / "yolov8s-obb.onnx",
 ]
 
 WEIGHT_PRIORITY: dict[str, list[Path]] = {
-    # Object detection
     "detect": _DETECT_LIST,
-    # GeoJSON uses detection picks (copy to keep lists independent)
-    "geojson": list(_DETECT_LIST),
-    # Instance segmentation (heatmaps)
+    "geojson": list(_DETECT_LIST),  # uses detection picks
     "heatmap": _HEATMAP_LIST,
-    # Classification
     "classify": _CLASSIFY_LIST,
-    # Pose
     "pose": _POSE_LIST,
-    # Oriented detection
     "obb": _OBB_LIST,
 
-    # “small / fast” sets
+    # small / fast
     "detect_small": _DETECT_SMALL_LIST,
     "heatmap_small": _HEATMAP_SMALL_LIST,
     "classify_small": _CLASSIFY_SMALL_LIST,
     "pose_small": _POSE_SMALL_LIST,
     "obb_small": _OBB_SMALL_LIST,
 }
+
 
 # ────────────────────────────────────────────────────────────────
 #  Internal helpers
@@ -230,34 +195,71 @@ def _first_existing(paths: list[Path]) -> Optional[Path]:
     return next((p for p in paths if p.exists()), None)
 
 
+def _resolve_yolo_class() -> Optional[type]:
+    """
+    Import and return ultralytics.YOLO lazily.
+
+    This honors any monkeypatch (e.g., unit tests that install a fake
+    ``ultralytics`` module **before** the loader is called) and avoids
+    binding to the real library at module import time.
+    """
+    try:
+        mod = importlib.import_module("ultralytics")
+        yolo_cls = getattr(mod, "YOLO", None)
+        # best-effort: silence banners/loguru noise if present
+        try:
+            from ultralytics.utils import LOGGER as _ULOG  # type: ignore
+            remover = getattr(_ULOG, "remove", None)
+            if callable(remover):
+                try:
+                    remover()
+                except Exception:
+                    pass
+            else:
+                for h in list(getattr(_ULOG, "handlers", [])):
+                    try:
+                        _ULOG.removeHandler(h)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return yolo_cls
+    except Exception:
+        return None
+
+
 @functools.lru_cache(maxsize=None)
 def _load(
     weight: Optional[Path],
     *,
-    task: Literal["detect", "segment", "classify", "pose", "obb"],
+    task: str,  # keep liberal typing to keep static checkers happy
 ) -> Optional[object]:
     """
-    Cached wrapper around ``YOLO(path, task=...)`` to avoid re-inits,
-    and to kill the “Unable to automatically guess model task” warning.
+    Cached wrapper around ``YOLO(path, task=...)`` to avoid re-inits and kill
+    the “Unable to automatically guess model task” warning when supported.
 
-    Some Ultralytics builds don't accept the ``task=`` kwarg; fall back
-    to plain ``YOLO(path)`` in that case.
+    NOTE: Ultralytics is resolved lazily here (see _resolve_yolo_class()) so
+    unit tests that monkeypatch ``ultralytics`` will be honored even if this
+    module was imported earlier in the session.
     """
-    if _yolo_cls is None or weight is None:
+    yolo_cls = _resolve_yolo_class()
+    if yolo_cls is None or weight is None:
         return None
+
     _say(f"init YOLO: task={task} path={weight}")
 
-    # spinner while Ultralytics initialises (safe no-op off-TTY or when nested)
     cm: contextlib.AbstractContextManager[object]
     if (simple_status is not None) and (os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"):
         cm = simple_status(f"Initialising YOLO ({task})")  # type: ignore[assignment]
     else:
         cm = contextlib.nullcontext()
+
     with cm:
         try:
-            return _yolo_cls(str(weight), task=task)
+            return yolo_cls(str(weight), task=task)  # type: ignore[call-arg]
         except TypeError:
-            return _yolo_cls(str(weight))
+            # Some releases don't accept task=...
+            return yolo_cls(str(weight))            # type: ignore[call-arg]
 
 
 def _require(model: Optional[object], task: str) -> object:
@@ -270,83 +272,59 @@ def _require(model: Optional[object], task: str) -> object:
 # ────────────────────────────────────────────────────────────────
 #  Public helpers
 # ────────────────────────────────────────────────────────────────
-def pick_weight(
-    task: Literal["detect", "heatmap", "geojson", "classify", "pose", "obb"],
-    *,
-    small: bool = False,
-) -> Optional[Path]:
+def pick_weight(task: str, *, small: bool = False) -> Optional[Path]:
     """
     Return the path to the **first** existing weight for *task* or *None*.
 
-    When *small=True* we prefer the *_small* list but fall back to the
-    normal list if no file from the preferred list exists.
+    When *small=True* prefer the *_small* list, falling back to the normal
+    list if none of those files exist.
     """
     if small:
         pref = WEIGHT_PRIORITY.get(f"{task}_small", [])
         chosen = _first_existing(pref)
         if chosen is not None:
             return chosen
-        # graceful fallback to normal set
     paths = WEIGHT_PRIORITY.get(task, [])
     return _first_existing(paths)
 
 
-def load_detector(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO* detector - honouring the override when provided."""
+def _choose(task: str, *, small: bool, override: Optional[Union[str, Path]]) -> Optional[Path]:
     if override is not None:
-        chosen = Path(override).expanduser()
-        _say(f"task=detect small={small} override={chosen}")
-    else:
-        chosen = pick_weight("detect", small=small)
-        _say(f"task=detect small={small} weight={chosen}")
+        return Path(override).expanduser()
+    return pick_weight(task, small=small)
+
+
+def load_detector(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
+    chosen = _choose("detect", small=small, override=override)
+    _say(f"task=detect small={small} {'override' if override else 'weight'}={chosen}")
     model = _load(chosen, task="detect")
     return _require(model, "detect")
 
 
 def load_segmenter(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO-Seg* model - abort if no suitable weight is found."""
-    if override is not None:
-        chosen = Path(override).expanduser()
-        _say(f"task=heatmap small={small} override={chosen}")
-    else:
-        chosen = pick_weight("heatmap", small=small)
-        _say(f"task=heatmap small={small} weight={chosen}")
+    chosen = _choose("heatmap", small=small, override=override)
+    _say(f"task=heatmap small={small} {'override' if override else 'weight'}={chosen}")
     model = _load(chosen, task="segment")
     return _require(model, "heatmap")
 
 
 def load_classifier(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO-Cls* model - abort if no suitable weight is found."""
-    if override is not None:
-        chosen = Path(override).expanduser()
-        _say(f"task=classify small={small} override={chosen}")
-    else:
-        chosen = pick_weight("classify", small=small)
-        _say(f"task=classify small={small} weight={chosen}")
+    chosen = _choose("classify", small=small, override=override)
+    _say(f"task=classify small={small} {'override' if override else 'weight'}={chosen}")
     model = _load(chosen, task="classify")
     return _require(model, "classify")
 
 
 def load_pose(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO-Pose* model - abort if no suitable weight is found."""
-    if override is not None:
-        chosen = Path(override).expanduser()
-        _say(f"task=pose small={small} override={chosen}")
-    else:
-        chosen = pick_weight("pose", small=small)
-        _say(f"task=pose small={small} weight={chosen}")
+    chosen = _choose("pose", small=small, override=override)
+    _say(f"task=pose small={small} {'override' if override else 'weight'}={chosen}")
     model = _load(chosen, task="pose")
     return _require(model, "pose")
 
 
 def load_obb(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    """Return a *YOLO-OBB* model - abort if no suitable weight is found."""
-    if override is not None:
-        chosen = Path(override).expanduser()
-        _say(f"task=obb small={small} override={chosen}")
-    else:
-        chosen = pick_weight("obb", small=small)
-        _say(f"task=obb small={small} weight={chosen}")
+    chosen = _choose("obb", small=small, override=override)
+    _say(f"task=obb small={small} {'override' if override else 'weight'}={chosen}")
     model = _load(chosen, task="obb")
     return _require(model, "obb")
 

@@ -85,9 +85,17 @@ if ($proj -eq 'argos') {
   $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
   $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
+  # Optional constraints
+  $constraints = Join-Path $ROOT 'projects\argos\constraints.txt'
+  $useConstraints = Test-Path -LiteralPath $constraints
+
   & $vpy -m pip install --upgrade pip setuptools wheel build *> $null
   Push-Location "$ROOT\projects\argos"
-  & $vpy -m pip install -e .[dev] *> $null
+  if ($useConstraints) {
+    & $vpy -m pip install -e .[dev] -c $constraints *> $null
+  } else {
+    & $vpy -m pip install -e .[dev] *> $null
+  }
 
   if ($runTests) {
     & $vpy -m pytest -q
@@ -98,10 +106,13 @@ if ($proj -eq 'argos') {
   if ($wantWheel) { $buildArgs += '--wheel' }
   & $vpy -m build @buildArgs
 
+  # Final sanity check
+  & $vpy -m pip check
+
   Pop-Location
 
   $outDir = Join-Path $ROOT 'dist\argos'
-  if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
+  if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
   Get-ChildItem "$ROOT\projects\argos\dist\*" -File -ErrorAction SilentlyContinue | ForEach-Object {
     Copy-Item $_.FullName $outDir -Force
   }

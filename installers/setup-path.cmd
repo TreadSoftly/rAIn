@@ -27,7 +27,13 @@ reg add HKCU\Environment /v Path /t REG_EXPAND_SZ /d "%NEW%" /f >NUL
 rem Update current cmd.exe session immediately:
 set "PATH=%PATH%;%TARGET%"
 
-if "%_QUIET%"=="0" echo ✅ Added. Open a new PowerShell for global effect.
+if "%_QUIET%"=="0" (
+  echo ✅ Added. Open a new PowerShell for global effect.
+  echo Commands available:
+  echo   • build, all, argos
+  echo   • d/detect, hm/heatmap, gj/geojson, lv/livevideo
+  echo   • classify/clf, pose/pse, obb/object
+)
 exit /b 0
 
 :skip
