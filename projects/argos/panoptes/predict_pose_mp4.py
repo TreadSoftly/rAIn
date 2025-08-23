@@ -1,9 +1,26 @@
 # projects/argos/panoptes/predict_pose_mp4.py
 """
-predict_pose_mp4 — per-frame pose overlay for videos.
+predict_pose_mp4 — per‑frame pose overlay for videos.
 
-Strict model selection via panoptes.model_registry.load_pose().
-FFmpeg→OpenCV→AVI encode ladder; single "Saved → …" line; progress policy like other workers.
+ONE PROGRESS SYSTEM
+───────────────────
+* Uses ONLY the Halo/Rich spinner from panoptes.progress.
+* If a parent spinner is passed (recommended via CLI), we ONLY update its
+  [File | Job | Model] fields (no 'current' writes) so the single-line
+  format and colors exactly match Detect/Heatmap/GeoJSON.
+* If no parent spinner is provided AND no global spinner is marked active
+  (PANOPTES_PROGRESS_ACTIVE != "1"), a local Halo spinner is started so
+  standalone runs still have a single consistent line.
+
+Strict weights
+──────────────
+* Either pass explicit *weights=* or load strictly via model_registry.load_pose().
+
+Output
+──────
+* FFmpeg H.264 preferred → OpenCV mp4v fallback → keeps MJPG .avi last.
+* Emits "<stem>_pose.mp4" (or ".avi" fallback).
+* Prints exactly one "Saved → <clickable>" line at the end (OSC‑8).
 """
 
 from __future__ import annotations
@@ -12,61 +29,29 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Callable, ContextManager, Final, Protocol, Tuple, cast
+from typing import Any, Callable, Optional, Protocol, Tuple, cast
 
 import cv2  # type: ignore
 import numpy as np
+from numpy.typing import NDArray
 
-# ────────────────────────────────────────────────────────────────────────────────
-# ROOT resolution (single assignment)
-# ────────────────────────────────────────────────────────────────────────────────
+from panoptes import ROOT  # type: ignore[import-not-found]
+from panoptes.model_registry import load_pose  # type: ignore[import-not-found]
 
-def _resolve_root() -> Path:
-    try:
-        from panoptes import ROOT as _ROOT  # type: ignore[import-not-found]
-        return _ROOT
-    except Exception:
-        return Path.cwd()
-
-ROOT: Final[Path] = _resolve_root()
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Type aliases
-# ────────────────────────────────────────────────────────────────────────────────
-
-if TYPE_CHECKING:
-    import numpy as _np
-    import numpy.typing as npt
-
-    NDArrayU8 = npt.NDArray[_np.uint8]
-else:
-    NDArrayU8 = Any  # type: ignore[assignment]
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Strict model loader (central registry)
-# ────────────────────────────────────────────────────────────────────────────────
-
+# ---- progress spinner (Halo-based) ------------------------------------------
 try:
-    from panoptes.model_registry import load_pose  # type: ignore[import-not-found]
+    from panoptes.progress import percent_spinner  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover
-    load_pose = None  # type: ignore[assignment]
+    percent_spinner = None  # type: ignore[assignment]
 
-# progress (optional)
-try:
-    from panoptes.progress import ProgressEngine  # type: ignore[import-not-found]
-    from panoptes.progress.bridges import live_percent  # type: ignore[import-not-found]
-    from panoptes.progress.progress_ux import simple_status  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover
-    ProgressEngine = None  # type: ignore[assignment]
-    live_percent = None  # type: ignore[assignment]
-    simple_status = None  # type: ignore[assignment]
-
+# ---- logging ----------------------------------------------------------------
 _LOG = logging.getLogger("panoptes.predict_pose_mp4")
 if not _LOG.handlers:
-    h = logging.StreamHandler()
+    h = logging.StreamHandler(sys.stderr)
     h.setFormatter(logging.Formatter("%(message)s"))
     _LOG.addHandler(h)
 _LOG.setLevel(logging.WARNING)
@@ -76,8 +61,22 @@ def _say(msg: str) -> None:
     _LOG.info(f"[panoptes] {msg}")
 
 
+# ---- helpers ----------------------------------------------------------------
 class SpinnerLike(Protocol):
     def update(self, **kwargs: Any) -> "SpinnerLike": ...
+
+
+class _NullCtx:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        return False
 
 
 def _osc8(label: str, path: Path) -> str:
@@ -101,7 +100,32 @@ def _avi_writer(path: Path, fps: float, size: Tuple[int, int]) -> cv2.VideoWrite
     return vw
 
 
-# COCO‑like edges for 17 KP models
+def _opencv_reencode_to_mp4(src_avi: Path, dst_mp4: Path, fps: float) -> bool:
+    cap = cv2.VideoCapture(str(src_avi))
+    if not cap.isOpened():
+        return False
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    out = cv2.VideoWriter(str(dst_mp4), _fourcc("mp4v"), fps, (w, h))
+    if not out.isOpened():
+        cap.release()
+        return False
+    ok_any = False
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        out.write(frame)
+        ok_any = True
+    cap.release()
+    out.release()
+    try:
+        return ok_any and dst_mp4.exists() and dst_mp4.stat().st_size > 0
+    except Exception:
+        return False
+
+
+# COCO-17 skeleton edges
 _COCO_EDGES: list[tuple[int, int]] = [
     (0, 1), (1, 3), (0, 2), (2, 4),
     (5, 7), (7, 9), (6, 8), (8, 10),
@@ -109,47 +133,42 @@ _COCO_EDGES: list[tuple[int, int]] = [
     (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
 ]
 
+NDArrayU8 = NDArray[np.uint8]
+NDArrayF32 = NDArray[np.float32]
 
-def _draw_pose(frame: NDArrayU8, res: Any) -> NDArrayU8:
-    color_pt = (0, 255, 255)
-    color_ln = (0, 210, 255)
-    kp_obj = getattr(res, "keypoints", None)
-    if kp_obj is None:
-        return frame
-    pts = getattr(kp_obj, "xy", None)
-    if pts is None:
-        pts = getattr(kp_obj, "data", None)
-    if pts is not None and hasattr(pts, "cpu"):
+
+def _poke(sp: SpinnerLike | None, **fields: Any) -> None:
+    if sp is None:
+        return
+    try:
+        sp.update(**fields)
+    except Exception:
+        pass
+
+
+def _model_label(m: Any) -> str:
+    cand = (
+        getattr(m, "name", None)
+        or getattr(m, "model_name", None)
+        or getattr(m, "weights", None)
+        or getattr(getattr(m, "model", None), "name", None)
+    )
+    if cand:
         try:
-            pts = pts.cpu().numpy()
+            return Path(str(cand)).name
         except Exception:
-            pass
-    arr = np.asarray(pts if pts is not None else [], dtype=np.float32)
-    if arr.size == 0:
-        return frame
-    arr = arr.reshape(arr.shape[0], -1, 2)
-    n, k, _ = arr.shape
-    for i in range(n):
-        p = arr[i]
-        if k == 17:
-            for a, b in _COCO_EDGES:
-                ax, ay = int(p[a, 0]), int(p[a, 1])
-                bx, by = int(p[b, 0]), int(p[b, 1])
-                cv2.line(frame, (ax, ay), (bx, by), color_ln, 2)
-        for j in range(k):
-            x, y = int(p[j, 0]), int(p[j, 1])
-            cv2.circle(frame, (x, y), 3, color_pt, -1)
-    return frame
+            return str(cand)
+    return m.__class__.__name__
 
 
+# ---- main worker -------------------------------------------------------------
 def main(  # noqa: C901
     src: str | Path,
     *,
     out_dir: str | Path | None = None,
     weights: str | Path | None = None,
-    small: bool = False,
-    conf: float = 0.25,
-    iou: float = 0.45,
+    conf: float | None = None,
+    iou: float | None = None,
     verbose: bool = False,
     progress: SpinnerLike | None = None,
     **kw: Any,
@@ -165,16 +184,15 @@ def main(  # noqa: C901
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Model (strict)
-    override: Path | None = None
+    # strict model
+    override: Optional[Path] = None
     if weights is not None:
         cand = Path(weights).expanduser().resolve()
         if not cand.exists():
             raise FileNotFoundError(f"override weight not found: {cand}")
         override = None if cand.is_dir() else cand
-    if load_pose is None:
-        raise RuntimeError("Pose loader is unavailable (model_registry missing).")
     pose_model: Any = load_pose(override=override)  # type: ignore[call-arg]
+    model_lbl = _model_label(pose_model)
 
     cap = cv2.VideoCapture(str(srcp))
     if not cap.isOpened():
@@ -189,91 +207,87 @@ def main(  # noqa: C901
     avi = tmp_dir / f"{srcp.stem}.avi"
     vw = _avi_writer(avi, fps, (w, h))
 
-    ps_progress_active = (os.environ.get("PANOPTES_PROGRESS_ACTIVE") or "") == "1"
-    use_local = (progress is None) and (ProgressEngine is not None) and (live_percent is not None) and (not ps_progress_active)  # type: ignore[truthy-bool]
-    if use_local:
-        eng = ProgressEngine()  # type: ignore
-        ctx: ContextManager[None] = cast(ContextManager[None], live_percent(eng, prefix="POSE-MP4"))  # type: ignore
-    else:
-        eng = None
-
-        class _Null:
-            def __enter__(self) -> None:  # noqa: D401
-                return None
-            def __exit__(self, et: type[BaseException] | None, ex: BaseException | None, tb: TracebackType | None) -> bool:
-                return False
-        ctx = _Null()
+    # local spinner only if parent not provided AND no global spinner is active
+    parent_active = (os.environ.get("PANOPTES_PROGRESS_ACTIVE") or "").strip() == "1"
+    use_local = (progress is None) and (not parent_active) and (percent_spinner is not None)
+    sp_ctx = percent_spinner(prefix="POSE-MP4", stream=sys.stderr) if use_local else _NullCtx()  # type: ignore[operator]
 
     i = 0
-    with ctx:
-        if eng:
-            eng.set_total(float(total + 1))
-            eng.set_current("frame 0")
-        elif progress is not None:
-            progress.update(current=f"frame 0/{total}")
+    file_lbl = srcp.name
+    with sp_ctx:
+        if use_local:
+            _poke(sp_ctx, total=float(total + 1), count=0.0, item=file_lbl, job=f"frame 0/{total}", model=model_lbl)  # type: ignore[arg-type]
+        else:
+            _poke(progress, item=file_lbl, job=f"frame 0/{total}", model=model_lbl)
 
         while True:
             ok, frame_raw = cap.read()
             if not ok:
                 break
-            if getattr(frame_raw, "dtype", None) is not None and frame_raw.dtype != np.uint8:
-                frame_raw = frame_raw.astype(np.uint8)
-            frame: NDArrayU8 = cast(NDArrayU8, frame_raw)
+            frame: NDArrayU8 = np.asarray(frame_raw, dtype=np.uint8)
 
-            res_list: list[Any] = cast(list[Any], pose_model.predict(frame, imgsz=640, conf=conf, iou=iou, verbose=False))
+            res_list: list[Any] = cast(
+                list[Any],
+                pose_model.predict(frame, imgsz=640, conf=(conf or 0.25), iou=(iou or 0.45), verbose=False)
+            )
             res = res_list[0] if res_list else None
-            if res is not None:
-                frame = _draw_pose(frame, res)
+            if res is not None and getattr(res, "keypoints", None) is not None:
+                kp_obj = res.keypoints
+                try:
+                    pts = getattr(kp_obj, "xy", None)
+                    if pts is None:
+                        pts = getattr(kp_obj, "data", None)
+                    if pts is not None and hasattr(pts, "cpu"):
+                        try:
+                            pts = pts.cpu().numpy()
+                        except Exception:
+                            pass
+                    pts_np: NDArrayF32 = np.asarray(pts if pts is not None else [], dtype=np.float32)
+                except Exception:
+                    pts_np = np.zeros((0, 0, 2), dtype=np.float32)
+
+                if pts_np.size and pts_np.ndim == 3 and pts_np.shape[2] >= 2:
+                    n, k, _ = pts_np.shape
+                    color_pt = (0, 255, 255)
+                    color_ln = (0, 210, 255)
+                    for b in range(n):
+                        p = pts_np[b, :, :2]
+                        if k == 17:
+                            for a, d in _COCO_EDGES:
+                                ax, ay = int(p[a, 0]), int(p[a, 1])
+                                dx, dy = int(p[d, 0]), int(p[d, 1])
+                                cv2.line(frame, (ax, ay), (dx, dy), color_ln, 2)
+                        for j in range(k):
+                            x, y = int(p[j, 0]), int(p[j, 1])
+                            cv2.circle(frame, (x, y), 3, color_pt, -1)
+
             vw.write(frame)
             i += 1
-            if eng:
-                eng.add(1.0, current_item=f"frame {min(i, total)}/{total}")
-            elif progress is not None:
-                progress.update(current=f"frame {min(i, total)}/{total}")
+
+            if use_local:
+                _poke(sp_ctx, count=float(i), item=file_lbl, job=f"frame {min(i, total)}/{total}", model=model_lbl)  # type: ignore[arg-type]
+            else:
+                _poke(progress, item=file_lbl, job=f"frame {min(i, total)}/{total}", model=model_lbl)
 
         cap.release()
         vw.release()
 
         preferred = out_dir / f"{srcp.stem}_pose.mp4"
-        if eng:
-            eng.set_current("encode mp4")
-        elif progress is not None:
-            progress.update(current="encode mp4")
+        if use_local:
+            _poke(sp_ctx, item=file_lbl, job="encode mp4", model=model_lbl)  # type: ignore[arg-type]
+        else:
+            _poke(progress, item=file_lbl, job="encode mp4", model=model_lbl)
 
         try:
-            if simple_status is not None and use_local:
-                sp: ContextManager[None] = cast(ContextManager[None], simple_status("FFmpeg re-encode"))
-            else:
-                class _Null2:
-                    def __enter__(self) -> None: return None
-                    def __exit__(self, et: type[BaseException] | None, ex: BaseException | None, tb: TracebackType | None) -> bool: return False
-                sp = _Null2()
-            with sp:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", str(avi), "-c:v", "libx264", "-crf", "23",
-                     "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(preferred)],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-                )
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(avi), "-c:v", "libx264", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(preferred)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+            )
             avi.unlink(missing_ok=True)
             final = preferred
         except (FileNotFoundError, subprocess.CalledProcessError):
-            ok_mp4 = False
-            cap2 = cv2.VideoCapture(str(avi))
-            if cap2.isOpened():
-                w2 = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
-                h2 = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                out = cv2.VideoWriter(str(preferred), _fourcc("mp4v"), fps, (w2, h2))
-                if out.isOpened():
-                    ok_any = False
-                    while True:
-                        ok, fr = cap2.read()
-                        if not ok:
-                            break
-                        out.write(fr)
-                        ok_any = True
-                    out.release()
-                    ok_mp4 = ok_any and preferred.exists() and preferred.stat().st_size > 0
-                cap2.release()
+            ok_mp4 = _opencv_reencode_to_mp4(avi, preferred, fps=fps)
             if ok_mp4:
                 avi.unlink(missing_ok=True)
                 final = preferred
@@ -283,8 +297,10 @@ def main(  # noqa: C901
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
         print(f"Saved → {_osc8(final.name, final)}")
-        if eng:
-            eng.add(1.0, current_item="done")
-        elif progress is not None:
-            progress.update(current="done")
+
+        if use_local:
+            _poke(sp_ctx, count=float(total + 1), item=file_lbl, job="done", model=model_lbl)  # type: ignore[arg-type]
+        else:
+            _poke(progress, item=file_lbl, job="done", model=model_lbl)
+
         return final

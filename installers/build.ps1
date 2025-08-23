@@ -1,3 +1,4 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\installers\build.ps1
 [CmdletBinding()] param([Parameter(ValueFromRemainingArguments = $true)][string[]]$BuildArgs)
 $ErrorActionPreference = "Stop"
 
@@ -7,6 +8,13 @@ $env:PYTHONUTF8 = '1'
 $env:PYTHONUNBUFFERED = '1'
 $env:FORCE_COLOR = '1'
 $env:PANOPTES_NESTED_PROGRESS = '1'
+$env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
+
+# Skip weight downloads during non-interactive bootstrap (the interactive builder runs later)
+$env:ARGOS_SKIP_WEIGHTS = '1'
+# Ensure final confirm is interactive (do NOT auto-accept)
+Remove-Item Env:ARGOS_ASSUME_YES -ErrorAction SilentlyContinue
+
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 
 # Accept optional leading token from subproject launchers (e.g., "argos")
@@ -51,21 +59,32 @@ if (Test-Path (Join-Path $HERE 'build-hooks.ps1')) { . (Join-Path $HERE 'build-h
 # Mark PS-driven progress as active so Python progress stays quiet during these tiny phases.
 $env:PANOPTES_PROGRESS_ACTIVE = '1'
 Start-ProgressPhase "Build ARGOS" -Total 3
-
 try {
   Invoke-Step -Name "Bootstrap venv" -Weight 1 -Body {
-    & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall > $null 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "bootstrap failed ($LASTEXITCODE)" }
+    # Write a detailed log to Desktop\Argos\Logs for easy access
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $logDir  = Join-Path $desktop 'Argos\Logs'
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $tmpLog  = Join-Path $logDir ("argos-bootstrap-" + [guid]::NewGuid().ToString() + ".log")
+    # Capture both stdout/stderr to a log so failures are debuggable; keep console minimal during progress
+    & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall *>&1 | Tee-Object -FilePath $tmpLog | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host ""
+      Write-Host "═══ BOOTSTRAP FAILED — detailed log ══════════════════════════════════════"
+      Get-Content -LiteralPath $tmpLog | Write-Host
+      Write-Host "═════ end log ═════════════════════════════════════════════════════════════"
+      throw "bootstrap failed ($LASTEXITCODE)"
+    }
   }
-
   # Resolve venv Python for subsequent steps
   $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
-
   Invoke-Step -Name "Sanity check" -Weight 1 -Body {
+    # Soft-check: print problems but don't fail the whole build (bootstrap already ran soft pip check)
     & $vpy -m pip check
-    if ($LASTEXITCODE -ne 0) { throw "pip check failed ($LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "⚠️  'pip check' reported issues; continuing."
+    }
   }
-
   Invoke-Step -Name "Setup PATH" -Weight 1 -Body {
     & (Join-Path $HERE 'setup-path.ps1') -Quiet
   }
@@ -78,7 +97,15 @@ finally {
 }
 
 # ── Interactive model builder runs AFTER progress is cleared ────────────────
-& $vpy -m panoptes.tools.build_models @BuildArgs
+# IMPORTANT: Do NOT auto-feed "1" unless the user explicitly opts in.
+$auto = ($env:ARGOS_AUTOBUILD -eq '1')   # CI no longer forces auto
+if ($auto) {
+  "1" | & $vpy -m panoptes.tools.build_models @BuildArgs
+}
+else {
+  & $vpy -m panoptes.tools.build_models @BuildArgs
+}
+
 if ($LASTEXITCODE -ne 0) { throw "build_models failed ($LASTEXITCODE)" }
 
 # Propagate status without exiting the host

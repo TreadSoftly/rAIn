@@ -1,9 +1,24 @@
 # projects/argos/panoptes/predict_obb_mp4.py
 """
-predict_obb_mp4 — per-frame oriented bounding boxes overlay for videos.
+predict_obb_mp4 — per‑frame oriented bounding boxes overlay for videos.
 
-Strict model selection via panoptes.model_registry.load_obb().
-FFmpeg→OpenCV→AVI encode ladder; single "Saved → …" line; progress policy like other workers.
+ONE PROGRESS SYSTEM
+───────────────────
+* Uses ONLY the Halo/Rich spinner from panoptes.progress.
+* If a parent spinner is passed (recommended via CLI), we ONLY update its
+  [File | Job | Model] fields (no 'current' writes) so the single-line
+  format/colors match Detect/Heatmap/GeoJSON.
+* If no parent spinner is provided AND no global spinner is marked active
+  (PANOPTES_PROGRESS_ACTIVE != "1"), a local Halo spinner is started for
+  standalone runs — still a single consistent line.
+
+Strict weights
+──────────────
+* Either pass explicit *weights=* or load strictly via model_registry.load_obb().
+
+Output ladder
+─────────────
+* FFmpeg H.264 preferred → OpenCV mp4v fallback → keep MJPG .avi as last resort.
 """
 
 from __future__ import annotations
@@ -12,65 +27,29 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Callable, ContextManager, Final, Protocol, Tuple, cast
+from typing import Any, Callable, Optional, Protocol, Tuple, cast
 
 import cv2  # type: ignore
 import numpy as np
+from numpy.typing import NDArray
 
-# ────────────────────────────────────────────────────────────────────────────────
-# ROOT resolution (single assignment)
-# ────────────────────────────────────────────────────────────────────────────────
+from panoptes import ROOT  # type: ignore[import-not-found]
+from panoptes.model_registry import load_obb  # type: ignore[import-not-found]
 
-def _resolve_root() -> Path:
-    try:
-        from panoptes import ROOT as _ROOT  # type: ignore[import-not-found]
-        return _ROOT
-    except Exception:
-        return Path.cwd()
-
-ROOT: Final[Path] = _resolve_root()
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Type aliases
-# ────────────────────────────────────────────────────────────────────────────────
-
-if TYPE_CHECKING:
-    import numpy as _np
-    import numpy.typing as npt
-
-    NDArrayU8 = npt.NDArray[_np.uint8]
-    NDArrayF32 = npt.NDArray[_np.float32]
-    Poly42F32 = NDArrayF32  # (4,2) float32 polygon; shape not enforced by checker
-else:
-    NDArrayU8 = Any  # type: ignore[assignment]
-    NDArrayF32 = Any  # type: ignore[assignment]
-    Poly42F32 = Any  # type: ignore[assignment]
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Strict model loader (central registry)
-# ────────────────────────────────────────────────────────────────────────────────
-
+# ---- progress spinner (Halo-based) ------------------------------------------
 try:
-    from panoptes.model_registry import load_obb  # type: ignore[import-not-found]
+    from panoptes.progress import percent_spinner  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover
-    load_obb = None  # type: ignore[assignment]
+    percent_spinner = None  # type: ignore[assignment]
 
-# progress (optional)
-try:
-    from panoptes.progress import ProgressEngine  # type: ignore[import-not-found]
-    from panoptes.progress.bridges import live_percent  # type: ignore[import-not-found]
-    from panoptes.progress.progress_ux import simple_status  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover
-    ProgressEngine = None  # type: ignore[assignment]
-    live_percent = None  # type: ignore[assignment]
-    simple_status = None  # type: ignore[assignment]
-
+# ---- logging ----------------------------------------------------------------
 _LOG = logging.getLogger("panoptes.predict_obb_mp4")
 if not _LOG.handlers:
-    h = logging.StreamHandler()
+    h = logging.StreamHandler(sys.stderr)
     h.setFormatter(logging.Formatter("%(message)s"))
     _LOG.addHandler(h)
 _LOG.setLevel(logging.WARNING)
@@ -80,8 +59,22 @@ def _say(msg: str) -> None:
     _LOG.info(f"[panoptes] {msg}")
 
 
+# ---- helpers ----------------------------------------------------------------
 class SpinnerLike(Protocol):
     def update(self, **kwargs: Any) -> "SpinnerLike": ...
+
+
+class _NullCtx:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        return False
 
 
 def _osc8(label: str, path: Path) -> str:
@@ -105,12 +98,41 @@ def _avi_writer(path: Path, fps: float, size: Tuple[int, int]) -> cv2.VideoWrite
     return vw
 
 
-def _extract_polys(res: Any) -> list[Poly42F32]:
+def _opencv_reencode_to_mp4(src_avi: Path, dst_mp4: Path, fps: float) -> bool:
+    cap = cv2.VideoCapture(str(src_avi))
+    if not cap.isOpened():
+        return False
+    w = int(cv2.CAP_PROP_FRAME_WIDTH if False else cap.get(cv2.CAP_PROP_FRAME_WIDTH))  # keep type-checkers happy
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    out = cv2.VideoWriter(str(dst_mp4), _fourcc("mp4v"), fps, (w, h))
+    if not out.isOpened():
+        cap.release()
+        return False
+    ok_any = False
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        out.write(frame)
+        ok_any = True
+    cap.release()
+    out.release()
+    try:
+        return ok_any and dst_mp4.exists() and dst_mp4.stat().st_size > 0
+    except Exception:
+        return False
+
+
+NDArrayU8 = NDArray[np.uint8]
+NDArrayF32 = NDArray[np.float32]
+
+
+def _extract_polys(res: Any) -> list[NDArrayF32]:
     """
     Return list of (4,2) float32 polygons if available; else [].
-    Supports Ultralytics OBB results (xyxyxyxy) and a few common variants.
+    Supports Ultralytics OBB results (xyxyxyxy) and variants; falls back to AABB.
     """
-    polys: list[Poly42F32] = []
+    polys: list[NDArrayF32] = []
 
     obb = getattr(res, "obb", None)
     if obb is not None:
@@ -126,14 +148,23 @@ def _extract_polys(res: Any) -> list[Poly42F32]:
             arr = np.asarray(pts, dtype=np.float32)
             if arr.size == 0:
                 continue
-            # Normalize to (N, 8) then to (N, 4, 2)
-            arr = arr.reshape(-1, 8)
-            p = arr.reshape(-1, 4, 2).astype(np.float32)
-            for poly in p:
-                polys.append(cast(Poly42F32, poly))
-            return polys  # prefer first successful representation
 
-    # Fallback: axis-aligned boxes
+            # Normalize to shape (-1, 8) then → (-1, 4, 2)
+            try:
+                flat = arr.reshape(-1, 8)
+            except Exception:
+                # Some reps may already be (N,4,2)
+                if arr.ndim == 3 and arr.shape[-2:] == (4, 2):
+                    flat = arr.reshape(-1, 8)
+                else:
+                    continue
+            shaped = flat.reshape(-1, 4, 2).astype(np.float32, copy=False)
+            for poly in shaped:
+                polys.append(np.asarray(poly, dtype=np.float32))
+            if polys:
+                return polys  # prefer first found representation
+
+    # AABB fallback
     boxes = getattr(getattr(res, "boxes", None), "xyxy", None)
     if boxes is not None:
         if hasattr(boxes, "cpu"):
@@ -141,20 +172,44 @@ def _extract_polys(res: Any) -> list[Poly42F32]:
                 boxes = boxes.cpu().numpy()
             except Exception:
                 pass
-        arr = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
-        for x1, y1, x2, y2 in arr:
+        arr2 = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+        for x1, y1, x2, y2 in arr2:
             polys.append(np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32))
     return polys
 
 
+def _poke(sp: SpinnerLike | None, **fields: Any) -> None:
+    if sp is None:
+        return
+    try:
+        sp.update(**fields)
+    except Exception:
+        pass
+
+
+def _model_label(m: Any) -> str:
+    cand = (
+        getattr(m, "name", None)
+        or getattr(m, "model_name", None)
+        or getattr(m, "weights", None)
+        or getattr(getattr(m, "model", None), "name", None)
+    )
+    if cand:
+        try:
+            return Path(str(cand)).name
+        except Exception:
+            return str(cand)
+    return m.__class__.__name__
+
+
+# ---- main worker -------------------------------------------------------------
 def main(  # noqa: C901
     src: str | Path,
     *,
     out_dir: str | Path | None = None,
     weights: str | Path | None = None,
-    small: bool = False,
-    conf: float = 0.25,
-    iou: float = 0.45,
+    conf: float | None = None,
+    iou: float | None = None,
     verbose: bool = False,
     progress: SpinnerLike | None = None,
     **kw: Any,
@@ -170,16 +225,15 @@ def main(  # noqa: C901
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Model (strict)
-    override: Path | None = None
+    # strict model
+    override: Optional[Path] = None
     if weights is not None:
         cand = Path(weights).expanduser().resolve()
         if not cand.exists():
             raise FileNotFoundError(f"override weight not found: {cand}")
         override = None if cand.is_dir() else cand
-    if load_obb is None:
-        raise RuntimeError("OBB loader is unavailable (model_registry missing).")
     obb_model: Any = load_obb(override=override)  # type: ignore[call-arg]
+    model_lbl = _model_label(obb_model)
 
     cap = cv2.VideoCapture(str(srcp))
     if not cap.isOpened():
@@ -194,38 +248,29 @@ def main(  # noqa: C901
     avi = tmp_dir / f"{srcp.stem}.avi"
     vw = _avi_writer(avi, fps, (w, h))
 
-    ps_progress_active = (os.environ.get("PANOPTES_PROGRESS_ACTIVE") or "") == "1"
-    use_local = (progress is None) and (ProgressEngine is not None) and (live_percent is not None) and (not ps_progress_active)  # type: ignore[truthy-bool]
-    if use_local:
-        eng = ProgressEngine()  # type: ignore
-        ctx: ContextManager[None] = cast(ContextManager[None], live_percent(eng, prefix="OBB-MP4"))  # type: ignore
-    else:
-        eng = None
-
-        class _Null:
-            def __enter__(self) -> None:  # noqa: D401
-                return None
-            def __exit__(self, et: type[BaseException] | None, ex: BaseException | None, tb: TracebackType | None) -> bool:
-                return False
-        ctx = _Null()
+    # local spinner only if parent not provided AND no global spinner is active
+    parent_active = (os.environ.get("PANOPTES_PROGRESS_ACTIVE") or "").strip() == "1"
+    use_local = (progress is None) and (not parent_active) and (percent_spinner is not None)
+    sp_ctx = percent_spinner(prefix="OBB-MP4", stream=sys.stderr) if use_local else _NullCtx()  # type: ignore[operator]
 
     i = 0
-    with ctx:
-        if eng:
-            eng.set_total(float(total + 1))
-            eng.set_current("frame 0")
-        elif progress is not None:
-            progress.update(current=f"frame 0/{total}")
+    file_lbl = srcp.name
+    with sp_ctx:
+        if use_local:
+            _poke(sp_ctx, total=float(total + 1), count=0.0, item=file_lbl, job=f"frame 0/{total}", model=model_lbl)  # type: ignore[arg-type]
+        else:
+            _poke(progress, item=file_lbl, job=f"frame 0/{total}", model=model_lbl)
 
         while True:
             ok, frame_raw = cap.read()
             if not ok:
                 break
-            if getattr(frame_raw, "dtype", None) is not None and frame_raw.dtype != np.uint8:
-                frame_raw = frame_raw.astype(np.uint8)
-            frame: NDArrayU8 = cast(NDArrayU8, frame_raw)
+            frame: NDArrayU8 = np.asarray(frame_raw, dtype=np.uint8)
 
-            res_list: list[Any] = cast(list[Any], obb_model.predict(frame, imgsz=640, conf=conf, iou=iou, verbose=False))
+            res_list: list[Any] = cast(
+                list[Any],
+                obb_model.predict(frame, imgsz=640, conf=(conf or 0.25), iou=(iou or 0.45), verbose=False)
+            )
             res = res_list[0] if res_list else None
             if res is not None:
                 polys = _extract_polys(res)
@@ -234,55 +279,31 @@ def main(  # noqa: C901
                     cv2.polylines(frame, [pts], isClosed=True, color=(0, 210, 255), thickness=2)
             vw.write(frame)
             i += 1
-            if eng:
-                eng.add(1.0, current_item=f"frame {min(i, total)}/{total}")
-            elif progress is not None:
-                progress.update(current=f"frame {min(i, total)}/{total}")
+
+            if use_local:
+                _poke(sp_ctx, count=float(i), item=file_lbl, job=f"frame {min(i, total)}/{total}", model=model_lbl)  # type: ignore[arg-type]
+            else:
+                _poke(progress, item=file_lbl, job=f"frame {min(i, total)}/{total}", model=model_lbl)
 
         cap.release()
         vw.release()
 
         preferred = out_dir / f"{srcp.stem}_obb.mp4"
-        if eng:
-            eng.set_current("encode mp4")
-        elif progress is not None:
-            progress.update(current="encode mp4")
+        if use_local:
+            _poke(sp_ctx, item=file_lbl, job="encode mp4", model=model_lbl)  # type: ignore[arg-type]
+        else:
+            _poke(progress, item=file_lbl, job="encode mp4", model=model_lbl)
 
         try:
-            if simple_status is not None and use_local:
-                sp: ContextManager[None] = cast(ContextManager[None], simple_status("FFmpeg re-encode"))
-            else:
-                class _Null2:
-                    def __enter__(self) -> None: return None
-                    def __exit__(self, et: type[BaseException] | None, ex: BaseException | None, tb: TracebackType | None) -> bool: return False
-                sp = _Null2()
-            with sp:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", str(avi), "-c:v", "libx264", "-crf", "23",
-                     "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(preferred)],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-                )
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(avi), "-c:v", "libx264", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(preferred)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+            )
             avi.unlink(missing_ok=True)
             final = preferred
         except (FileNotFoundError, subprocess.CalledProcessError):
-            # OpenCV fallback
-            ok_mp4 = False
-            cap2 = cv2.VideoCapture(str(avi))
-            if cap2.isOpened():
-                w2 = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
-                h2 = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                out = cv2.VideoWriter(str(preferred), _fourcc("mp4v"), fps, (w2, h2))
-                if out.isOpened():
-                    ok_any = False
-                    while True:
-                        ok, fr = cap2.read()
-                        if not ok:
-                            break
-                        out.write(fr)
-                        ok_any = True
-                    out.release()
-                    ok_mp4 = ok_any and preferred.exists() and preferred.stat().st_size > 0
-                cap2.release()
+            ok_mp4 = _opencv_reencode_to_mp4(avi, preferred, fps=fps)
             if ok_mp4:
                 avi.unlink(missing_ok=True)
                 final = preferred
@@ -292,8 +313,10 @@ def main(  # noqa: C901
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
         print(f"Saved → {_osc8(final.name, final)}")
-        if eng:
-            eng.add(1.0, current_item="done")
-        elif progress is not None:
-            progress.update(current="done")
+
+        if use_local:
+            _poke(sp_ctx, count=float(total + 1), item=file_lbl, job="done", model=model_lbl)  # type: ignore[arg-type]
+        else:
+            _poke(progress, item=file_lbl, job="done", model=model_lbl)
+
         return final

@@ -46,8 +46,10 @@ except ImportError:                # pragma: no cover
     YOLO      = None               # type: ignore
     _has_yolo = False
 
+# Preload primary models once (respecting the central registry)
 _det_model: Any = load_detector(small=False)
 _seg_model: Any = load_segmenter(small=True)
+
 
 def reinit_models(
     *,
@@ -56,6 +58,10 @@ def reinit_models(
     det_override: Optional[Union[str, Path]] = None,
     seg_override: Optional[Union[str, Path]] = None,
 ) -> tuple[Any, Any]:
+    """
+    Reinitialize cached models based on small/override hints.
+    No progress UI is created here; the single CLI spinner remains the only UI.
+    """
     global _det_model, _seg_model
     if detect_small is not None or det_override is not None:
         _det_model = load_detector(small=bool(detect_small), override=det_override)
@@ -65,12 +71,17 @@ def reinit_models(
         _say(f"reinit segmenter small={bool(segment_small)}")
     return _det_model, _seg_model
 
+
 def run_inference(
     img: Image.Image,
     model: str = "primary",
     *,
     conf_thr: float = 0.40,
 ) -> NDArray[np.float32]:
+    """
+    Run detection using the preloaded detector. This function never opens
+    its own progress UI and remains silent except for explicit logging.
+    """
     if not _has_yolo:
         raise RuntimeError("Ultralytics YOLO is not installed in this environment.")
     res_list = _det_model.predict(img, imgsz=640, conf=conf_thr, verbose=False)  # type: ignore
@@ -94,8 +105,10 @@ def run_inference(
 
     return boxes_arr.reshape(-1, 6) if boxes_arr.size else np.empty((0, 6), dtype=np.float32)
 
+
 def _is_remote(src: str) -> bool:
     return src.startswith(("http://", "https://", "data:"))
+
 
 @contextmanager
 def _silence_stdio(enabled: bool):
@@ -116,8 +129,29 @@ def _silence_stdio(enabled: bool):
         except Exception:
             pass
 
+
 class SpinnerLike(Protocol):
     def update(self, **kwargs: Any) -> "SpinnerLike": ...
+
+
+def _update_job(progress: Optional[SpinnerLike], text: str) -> None:
+    """
+    Update the single parent Halo/Rich spinner's JOB field.
+    We never create our own progress UI. If a caller passes a spinner that
+    does not implement `job=`, we fall back to `current=` just so text
+    is not lost (no new UI is created).
+    """
+    if progress is None:
+        return
+    try:
+        progress.update(job=text)
+    except Exception:
+        try:
+            progress.update(current=text)
+        except Exception:
+            # Never raise here; progress is purely cosmetic.
+            pass
+
 
 def run_single(  # noqa: C901
     src: Union[str, os.PathLike[str]],
@@ -128,14 +162,22 @@ def run_single(  # noqa: C901
     quiet: bool = True,
     **hm_kwargs: Any,
 ) -> Optional[str]:
+    """
+    Execute a single image/URL workflow for detect/heatmap/geojson.
+
+    PROGRESS POLICY:
+    - We never instantiate progress ourselves.
+    - We *only* update the single parent Halo/Rich spinner via `job=...`.
+    - If a non-Halo object is passed, we degrade to `current=...` without
+      creating any new UI.
+    """
 
     src_str  = str(src)
     conf_thr = float(hm_kwargs.get("conf", 0.40))
     stem     = Path(src_str).stem or "image"
 
     # ---- load image ---------------------------------------------------------
-    if progress:
-        progress.update(current=f"load: {Path(src_str).name if not _is_remote(src_str) else 'URL'}")
+    _update_job(progress, f"load: {Path(src_str).name if not _is_remote(src_str) else 'URL'}")
 
     # Silence libraries while loading regardless of spinner presence.
     with _silence_stdio(quiet):
@@ -150,15 +192,13 @@ def run_single(  # noqa: C901
             pil_img = Image.open(src_str).convert("RGB")
 
     # ---- inference ----------------------------------------------------------
-    if progress:
-        progress.update(current="run inference")
+    _update_job(progress, "run inference")
     with _silence_stdio(quiet):
         boxes = run_inference(pil_img, model=model, conf_thr=conf_thr)
 
     # ── GEOJSON --------------------------------------------------------------
     if task == "geojson":
-        if progress:
-            progress.update(current="compose geojson")
+        _update_job(progress, "compose geojson")
         try:
             geo = to_geojson(
                 src_str,
@@ -173,8 +213,7 @@ def run_single(  # noqa: C901
         if _is_remote(src_str):
             # stdout is the API for URLs
             sys.stdout.write(json.dumps(geo, separators=(",", ":")) + "\n")
-            if progress:
-                progress.update(current="done")
+            _update_job(progress, "done")
             return None
         else:
             out_path = ROOT / "tests" / "results" / f"{stem}.geojson"
@@ -183,14 +222,12 @@ def run_single(  # noqa: C901
             # only log when not in pinned-line mode
             if not quiet or progress is None:
                 _say(f"wrote {out_path}")
-            if progress:
-                progress.update(current="done")
+            _update_job(progress, "done")
             return str(out_path)
 
     # ── HEATMAP --------------------------------------------------------------
     if task == "heatmap":
-        if progress:
-            progress.update(current="render heatmap")
+        _update_job(progress, "render heatmap")
         with _silence_stdio(quiet):
             alpha_val = float(hm_kwargs.get("alpha", 0.4))
             overlay_result = heatmap_overlay(
@@ -212,8 +249,7 @@ def run_single(  # noqa: C901
 
     # ── DETECT ---------------------------------------------------------------
     else:
-        if progress:
-            progress.update(current="render boxes")
+        _update_job(progress, "render boxes")
         with _silence_stdio(quiet):
             res     = _det_model.predict(pil_img, imgsz=640, conf=conf_thr, verbose=False)[0]  # type: ignore
             plotted: np.ndarray = res.plot()                                                   # type: ignore
@@ -226,13 +262,11 @@ def run_single(  # noqa: C901
         out_path = ROOT / "tests" / "results" / f"{stem}_boxes{out_ext}"
 
     # ---- write result -------------------------------------------------------
-    if progress:
-        progress.update(current="write result")
+    _update_job(progress, "write result")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with _silence_stdio(quiet):
         out_img.save(out_path)
     if not quiet or progress is None:
         _say(f"wrote {out_path}")
-    if progress:
-        progress.update(current="done")
+    _update_job(progress, "done")
     return str(out_path)

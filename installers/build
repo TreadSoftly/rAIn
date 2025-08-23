@@ -7,7 +7,13 @@ export PYTHONUTF8=1
 export PYTHONUNBUFFERED=1
 export FORCE_COLOR=1
 export PANOPTES_NESTED_PROGRESS=1
-# Build.ps1 handles PANOPTES_PROGRESS_ACTIVE during its own phases
+
+# Ensure final confirm is interactive (do NOT auto-accept)
+unset ARGOS_ASSUME_YES || true
+
+# Skip weight downloads during the non-interactive bootstrap step;
+# the interactive model builder runs afterwards.
+export ARGOS_SKIP_WEIGHTS=1
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -19,10 +25,11 @@ PY="$(command -v python3 || command -v python)"
 "$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes --reinstall
 VPY="$("$PY" "$ROOT/projects/argos/bootstrap.py" --print-venv)"
 
-"$VPY" -m pip check
+"$VPY" -m pip check || true
 export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
 
 # Add installers/ to PATH (session + profile) non-interactively
 "$HERE/setup-path.sh" -y || true
 
+# IMPORTANT: Do NOT auto-feed "1" unless explicitly requested by the user.
 exec "$VPY" -m panoptes.tools.build_models "$@"

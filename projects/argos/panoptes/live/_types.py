@@ -19,6 +19,12 @@ if TYPE_CHECKING:
     Box   = Tuple[int, int, int, int, Optional[float], Optional[int]]
     Boxes = Iterable[Box]
     Names = Dict[int, str]
+
+    # Surface progress Spinner protocol so optional integrations can type-check
+    try:
+        from panoptes.progress import Spinner as ProgressSpinner  # type: ignore[import]
+    except Exception:
+        class ProgressSpinner: ...  # type: ignore[no-redef, misc]
 else:
     # Runtime aliases kept harmless and py39-safe
     NDArrayU8 = Any   # type: ignore[misc,assignment]
@@ -27,3 +33,6 @@ else:
     Box   = Any       # type: ignore[assignment]
     Boxes = Iterable[Any]
     Names = Dict[int, str]
+
+    # Runtime-friendly placeholder for progress types
+    ProgressSpinner = Any  # type: ignore[assignment]

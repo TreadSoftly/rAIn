@@ -1,16 +1,22 @@
 # projects/argos/panoptes/live/tasks.py
 """
-Task adapters for live mode.
+Task adapters for live mode (detect/heatmap/classify/pose/pse/obb).
 
-This revision routes LIVE tasks (detect/heatmap/classify/pose/pse/obb) through
-the central model registry. If a model cannot be loaded (weights missing or
-ultralytics not installed), we gracefully fall back to non-ML adapters so the
-demo still runs.
+This module is designed to ALWAYS import cleanly (even when optional deps like
+NumPy/OpenCV/Ultralytics are missing) and to give you a working live demo via
+fast non-ML fallbacks. When your central model registry is available, the
+YOLO-backed adapters will be used automatically.
 
-Key change (2025-08-18):
-    • Heatmap adapter now preserves *instance masks* from the -seg model and
-      renders them with distinct colors (plus optional labels), instead of
-      collapsing to one binary mask that color-maps to red.
+Progress UX:
+    • Uses the Halo-based spinners from panoptes.progress.
+    • Builders open a single-line, fixed-width percent spinner during model
+      loading (and gracefully no-op when nested or in non-TTY environments).
+    • Additionally, a lightweight `running_task` wrapper is used around the
+      actual load call (it auto-disables when nested under the percent spinner),
+      and fallbacks emit a brief `simple_status` notice.
+    • Env flags respected by the progress package:
+        PANOPTES_SPINNER, PANOPTES_PROGRESS_WIDTH, PANOPTES_PROGRESS_TAIL,
+        PANOPTES_PROGRESS_FINAL_NEWLINE.
 
 Available builders:
   - build_detect(*, small=True, conf=0.25, iou=0.45, override=None)
@@ -19,6 +25,11 @@ Available builders:
   - build_pose(*, small=True, conf=0.25, override=None)
   - build_pse(*, small=True, override=None)  # ALIAS of pose (same model/overlay)
   - build_obb(*, small=True, conf=0.25, iou=0.45, override=None)
+
+Key change (2025-08-18):
+    • Heatmap adapter now preserves *instance masks* from the -seg model and
+      renders them with distinct colors (plus optional labels), instead of
+      collapsing to one binary mask that color-maps to red.
 """
 
 from __future__ import annotations
@@ -26,7 +37,37 @@ from __future__ import annotations
 from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict
 from pathlib import Path
 import math
+import time
 
+# ─────────────────────────────────────────────────────────────────────
+# Progress helpers (percent spinner preferred, safe fallbacks if missing)
+# ─────────────────────────────────────────────────────────────────────
+try:
+    from panoptes.progress import percent_spinner as _progress_percent_spinner  # type: ignore[import]
+except Exception:  # pragma: no cover
+    class _NullSpinner:
+        def __enter__(self) -> "_NullSpinner": return self
+        def __exit__(self, *_: object) -> None: return None
+        def update(self, **_: Any) -> "_NullSpinner": return self
+    def _progress_percent_spinner(*_a: object, **_k: object) -> _NullSpinner:
+        return _NullSpinner()
+
+# We also import these convenience spinners and *use* them to avoid linter noise.
+try:
+    from panoptes.progress import simple_status as _progress_simple_status  # type: ignore[import]
+    from panoptes.progress import running_task as _progress_running_task    # type: ignore[import]
+except Exception:  # pragma: no cover
+    def _progress_simple_status(*_a: object, **_k: object):
+        class _N:
+            def __enter__(self): return self
+            def __exit__(self, *_: object) -> bool: return False
+        return _N()
+    def _progress_running_task(*_a: object, **_k: object):
+        return _progress_simple_status()
+
+# ─────────────────────────────────────────────────────────────────────
+# Optional heavy deps (import-safe)
+# ─────────────────────────────────────────────────────────────────────
 try:
     import numpy as np
 except Exception:
@@ -37,21 +78,22 @@ try:
 except Exception:
     cv2 = None  # type: ignore
 
-# DType aliases that are safe for static analyzers even if numpy is Optional at runtime.
+# DType aliases that are safe for static analyzers even if numpy is Optional.
 try:
     import numpy as _np_for_types
     f32: Any = _np_for_types.float32
     i64: Any = _np_for_types.int64
     u8: Any = _np_for_types.uint8
-except Exception:
+except Exception:  # pragma: no cover
     f32 = cast(Any, "float32")
     i64 = cast(Any, "int64")
     u8 = cast(Any, "uint8")
 
 from ._types import NDArrayU8, Boxes, Names
 
-# Use the central model registry (your single source of truth)
-# Provide a guarded import with safe fallbacks so this module always imports.
+# ─────────────────────────────────────────────────────────────────────
+# Central model registry (single source of truth) — guarded import
+# ─────────────────────────────────────────────────────────────────────
 try:
     from panoptes.model_registry import (  # type: ignore[reportMissingTypeStubs]
         load_detector,    # type: ignore[no-redef]
@@ -61,7 +103,7 @@ try:
         load_obb,         # type: ignore[no-redef]
         pick_weight,      # type: ignore[no-redef]
     )
-except Exception:
+except Exception:  # pragma: no cover
 
     def load_detector(*_a: object, **_k: object) -> Any:  # type: ignore[no-redef]
         raise RuntimeError("panoptes.model_registry not available")
@@ -93,6 +135,7 @@ LIVE_OBB_OVERRIDE: Optional[Union[str, Path]]      = None
 
 
 class TaskAdapter(Protocol):
+    """Common protocol for live task adapters."""
     def infer(self, frame_bgr: NDArrayU8) -> Any: ...
     def render(self, frame_bgr: NDArrayU8, result: Any) -> NDArrayU8: ...
     label: str  # for HUD
@@ -562,8 +605,17 @@ class _SimplePose(TaskAdapter):
 # PSE = **POSE ALIAS** (no segmentation here)
 # ---------------------------
 
-# NOTE: Keep the specialized PSE (segmentation) adapters out of the path;
-# PSE must behave the same as POSE for your CLI and LV flows.
+def build_pse(
+    *,
+    small: bool = True,
+    override: Optional[Union[str, Path]] = LIVE_PSE_OVERRIDE,
+) -> TaskAdapter:
+    """
+    PSE is an alias of POSE: same model family, same overlay.
+    """
+    # Delegate directly to build_pose to guarantee identical behavior
+    return build_pose(small=small, conf=0.25, override=override)
+
 
 # ---------------------------
 # OBB (YOLO-obb) + fallback
@@ -696,7 +748,7 @@ class _SimpleOBB(TaskAdapter):
 
 
 # ---------------------------
-# Builders (using model_registry)
+# Builders (using model_registry) + Percent Spinner UX
 # ---------------------------
 
 def _label_from_override_or_pick(task: str, small: bool, override: Optional[Union[str, Path]]) -> str:
@@ -715,12 +767,22 @@ def build_detect(
     iou: float = 0.45,
     override: Optional[Union[str, Path]] = LIVE_DETECT_OVERRIDE,
 ) -> TaskAdapter:
+    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
         label = _label_from_override_or_pick("detect", small, override)
-        raw_model = load_detector(small=small, override=override)
+        with _progress_percent_spinner(prefix="LIVE") as sp:
+            sp.update(total=1, count=0, job="Load", model=label, current="detector")
+            # Secondary task spinner (will auto-disable if nested under percent spinner)
+            with _progress_running_task("Load", f"detector:{label}"):
+                raw_model = load_detector(small=small, override=override)
+            sp.update(count=1)
+        assert raw_model is not None
         model = cast(_Predictor, raw_model)
         return _YOLODetect(model, label=label, conf=conf, iou=iou)
     except Exception:
+        # Emit a brief notice that we're using the fallback adapter
+        with _progress_simple_status("FALLBACK: fast-contour (no-ML)"):
+            time.sleep(0.05)
         return _ContourDetect(conf=conf, iou=iou)
 
 def build_heatmap(
@@ -728,12 +790,20 @@ def build_heatmap(
     small: bool = True,
     override: Optional[Union[str, Path]] = LIVE_HEATMAP_OVERRIDE,
 ) -> TaskAdapter:
+    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
         label = _label_from_override_or_pick("heatmap", small, override)
-        raw_model = load_segmenter(small=small, override=override)
+        with _progress_percent_spinner(prefix="LIVE") as sp:
+            sp.update(total=1, count=0, job="Load", model=label, current="segmenter")
+            with _progress_running_task("Load", f"segmenter:{label}"):
+                raw_model = load_segmenter(small=small, override=override)
+            sp.update(count=1)
+        assert raw_model is not None
         model = cast(_Predictor, raw_model)
         return _YOLOHeatmap(model, label=label)
     except Exception:
+        with _progress_simple_status("FALLBACK: laplacian-heatmap (no-ML)"):
+            time.sleep(0.05)
         return _LaplacianHeatmap()
 
 def build_classify(
@@ -742,12 +812,20 @@ def build_classify(
     topk: int = 1,
     override: Optional[Union[str, Path]] = LIVE_CLASSIFY_OVERRIDE,
 ) -> TaskAdapter:
+    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
         label = _label_from_override_or_pick("classify", small, override)
-        raw_model = load_classifier(small=small, override=override)
+        with _progress_percent_spinner(prefix="LIVE") as sp:
+            sp.update(total=1, count=0, job="Load", model=label, current="classifier")
+            with _progress_running_task("Load", f"classifier:{label}"):
+                raw_model = load_classifier(small=small, override=override)
+            sp.update(count=1)
+        assert raw_model is not None
         model = cast(_Predictor, raw_model)
         return _YOLOClassify(model, label=label, topk=topk)
     except Exception:
+        with _progress_simple_status("FALLBACK: simple-classify (no-ML)"):
+            time.sleep(0.05)
         return _SimpleClassify(topk=topk)
 
 def build_pose(
@@ -756,24 +834,21 @@ def build_pose(
     conf: float = 0.25,
     override: Optional[Union[str, Path]] = LIVE_POSE_OVERRIDE,
 ) -> TaskAdapter:
+    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
         label = _label_from_override_or_pick("pose", small, override)
-        raw_model = load_pose(small=small, override=override)
+        with _progress_percent_spinner(prefix="LIVE") as sp:
+            sp.update(total=1, count=0, job="Load", model=label, current="pose")
+            with _progress_running_task("Load", f"pose:{label}"):
+                raw_model = load_pose(small=small, override=override)
+            sp.update(count=1)
+        assert raw_model is not None
         model = cast(_Predictor, raw_model)
         return _YOLOPose(model, label=label, conf=conf)
     except Exception:
+        with _progress_simple_status("FALLBACK: simple-pose (no-ML)"):
+            time.sleep(0.05)
         return _SimplePose()
-
-def build_pse(
-    *,
-    small: bool = True,
-    override: Optional[Union[str, Path]] = LIVE_PSE_OVERRIDE,
-) -> TaskAdapter:
-    """
-    PSE is an alias of POSE: same model family, same overlay.
-    """
-    # Delegate directly to build_pose to guarantee identical behavior
-    return build_pose(small=small, conf=0.25, override=override)
 
 def build_obb(
     *,
@@ -782,10 +857,18 @@ def build_obb(
     iou: float = 0.45,
     override: Optional[Union[str, Path]] = LIVE_OBB_OVERRIDE,
 ) -> TaskAdapter:
+    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
         label = _label_from_override_or_pick("obb", small, override)
-        raw_model = load_obb(small=small, override=override)
+        with _progress_percent_spinner(prefix="LIVE") as sp:
+            sp.update(total=1, count=0, job="Load", model=label, current="obb")
+            with _progress_running_task("Load", f"obb:{label}"):
+                raw_model = load_obb(small=small, override=override)
+            sp.update(count=1)
+        assert raw_model is not None
         model = cast(_Predictor, raw_model)
         return _YOLOOBB(model, label=label, conf=conf, iou=iou)
     except Exception:
+        with _progress_simple_status("FALLBACK: simple-obb (no-ML)"):
+            time.sleep(0.05)
         return _SimpleOBB(conf=conf)

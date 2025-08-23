@@ -2,20 +2,26 @@
 """
 predict_classify_mp4 — per-frame classification overlay for videos.
 
-Lock‑down
-─────────
-* A **classifier** weight is mandatory — either:
-    1) explicit *weights=* (path to .pt/.onnx), or
-    2) `panoptes.model_registry.load_classifier()` strict selection.
+ONE PROGRESS SYSTEM
+───────────────────
+* Uses ONLY the Halo/Rich spinner from panoptes.progress.
+* If a parent spinner is passed (recommended via CLI), we ONLY update its
+  [File | Job | Model] fields (no 'current' writes) so the single-line
+  format and colors exactly match Detect/Heatmap/GeoJSON.
+* If no parent spinner is provided AND no global spinner is marked active
+  (PANOPTES_PROGRESS_ACTIVE != "1"), a local Halo spinner is started so
+  standalone runs still have a single consistent line.
 
-* No env probing; the model registry controls weights.
+Strict weights
+──────────────
+* Either pass an explicit *weights=* path, or load strictly via
+  panoptes.model_registry.load_classifier().
 
-Progress & Output
-─────────────────
-* If *progress* is provided, we only update its `current` label (frame i/N → encode mp4 → done).
-* Otherwise, we use a local percent spinner (suppressed when a parent spinner is active).
-* Emits `<stem>_cls.mp4` (H.264 via FFmpeg when available; OpenCV fallback; as a last resort keeps MJPG `.avi`).
-* Prints exactly one `Saved → <clickable>` line at the end (OSC‑8).
+Output
+──────
+* Prefers H.264 via FFmpeg → OpenCV mp4v fallback → keeps MJPG .avi last.
+* Emits "<stem>_cls.mp4" (or ".avi" as last resort).
+* Prints exactly one "Saved → <clickable>" line at the end (OSC-8).
 """
 
 from __future__ import annotations
@@ -24,61 +30,35 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Callable, ContextManager, Final, Protocol, Sequence, Tuple, cast
+from typing import Any, Callable, Optional, Protocol, Sequence, Tuple, cast
 
 import cv2  # type: ignore
 import numpy as np
+from numpy.typing import NDArray
 
-# ────────────────────────────────────────────────────────────────────────────────
-# ROOT resolution (single assignment; avoids "constant redefined" diagnostics)
-# ────────────────────────────────────────────────────────────────────────────────
+from panoptes import ROOT  # type: ignore[import-not-found]
 
-def _resolve_root() -> Path:
-    try:
-        from panoptes import ROOT as _ROOT  # type: ignore[import-not-found]
-        return _ROOT
-    except Exception:
-        return Path.cwd()
-
-ROOT: Final[Path] = _resolve_root()
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Type aliases (compile‑time only)
-# ────────────────────────────────────────────────────────────────────────────────
-
-if TYPE_CHECKING:
-    import numpy as _np
-    import numpy.typing as npt
-
-    NDArrayU8 = npt.NDArray[_np.uint8]
-else:
-    NDArrayU8 = Any  # type: ignore[assignment]
-
-# ────────────────────────────────────────────────────────────────────────────────
 # Strict model loader (central registry)
-# ────────────────────────────────────────────────────────────────────────────────
-
 try:
     from panoptes.model_registry import load_classifier  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover
     load_classifier = None  # type: ignore[assignment]
 
-# optional progress (safe off‑TTY)
+# Halo/Rich spinner
 try:
-    from panoptes.progress import ProgressEngine  # type: ignore[import-not-found]
-    from panoptes.progress.bridges import live_percent  # type: ignore[import-not-found]
-    from panoptes.progress.progress_ux import simple_status  # type: ignore[import-not-found]
+    from panoptes.progress import percent_spinner  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover
-    ProgressEngine = None  # type: ignore[assignment]
-    live_percent = None  # type: ignore[assignment]
-    simple_status = None  # type: ignore[assignment]
+    percent_spinner = None  # type: ignore[assignment]
+
+NDArrayU8 = NDArray[np.uint8]
 
 _LOG = logging.getLogger("panoptes.predict_classify_mp4")
 if not _LOG.handlers:
-    h = logging.StreamHandler()
+    h = logging.StreamHandler(sys.stderr)
     h.setFormatter(logging.Formatter("%(message)s"))
     _LOG.addHandler(h)
 _LOG.setLevel(logging.WARNING)
@@ -90,6 +70,19 @@ def _say(msg: str) -> None:
 
 class SpinnerLike(Protocol):
     def update(self, **kwargs: Any) -> "SpinnerLike": ...
+
+
+class _NullCtx:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        return False
 
 
 def _osc8(label: str, path: Path) -> str:
@@ -193,12 +186,38 @@ def _draw_topk_card_bgr(frame: NDArrayU8, pairs: Sequence[tuple[str, float]]) ->
     return frame
 
 
+def _poke(sp: SpinnerLike | None, **fields: Any) -> None:
+    """Best-effort spinner update (safe on both local and parent spinners)."""
+    if sp is None:
+        return
+    try:
+        sp.update(**fields)
+    except Exception:
+        pass
+
+
+def _model_label(m: Any) -> str:
+    """Human-friendly model label for the [Model: …] segment."""
+    cand = (
+        getattr(m, "name", None)
+        or getattr(m, "model_name", None)
+        or getattr(m, "weights", None)
+        or getattr(getattr(m, "model", None), "name", None)
+    )
+    if cand:
+        try:
+            return Path(str(cand)).name
+        except Exception:
+            return str(cand)
+    return m.__class__.__name__
+
+
 def main(  # noqa: C901
     src: str | Path,
     *,
     out_dir: str | Path | None = None,
     weights: str | Path | None = None,
-    small: bool = False,     # reserved for registry; not used directly here
+    small: bool = False,     # reserved; not used directly here
     conf: float | None = None,
     topk: int = 1,
     verbose: bool = False,
@@ -220,7 +239,7 @@ def main(  # noqa: C901
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Model (strict)
-    override: Path | None = None
+    override: Optional[Path] = None
     if weights is not None:
         cand = Path(weights).expanduser().resolve()
         if not cand.exists():
@@ -229,6 +248,7 @@ def main(  # noqa: C901
     if load_classifier is None:
         raise RuntimeError("Classifier loader is unavailable (model_registry missing).")
     cls_model: Any = load_classifier(override=override)  # type: ignore[call-arg]
+    model_lbl = _model_label(cls_model)
 
     cap = cv2.VideoCapture(str(srcp))
     if not cap.isOpened():
@@ -243,38 +263,26 @@ def main(  # noqa: C901
     avi = tmp_dir / f"{srcp.stem}.avi"
     vw = _avi_writer(avi, fps, (w, h))
 
-    # progress orchestration
-    ps_progress_active = (os.environ.get("PANOPTES_PROGRESS_ACTIVE") or "") == "1"
-    use_local = (progress is None) and (ProgressEngine is not None) and (live_percent is not None) and (not ps_progress_active)  # type: ignore[truthy-bool]
-    if use_local:
-        eng = ProgressEngine()  # type: ignore[call-arg]
-        ctx: ContextManager[None] = cast(ContextManager[None], live_percent(eng, prefix="CLASSIFY-MP4"))  # type: ignore[arg-type]
-    else:
-        eng = None
-
-        class _Null:
-            def __enter__(self) -> None:  # noqa: D401
-                return None
-            def __exit__(self, et: type[BaseException] | None, ex: BaseException | None, tb: TracebackType | None) -> bool:
-                return False
-        ctx = _Null()
+    # Start a local Halo spinner ONLY if no parent spinner is passed AND no global spinner is active
+    parent_active = (os.environ.get("PANOPTES_PROGRESS_ACTIVE") or "").strip() == "1"
+    use_local = (progress is None) and (not parent_active) and (percent_spinner is not None)
+    sp_ctx = percent_spinner(prefix="CLASSIFY-MP4", stream=sys.stderr) if use_local else _NullCtx()  # type: ignore[operator]
 
     i = 0
-    with ctx:
-        if eng:
-            eng.set_total(float(total + 1))
-            eng.set_current("frame 0")
-        elif progress is not None:
-            progress.update(current=f"frame 0/{total}")
+    file_lbl = srcp.name
+    with sp_ctx:
+        if use_local:
+            # local spinner drives per-frame percent
+            _poke(sp_ctx, total=float(total + 1), count=0.0, item=file_lbl, job=f"frame 0/{total}", model=model_lbl)  # type: ignore[arg-type]
+        else:
+            # parent spinner: keep File/Job/Model populated; parent manages count
+            _poke(progress, item=file_lbl, job=f"frame 0/{total}", model=model_lbl)
 
         while True:
             ok, frame_raw = cap.read()
             if not ok:
                 break
-            # Ensure uint8 for type-checker and OpenCV
-            if getattr(frame_raw, "dtype", None) is not None and frame_raw.dtype != np.uint8:
-                frame_raw = frame_raw.astype(np.uint8)
-            frame: NDArrayU8 = cast(NDArrayU8, frame_raw)
+            frame: NDArrayU8 = np.asarray(frame_raw, dtype=np.uint8)
 
             # YOLO‑style predict accepts ndarray (BGR)
             res_list: list[Any] = cast(list[Any], cls_model.predict(frame, imgsz=640, conf=(conf or 0.0), verbose=False))
@@ -283,39 +291,31 @@ def main(  # noqa: C901
             frame = _draw_topk_card_bgr(frame, pairs)
             vw.write(frame)
             i += 1
-            if eng:
-                eng.add(1.0, current_item=f"frame {min(i, total)}/{total}")
-            elif progress is not None:
-                progress.update(current=f"frame {min(i, total)}/{total}")
+
+            if use_local:
+                _poke(sp_ctx, count=float(i), item=file_lbl, job=f"frame {min(i, total)}/{total}", model=model_lbl)  # type: ignore[arg-type]
+            else:
+                _poke(progress, item=file_lbl, job=f"frame {min(i, total)}/{total}", model=model_lbl)
 
         cap.release()
         vw.release()
 
-        # Re‑encode to MP4
         preferred = out_dir / f"{srcp.stem}_cls.mp4"
-        if eng:
-            eng.set_current("encode mp4")
-        elif progress is not None:
-            progress.update(current="encode mp4")
+        # encode step
+        if use_local:
+            _poke(sp_ctx, item=file_lbl, job="encode mp4", model=model_lbl)  # type: ignore[arg-type]
+        else:
+            _poke(progress, item=file_lbl, job="encode mp4", model=model_lbl)
 
         try:
-            if simple_status is not None and use_local:
-                sp: ContextManager[None] = cast(ContextManager[None], simple_status("FFmpeg re-encode"))
-            else:
-                class _Null2:
-                    def __enter__(self) -> None: return None
-                    def __exit__(self, et: type[BaseException] | None, ex: BaseException | None, tb: TracebackType | None) -> bool: return False
-                sp = _Null2()
-            with sp:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", str(avi), "-c:v", "libx264", "-crf", "23",
-                     "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(preferred)],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-                )
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(avi), "-c:v", "libx264", "-crf", "23",
+                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(preferred)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+            )
             avi.unlink(missing_ok=True)
             final = preferred
         except (FileNotFoundError, subprocess.CalledProcessError):
-            # OpenCV fallback or keep AVI
             ok_mp4 = _opencv_reencode_to_mp4(avi, preferred, fps=fps)
             if ok_mp4:
                 avi.unlink(missing_ok=True)
@@ -326,8 +326,11 @@ def main(  # noqa: C901
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
         print(f"Saved → {_osc8(final.name, final)}")
-        if eng:
-            eng.add(1.0, current_item="done")
-        elif progress is not None:
-            progress.update(current="done")
+
+        # done
+        if use_local:
+            _poke(sp_ctx, count=float(total + 1), item=file_lbl, job="done", model=model_lbl)  # type: ignore[arg-type]
+        else:
+            _poke(progress, item=file_lbl, job="done", model=model_lbl)
+
         return final

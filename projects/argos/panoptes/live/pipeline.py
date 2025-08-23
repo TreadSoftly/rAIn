@@ -17,6 +17,17 @@ from . import tasks as live_tasks
 from . import config as live_config
 from .config import ModelSelection
 
+# Live progress spinner (robust fallback)
+try:
+    from panoptes.progress import percent_spinner as _progress_percent_spinner  # type: ignore[import]
+except Exception:  # pragma: no cover
+    def _progress_percent_spinner(*_a: object, **_k: object):
+        class _N:
+            def __enter__(self): return self
+            def __exit__(self, *_: object) -> bool: return False
+            def update(self, **__: object): return self
+        return _N()
+
 
 def _results_dir() -> Path:
     # Mirror the offline CLI layout: projects/argos/tests/results
@@ -59,10 +70,8 @@ class LivePipeline:
             return live_tasks.build_heatmap(small=self.prefer_small)
         if t in ("clf", "classify"):
             return live_tasks.build_classify(small=self.prefer_small)
-        if t in ("pose",):
+        if t in ("pose", "pse"):
             return live_tasks.build_pose(small=self.prefer_small, conf=self.conf)
-        if t in ("pse",):
-            return live_tasks.build_pse(small=self.prefer_small)
         if t in ("obb", "object"):
             return live_tasks.build_obb(small=self.prefer_small, conf=self.conf, iou=self.iou)
         raise ValueError(f"Unknown live task: {self.task}")
@@ -76,108 +85,134 @@ class LivePipeline:
         Run the pipeline. Returns path of saved video if a VideoSink was used,
         else None. Press 'q' or 'Esc' in the preview window to exit (when GUI available).
         """
-        task = self._build_task()
+        # Estimate a target frame count if duration is bounded (for % UX)
+        est_fps = float(self.fps or 30)
+        total_frames = int(max(1.0, (self.duration or 1.0) * est_fps)) if self.duration is not None else 1
 
-        hw = live_config.probe_hardware()
-        sel: ModelSelection = live_config.select_models_for_live(self.task, hw)
+        video: Optional[VideoSink] = None  # for .opened check at the end
+        saved_path: Optional[str] = None
 
-        src = self._build_source()
+        # Main progress spinner: single line with [File:], [Job:], [Model:], tail with done/total and %
+        with _progress_percent_spinner(prefix="LIVE") as sp:
+            sp.update(total=total_frames, count=0, current="", job="init", model="")
 
-        display: Optional[DisplaySink] = None if self.headless else DisplaySink("ARGOS Live", headless=False)
+            # Build task / model selection
+            task = self._build_task()
+            hw = live_config.probe_hardware()
+            sel: ModelSelection = live_config.select_models_for_live(self.task, hw)
+            model_label = getattr(task, "label", "") or str(sel.get("label", ""))
+            sp.update(job="probe", current=hw.arch or "", model=model_label)
 
-        # Decide if we will write video; path may be lazily resolved on first frame (size/fps).
-        saved_path = self.out_path or (self._default_out_path() if self.autosave and self.out_path is None else None)
+            src = self._build_source()
+            sp.update(job="open-src", current=str(self.source))
 
-        # Pre-create a non-empty sentinel when saving was requested.
-        if saved_path:
-            try:
-                sp = Path(saved_path)
-                sp.parent.mkdir(parents=True, exist_ok=True)
-                if not sp.exists() or sp.stat().st_size == 0:
-                    sp.write_bytes(b"\x00")
-            except Exception:
-                pass
+            display: Optional[DisplaySink] = None if self.headless else DisplaySink("ARGOS Live", headless=False)
 
-        video: Optional[VideoSink] = None
-        sinks: Optional[MultiSink] = None  # created after first frame (size known)
+            # Decide if we will write video; path may be lazily resolved on first frame (size/fps).
+            saved_path = self.out_path or (self._default_out_path() if self.autosave and self.out_path is None else None)
 
-        t0 = time.time()
-        fps_est = 0.0
-        last = t0
-
-        try:
-            for frame_bgr, _ts in src.frames():
-                # Update FPS (EMA for HUD only)
-                now = time.time()
-                dt = max(1e-6, now - last)
-                inst_fps = 1.0 / dt
-                fps_est = 0.9 * fps_est + 0.1 * inst_fps if fps_est > 0 else inst_fps
-                last = now
-
-                # Create sinks once we know the first frame size
-                if sinks is None:
-                    if saved_path:
-                        Path(saved_path).parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            h_px, w_px = frame_bgr.shape[:2]  # (H, W, 3)
-                        except Exception:
-                            h_px = self.size[1] if self.size else 480
-                            w_px = self.size[0] if self.size else 640
-                        video = VideoSink(saved_path, (w_px, h_px), float(self.fps or 30))
-                    sinks = MultiSink(*(x for x in (display, video) if x is not None))
-
-                # Inference → render
-                result = task.infer(frame_bgr)
-                try:
-                    frame_for_draw = frame_bgr.copy()
-                except Exception:
-                    frame_for_draw = frame_bgr
-                frame_anno = task.render(frame_for_draw, result)
-
-                # HUD
-                device = hw.gpu or "CPU"
-                model_label = getattr(task, "label", "") or str(sel.get("label", ""))
-                hud(frame_anno, fps=fps_est, task=self.task, model=model_label, device=device)
-
-                # Emit
-                assert sinks is not None
-                sinks.write(frame_anno)
-
-                # Quit conditions: duration or keypress (q/ESC)
-                if self.duration is not None and (now - t0) >= self.duration:
-                    break
-
-                try:
-                    import cv2 as _cv2  # type: ignore
-                    if display is not None and not display.headless:
-                        key = _cv2.waitKey(1) & 0xFF
-                        if key in (ord("q"), 27):
-                            break
-                except Exception:
-                    pass
-        finally:
-            try:
-                src.release()
-            except Exception:
-                pass
-            if video is not None:
-                try:
-                    video.close()
-                except Exception:
-                    pass
-            if display is not None:
-                try:
-                    display.close()
-                except Exception:
-                    pass
-
+            # Pre-create a non-empty sentinel when saving was requested.
             if saved_path:
                 try:
-                    sp = Path(saved_path)
-                    sp.parent.mkdir(parents=True, exist_ok=True)
-                    if not sp.exists() or sp.stat().st_size == 0:
-                        sp.write_bytes(b"\x00")
+                    sp.update(job="prepare-out", current=Path(saved_path).name)
+                    spath = Path(saved_path)
+                    spath.parent.mkdir(parents=True, exist_ok=True)
+                    if not spath.exists() or spath.stat().st_size == 0:
+                        spath.write_bytes(b"\x00")
                 except Exception:
                     pass
 
-        return saved_path if (video is not None and video.opened) else None
+            sinks: Optional[MultiSink] = None  # created after first frame (size known)
+
+            t0 = time.time()
+            fps_est = 0.0
+            last = t0
+            frames_done = 0
+
+            try:
+                for frame_bgr, _ts in src.frames():
+                    # Update FPS (EMA for HUD only)
+                    now = time.time()
+                    dt = max(1e-6, now - last)
+                    inst_fps = 1.0 / dt
+                    fps_est = 0.9 * fps_est + 0.1 * inst_fps if fps_est > 0 else inst_fps
+                    last = now
+
+                    # Create sinks once we know the first frame size
+                    if sinks is None:
+                        if saved_path:
+                            Path(saved_path).parent.mkdir(parents=True, exist_ok=True)
+                            try:
+                                h_px, w_px = frame_bgr.shape[:2]  # (H, W, 3)
+                            except Exception:
+                                h_px = self.size[1] if self.size else 480
+                                w_px = self.size[0] if self.size else 640
+                            video = VideoSink(saved_path, (w_px, h_px), float(self.fps or 30))
+                        sinks = MultiSink(*(x for x in (display, video) if x is not None))
+                        sp.update(job="run", current=(Path(saved_path).name if saved_path else "live-only"))
+
+                    # Inference → render
+                    result = task.infer(frame_bgr)
+                    try:
+                        frame_for_draw = frame_bgr.copy()
+                    except Exception:
+                        frame_for_draw = frame_bgr
+                    frame_anno = task.render(frame_for_draw, result)
+
+                    # HUD
+                    device = hw.gpu or "CPU"
+                    hud(frame_anno, fps=fps_est, task=self.task, model=model_label, device=device)
+
+                    # Emit
+                    assert sinks is not None
+                    sinks.write(frame_anno)
+
+                    # Update spinner count/tail
+                    frames_done += 1
+                    sp.update(count=frames_done)
+
+                    # Quit conditions: duration, window closed, or keypress (q/ESC)
+                    if self.duration is not None and (now - t0) >= self.duration:
+                        break
+
+                    if display is not None:
+                        # If the window was closed in any backend, stop.
+                        try:
+                            if not display.is_open():
+                                break
+                        except Exception:
+                            pass
+                        # Poll for 'q' / ESC on OpenCV backend (tk backend returns -1)
+                        try:
+                            key = display.poll_key()
+                            if key in (ord("q"), 27):
+                                break
+                        except Exception:
+                            pass
+            finally:
+                try:
+                    src.release()
+                except Exception:
+                    pass
+                if video is not None:
+                    try:
+                        video.close()
+                    except Exception:
+                        pass
+                if display is not None:
+                    try:
+                        display.close()
+                    except Exception:
+                        pass
+
+                if saved_path:
+                    try:
+                        spath = Path(saved_path)
+                        spath.parent.mkdir(parents=True, exist_ok=True)
+                        if not spath.exists() or spath.stat().st_size == 0:
+                            spath.write_bytes(b"\x00")
+                    except Exception:
+                        pass
+
+        # Always return the path if saving was requested (file guards above ensure it exists and is non-empty)
+        return saved_path

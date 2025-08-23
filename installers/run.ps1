@@ -11,6 +11,12 @@ $env:PANOPTES_PROGRESS_ACTIVE = '0'
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 
+# ---- Prefer DSHOW on Windows; keep MSMF disabled (works best on Win 10/11) ----
+if ($env:OS -eq 'Windows_NT') {
+  if (-not $env:OPENCV_VIDEOIO_PRIORITY_DSHOW) { $env:OPENCV_VIDEOIO_PRIORITY_DSHOW = '1000' }
+  if (-not $env:OPENCV_VIDEOIO_PRIORITY_MSMF)  { $env:OPENCV_VIDEOIO_PRIORITY_MSMF  = '0' }
+}
+
 function _Here {
   if ($PSCommandPath) { return (Split-Path -Parent $PSCommandPath) }
   if ($MyInvocation.MyCommand.Path) { return (Split-Path -Parent $MyInvocation.MyCommand.Path) }
@@ -59,6 +65,17 @@ if (-not $liveMode -and $foundL -and $foundV) {
     $new.Add($t) | Out-Null
   }
   $tokens = $new
+}
+
+# ---- ARG FIXUPS: accept legacy flag '--no-headless' by just dropping it ----
+if ($tokens.Count -gt 0) {
+  $filtered = New-Object System.Collections.Generic.List[string]
+  foreach ($t in $tokens) {
+    $k = $t.ToLowerInvariant()
+    if ($k -in @('--no-headless','-no-headless')) { continue }  # default is windowed already
+    $filtered.Add($t) | Out-Null
+  }
+  $tokens = $filtered
 }
 
 # Infer project from CWD
@@ -113,5 +130,5 @@ $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
 $pyMod = if ($liveMode) { 'panoptes.live.cli' } else { 'panoptes.cli' }
-& $vpy -m $pyMod @($tokens)
-return
+& $vpy -m $pyMod @tokens
+exit $LASTEXITCODE

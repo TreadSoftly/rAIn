@@ -1,4 +1,13 @@
 # \rAIn\projects\argos\panoptes\progress\bridges.py
+"""
+Engine ↔ Halo spinner bridge.
+
+This module **does not** implement another progress style. It binds the
+lightweight ProgressEngine to the one-and-only Halo spinner. If the Halo
+spinner cannot start (e.g., invalid stream handle under a test harness),
+we fall back to a **no-op** spinner so the workload never breaks — but
+nothing else is rendered.
+"""
 from __future__ import annotations
 
 import sys
@@ -6,12 +15,9 @@ from contextlib import contextmanager
 from types import TracebackType
 from typing import Any, Callable, Generator, Protocol, cast
 
-# Import via the package so we get the rich spinner OR the stdlib fallback.
-from . import percent_spinner  # type: ignore
-from .engine import (
-    ProgressEngine,  # type: ignore
-    ProgressState,
-)
+# IMPORTANT: import the spinner directly from progress_ux to avoid cycles.
+from .progress_ux import percent_spinner  # Halo spinner factory only
+from .engine import ProgressEngine, ProgressState
 
 
 class _SpinnerLike(Protocol):
@@ -29,10 +35,11 @@ def _bind_spinner(engine: ProgressEngine, spinner: _SpinnerLike) -> Callable[[],
     """Subscribe engine → spinner; return unsubscribe."""
     def on_update(st: ProgressState) -> None:
         try:
-            total = float(getattr(st, "total_units", 0))
-            done = float(getattr(st, "done_units", 0))
+            total = float(getattr(st, "total_units", 0.0))
+            done = float(getattr(st, "done_units", 0.0))
             current = getattr(st, "current_item", None) or ""
-            spinner.update(total=total, count=done, current=current)
+            # Engine's "current_item" is the [File: …] slot on the spinner.
+            spinner.update(total=int(total), count=int(done), item=current)
         except Exception:
             # UX must not break the workload.
             pass
@@ -45,8 +52,9 @@ def _bind_spinner(engine: ProgressEngine, spinner: _SpinnerLike) -> Callable[[],
 
 class _NullSpinner:
     """
-    No-op spinner used as a safe fallback when rich spinner initialization
-    fails (e.g., invalid handle on Windows under pytest capture).
+    No-op spinner used as a safe fallback when HALO initialization fails
+    (e.g., invalid handle on Windows under pytest capture). This does not
+    render a different progress style — it renders nothing.
     """
     def __enter__(self) -> "_NullSpinner":
         return self
@@ -75,7 +83,7 @@ def live_percent(engine: ProgressEngine, *, prefix: str = "PROGRESS") -> Generat
     # Prefer real stderr so progress remains visible even when stdio is redirected
     stream = getattr(sys, "__stderr__", sys.stderr)
 
-    # Try to create the rich spinner
+    # Try to create the HALO spinner
     sp = percent_spinner(prefix=prefix, stream=stream)  # type: ignore[call-arg]
     sp_typed = cast(_SpinnerLike, sp)
     try:
@@ -110,7 +118,7 @@ def live_percent(engine: ProgressEngine, *, prefix: str = "PROGRESS") -> Generat
                     pass
             return
 
-        # If we got here, the rich spinner is active
+        # If we got here, the HALO spinner is active
         try:
             yield sp_typed
         finally:

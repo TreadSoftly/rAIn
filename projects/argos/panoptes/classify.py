@@ -9,8 +9,14 @@ run_image(src_img, *, out_dir, model=None, conf=None, topk=1, progress=None) -> 
 • Loads a classifier model STRICTLY via panoptes.model_registry when *model* is None.
 • Renders a small top‑K label card in the top‑left of the image.
 • Writes <stem>_cls.<ext> under *out_dir* (uses source extension if jpg/png, else .jpg).
-• Quiet by default; if *progress* is provided, updates its pinned line:
-      current = "classify" → "write result" → "done"
+
+Progress policy (single‑line UX)
+────────────────────────────────
+* This module NEVER creates its own spinner and NEVER changes totals/counters.
+* If a parent `progress` handle is supplied (the Halo/Rich spinner), we only update:
+      item=[File basename], job in {"classify","infer","write result","done"},
+      model=<model-label>.
+* If `progress` is None, run completely quiet (no prints, no nested spinners).
 """
 
 from __future__ import annotations
@@ -23,6 +29,8 @@ from typing import TYPE_CHECKING, Any, List, Sequence, Tuple, Union, cast
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from .model_registry import load_classifier  # strict registry
+
 if TYPE_CHECKING:
     import numpy as _np
     import numpy.typing as npt
@@ -31,19 +39,26 @@ if TYPE_CHECKING:
 else:
     NDArrayU8 = Any  # type: ignore[assignment]
 
-try:
-    # Prefer our central registry; it enforces weight priority and strictness
-    from .model_registry import load_classifier  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover
-    load_classifier = None  # type: ignore
-
-
+# ─────────────────────────── logging ────────────────────────────
 _LOG = logging.getLogger("panoptes.classify")
 if not _LOG.handlers:
     h = logging.StreamHandler(sys.stderr)
     h.setFormatter(logging.Formatter("%(message)s"))
     _LOG.addHandler(h)
+# QUIET BY DEFAULT so we don’t break the single‑line spinner UX
 _LOG.setLevel(logging.WARNING)
+
+
+# ------------------------------ helpers ---------------------------------------
+def _pupdate(progress: Any | None, **kwargs: Any) -> None:
+    """Best-effort progress.update(**kwargs) if a parent spinner is provided."""
+    if progress is None:
+        return
+    try:
+        progress.update(**kwargs)
+    except Exception:
+        # Never let progress plumbing break the task
+        pass
 
 
 def _as_pil(img: Union[Image.Image, NDArrayU8, str, Path]) -> Tuple[Image.Image, str, str]:
@@ -59,7 +74,8 @@ def _as_pil(img: Union[Image.Image, NDArrayU8, str, Path]) -> Tuple[Image.Image,
         p = Path(img)
         stem = p.stem or stem
         suffix = p.suffix.lower() or suffix
-        pil = Image.open(p).convert("RGB")
+        with Image.open(p) as im:
+            pil = im.convert("RGB")
     else:
         arr = np.asarray(img)
         if arr.ndim == 3 and arr.shape[2] == 3:
@@ -86,7 +102,7 @@ def _topk_from_probs(
     """
     def _name_for(i: int) -> str:
         if isinstance(names, dict):
-            return str(cast(dict[int, str], names).get(i, i)) # type: ignore
+            return str(cast(dict[int, str], names).get(i, i))  # type: ignore[arg-type]
         if isinstance(names, (list, tuple)):
             seq = cast(Sequence[str], names)
             return str(seq[i]) if 0 <= i < len(seq) else str(i)
@@ -124,12 +140,9 @@ def _draw_topk_card(pil_img: Image.Image, items: Sequence[Tuple[str, float]]) ->
     w = 0
     h = 0
     for ln in lines:
-        if hasattr(draw, "textlength"):
-            tw = int(draw.textlength(ln, font=font))  # type: ignore[arg-type]
-            th = draw.textbbox((0, 0), ln, font=font)[3] - draw.textbbox((0, 0), ln, font=font)[1]
-        else:  # pragma: no cover
-            bbox = draw.textbbox((0, 0), ln, font=font)
-            tw, th = bbox[2], bbox[3] - bbox[1]
+        bbox = draw.textbbox((0, 0), ln, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
         w = max(w, tw)
         h += th + gap
     h = max(0, h - gap)
@@ -140,12 +153,30 @@ def _draw_topk_card(pil_img: Image.Image, items: Sequence[Tuple[str, float]]) ->
     # Draw lines
     y = pad + pad
     for ln in lines:
+        bbox = draw.textbbox((0, 0), ln, font=font)
+        th = bbox[3] - bbox[1]
         draw.text((pad + pad, y), ln, fill=(255, 255, 255, 255), font=font)
-        th = draw.textbbox((0, 0), ln, font=font)[3] - draw.textbbox((0, 0), ln, font=font)[1]
         y += th + gap
     return pil_img
 
 
+def _model_label(m: Any) -> str:
+    """Best-effort label for the model to show in [Model:]."""
+    try:
+        for attr in ("ckpt_path", "weights", "weight", "model", "name"):
+            val = getattr(m, attr, None)
+            if isinstance(val, (str, Path)):
+                return Path(str(val)).stem
+            if val:
+                sv = getattr(val, "name", None)
+                if isinstance(sv, (str, Path)):
+                    return Path(str(sv)).stem
+        return m.__class__.__name__
+    except Exception:  # pragma: no cover
+        return "model"
+
+
+# ------------------------------- main API ------------------------------------
 def run_image(
     src_img: Union[Image.Image, NDArrayU8, str, Path],
     *,
@@ -158,19 +189,24 @@ def run_image(
     """
     Draws top‑K class labels onto image and writes to <stem>_cls.<ext>.
     """
-    if progress:
-        progress.update(current="classify")
-
+    # Normalize inputs and derive a stable basename for the spinner
     pil, stem, suf = _as_pil(src_img)
+    basename = f"{stem}{suf}"
 
-    # Acquire classifier
+    # Parent progress provided → only update context segments
+    _pupdate(progress, item=basename, job="classify")
+
+    # Acquire classifier (strictly via registry if None)
     if model is None:
-        if load_classifier is None:
-            raise RuntimeError("Classifier loader is unavailable (model_registry missing).")
-        model = cast(Any, load_classifier())  # type: ignore[call-arg]
+        model = load_classifier()  # may raise
+
+    # Update model label
+    _pupdate(progress, model=_model_label(model))
 
     # Inference
-    res_list: list[Any] = cast(list[Any], model.predict(pil, imgsz=640, conf=conf or 0.0, verbose=False))  # type: ignore[call-arg]
+    _pupdate(progress, job="infer")
+
+    res_list: list[Any] = cast(list[Any], model.predict(pil, imgsz=640, conf=(conf or 0.0), verbose=False))  # type: ignore[call-arg]
     res = res_list[0] if res_list else None
     if res is None or getattr(res, "probs", None) is None:
         items: List[Tuple[str, float]] = []
@@ -182,12 +218,12 @@ def run_image(
         pil = _draw_topk_card(pil, items)
 
     # Save
-    if progress:
-        progress.update(current="write result")
+    _pupdate(progress, job="write result")
+
     out_ext = suf if suf in {".jpg", ".jpeg", ".png"} else ".jpg"
     out_path = (Path(out_dir).expanduser().resolve() / f"{stem}_cls{out_ext}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pil.save(out_path)
-    if progress:
-        progress.update(current="done")
+
+    _pupdate(progress, job="done")
     return out_path

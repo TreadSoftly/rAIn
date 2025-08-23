@@ -1,11 +1,12 @@
 def demo_progress_usage():
     """
     Placeholder for manual testing of progress UX inside the venv.
+    Uses the HALO spinner directly.
     """
     try:
-        from panoptes.progress.progress_ux import percent_spinner  # type: ignore
+        from panoptes.progress import percent_spinner  # type: ignore
     except Exception:
-        print("progress_ux not yet importable; install project in editable mode first.")
+        print("HALO spinner not yet importable; install the project in editable mode first.")
         return
     items = ["a", "b", "c", "d"]
     done = 0
@@ -13,7 +14,7 @@ def demo_progress_usage():
     with percent_spinner(prefix="DEMO") as sp:
         sp.update(total=len(items))
         for it in items:
-            sp.update(current=it)
+            sp.update(item=it)  # [File: …]
             sleep(0.2)
             done += 1
-            sp.update(count=done)
+            sp.update(count=done, job="demo")  # [Job: demo]

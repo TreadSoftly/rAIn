@@ -12,6 +12,14 @@ Hard-locking rules
    ``load_detector/segmenter/...`` is retained for unit-tests and ad‑hoc use.
 3. If a required weight is missing we raise **RuntimeError** immediately
    - downstream code must catch or let the program abort.
+
+Progress policy
+────────────────────────────────────────────────────────────────────────
+This module **never** creates or displays any progress UI on its own.
+It does not import or use any progress/status helpers. All progress is
+centralized in the CLI via the Halo/Rich spinner. Model initialization
+happens silently here so the single parent spinner remains the *only*
+progress surface visible to the user.
 """
 from __future__ import annotations
 
@@ -19,20 +27,9 @@ import contextlib
 import functools
 import importlib
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Final, Optional, Union
-
-
-# ────────────────────────────────────────────────────────────────
-#  Optional progress (safe to import even if progress module absent)
-# ────────────────────────────────────────────────────────────────
-try:
-    from .progress.progress_ux import simple_status  # type: ignore
-except Exception:  # pragma: no cover
-    simple_status = None  # type: ignore
-
 
 # ────────────────────────────────────────────────────────────────
 #  Logging (explicit, human-friendly, no stack noise)
@@ -238,9 +235,9 @@ def _load(
     Cached wrapper around ``YOLO(path, task=...)`` to avoid re-inits and kill
     the “Unable to automatically guess model task” warning when supported.
 
-    NOTE: Ultralytics is resolved lazily here (see _resolve_yolo_class()) so
-    unit tests that monkeypatch ``ultralytics`` will be honored even if this
-    module was imported earlier in the session.
+    PROGRESS POLICY:
+    This function **never** opens or renders progress/status UI. The only
+    progress surface is the parent Halo/Rich spinner from the CLI.
     """
     yolo_cls = _resolve_yolo_class()
     if yolo_cls is None or weight is None:
@@ -248,13 +245,7 @@ def _load(
 
     _say(f"init YOLO: task={task} path={weight}")
 
-    cm: contextlib.AbstractContextManager[object]
-    if (simple_status is not None) and (os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"):
-        cm = simple_status(f"Initialising YOLO ({task})")  # type: ignore[assignment]
-    else:
-        cm = contextlib.nullcontext()
-
-    with cm:
+    with contextlib.nullcontext():
         try:
             return yolo_cls(str(weight), task=task)  # type: ignore[call-arg]
         except TypeError:

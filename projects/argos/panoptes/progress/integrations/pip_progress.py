@@ -1,16 +1,15 @@
 # projects/argos/panoptes/progress/integrations/pip_progress.py
 """
-Lightweight pip output parser that converts notable events into "units":
+Lightweight pip output parser that converts notable events into "units".
+Pure parser: it **does not** render any UI and **does not** create a spinner.
+Callers can pass the emitted units into the Argos ProgressEngine (Halo/Rich).
 
+Signals:
   +1  on "Downloading ..."
   +1  on "Building wheel for ..."
   +N  on "Installing collected packages: a, b, c" (N packages)
   +1  on "Preparing metadata (pyproject.toml) for ..."
   +1  on "Preparing metadata (setup.py) for ..."
-
-This is heuristic but stable across common pip versions. Callers can seed
-the ProgressEngine with a total (e.g., count of packages) and then pass
-on_units(Δ) here to increment as these milestones are observed.
 """
 from __future__ import annotations
 
@@ -33,7 +32,7 @@ def _count_pkg_list(s: str) -> int:
 def parse_pip_stream(lines: Iterable[bytes], on_units: Callable[[int], None]) -> int:
     """
     Consume pip's combined stdout/stderr byte stream line-by-line, decode, and emit units.
-    Returns the total units emitted.
+    Returns the total units emitted (int).
     """
     emitted = 0
     for raw in lines:

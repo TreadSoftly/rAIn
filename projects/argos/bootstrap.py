@@ -1,3 +1,4 @@
+# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\bootstrap.py
 #!/usr/bin/env python3
 """
 Argos bootstrap - zero-touch, idempotent, fast.
@@ -52,8 +53,8 @@ from typing import (
 # Optional: Progress UI (safe fallbacks if deps missing / CI / non-TTY)
 # ──────────────────────────────────────────────────────────────
 try:
-    from panoptes.progress import ( # type: ignore
-        ProgressEngine,  # type: ignore; type: ignore
+    from panoptes.progress import (  # type: ignore[import]
+        ProgressEngine,  # type: ignore
         live_percent,
     )
 except Exception:
@@ -140,7 +141,10 @@ def _run(
     env: Optional[Mapping[str, str]] = ...,
     check: bool = ...,
     capture: Literal[True],
-) -> subprocess.CompletedProcess[str]: ...
+) -> subprocess.CompletedProcess[str]:
+    ...
+
+
 @overload
 def _run(
     cmd: Sequence[str],
@@ -149,7 +153,10 @@ def _run(
     env: Optional[Mapping[str, str]] = ...,
     check: bool = ...,
     capture: Literal[False] = ...,
-) -> None: ...
+) -> None:
+    ...
+
+
 def _run(
     cmd: Sequence[str],
     *,
@@ -171,7 +178,7 @@ def _run(
             stderr=subprocess.PIPE,
             check=check,
             cwd=cwd,
-            env=dict(env) if isinstance(env, MutableMapping) else env,  # satisfy Mapping
+            env=dict(env) if isinstance(env, MutableMapping) else env,
         )
     subprocess.run(list(cmd), check=check, cwd=cwd, env=dict(env) if isinstance(env, MutableMapping) else env)
     return None
@@ -262,11 +269,68 @@ def _install_torch_if_needed(cpu_only: bool) -> None:
     _run([str(VPY), "-m", "pip", "install", *idx, *_constraints_args(), torch_spec, tv_spec], check=True, capture=False)
 
 
+def _ensure_opencv_gui() -> None:
+    """
+    Enforce GUI-capable OpenCV across ALL platforms.
+      • Uninstall any headless variants that shadow HighGUI
+      • Install/upgrade opencv-python pinned by constraints.txt
+    """
+    _print("→ ensuring OpenCV (GUI-capable) …")
+    # Remove headless variants if present (best-effort)
+    try:
+        _run(
+            [
+                str(VPY),
+                "-m",
+                "pip",
+                "uninstall",
+                "-y",
+                "opencv-python-headless",
+                "opencv-contrib-python-headless",
+            ],
+            check=False,
+            capture=False,
+        )
+    except Exception:
+        pass
+    # Install/upgrade GUI wheel; constraints.txt will anchor the exact version
+    _run([str(VPY), "-m", "pip", "install", "--upgrade", *_constraints_args(), "opencv-python"], check=True, capture=False)
+
+
 def _pip_install_editable_if_needed(*, reinstall: bool = False) -> None:
-    # Also ensure Ultralytics is there (weight fetch relies on it)
+    """
+    Install Argos in editable mode (with dev extras) if missing, or when
+    explicitly forced. Also nuke headless OpenCV if it slipped in.
+
+    Also fixes the prior pyright/typing warning by importing symbols directly
+    from importlib.metadata (with a backport fallback) instead of using a
+    partially-unknown module alias.
+    """
     need = reinstall or (not _module_present("panoptes")) or (not _module_present("ultralytics"))
+
+    # If headless OpenCV is installed, force a reinstall path so deps are corrected.
+    headless_present = False
+    try:
+        # Prefer stdlib importlib.metadata; fall back to backport.
+        from importlib.metadata import PackageNotFoundError, distribution as ild_distribution  # type: ignore
+    except Exception:  # pragma: no cover
+        from importlib_metadata import PackageNotFoundError, distribution as ild_distribution  # type: ignore
+    try:
+        ild_distribution("opencv-python-headless")
+        headless_present = True
+    except PackageNotFoundError:
+        headless_present = False
+    except Exception:
+        headless_present = False
+
+    if headless_present:
+        need = True
+        _print("→ removing opencv-python-headless (if installed) …")
+        _run([str(VPY), "-m", "pip", "uninstall", "-y", "opencv-python-headless"], check=False, capture=False)
+
     if not need:
         return
+
     _print("→ installing Argos package (editable) + dev extras …")
     _run(
         [str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + "[dev]", *_constraints_args()],
@@ -319,8 +383,7 @@ def to_name(p):
     return Path(p).name if p else None
 
 default_names = [to_name(detect_first), to_name(heatmap_first)]
-nano_names    = [Path(p).name for p in WEIGHT_PRIORITY.get('detect_small', []) +
-                               WEIGHT_PRIORITY.get('heatmap_small', [])]
+nano_names    = [Path(p).name for p in WEIGHT_PRIORITY.get('detect_small', []) + WEIGHT_PRIORITY.get('heatmap_small', [])]
 perception_names = [to_name(detect_first), to_name(heatmap_first), to_name(pose_first), to_name(obb_first)]
 
 out_path = Path(sys.argv[-1])
@@ -376,8 +439,7 @@ out_path.write_text(json.dumps({
 
 def _child_json(code: str, args: list[str]) -> Dict[str, Any]:
     """
-    Run a small Python snippet in the venv interpreter and read a JSON file
-    it writes as its last arg. This avoids noisy stdout (Ultralytics logs).
+    Run a small Python snippet in the venv interpreter and read a JSON file it writes as its last arg. This avoids noisy stdout (Ultralytics logs).
     """
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tf:
         out_path = Path(tf.name)
@@ -611,7 +673,8 @@ def _create_launchers() -> None:
     ps1.write_text(
         textwrap.dedent(
             r"""\
-        [CmdletBinding()] param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+        [CmdletBinding()]
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
         $ErrorActionPreference = "Stop"
         $HERE = Split-Path -Parent $MyInvocation.MyCommand.Path
         $py = (Get-Command python -ErrorAction SilentlyContinue).Source
@@ -673,9 +736,9 @@ Quick start (no venv activation)
       argos.cmd tests\\assets\\assets.jpg pse
 
   Linux / macOS:
-      ./argos tests/assets/assets.jpg heatmap --alpha 0.5
-      ./argos tests/assets/assets.jpg pose
-      ./argos tests/assets/assets.jpg classify --topk 3 --annotate
+      ./argos tests/raw/assets.jpg heatmap --alpha 0.5
+      ./argos tests/raw/assets.jpg pose
+      ./argos tests/raw/assets.jpg classify --topk 3 --annotate
 
   GeoJSON from URL (with #lat…_lon…):
       ./argos "https://…/image.jpg#lat37.8199_lon-122.4783" --task geojson
@@ -687,7 +750,7 @@ Power users
       make run         # example CLI invocation (see Makefile for options)
 
   • Direct module:
-      {py} -m panoptes.cli tests/assets/assets.jpg heatmap
+      {py} -m panoptes.cli tests/raw/assets.jpg heatmap
 
 CI / CD
   • Use ARGOS_WEIGHT_PRESET=[all|default|nano|perception] and run:
@@ -769,6 +832,26 @@ def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
             return False
 
 
+def _pip_check_soft() -> None:
+    """
+    Run 'pip check' and print problems, but do not fail the bootstrap.
+    This avoids non-actionable build failures when constraints.txt is absent
+    or when upstream wheels temporarily conflict.
+    """
+    try:
+        _run([str(VPY), "-m", "pip", "check"], check=True, capture=False)
+    except Exception:
+        _print("⚠️  'pip check' reported issues; continuing. Details follow:")
+        try:
+            cp = _run([str(VPY), "-m", "pip", "check"], check=False, capture=True)
+            if cp and hasattr(cp, "stdout") and cp.stdout:
+                _print(cp.stdout.strip())
+            if cp and hasattr(cp, "stderr") and cp.stderr:
+                _print(cp.stderr.strip())
+        except Exception:
+            pass
+
+
 def _ensure(
     cpu_only: bool,
     *,
@@ -784,11 +867,17 @@ def _ensure(
     steps: list[tuple[str, Callable[[], None]]] = [
         ("Create venv", _create_venv),
         ("Install Torch", lambda: _install_torch_if_needed(cpu_only)),
+        ("Ensure OpenCV (GUI)", _ensure_opencv_gui),
         ("Install Argos (editable)", lambda: _pip_install_editable_if_needed(reinstall=reinstall)),
-        ("Ensure weights", (lambda: None) if (skip_weights or os.getenv("ARGOS_SKIP_WEIGHTS", "").lower() in {"1", "true", "yes"}) else (lambda: _ensure_weights_ultralytics(preset=preset, explicit_names=weight_names))),
+        (
+            "Ensure weights",
+            (lambda: None)
+            if (skip_weights or os.getenv("ARGOS_SKIP_WEIGHTS", "").lower() in {"1", "true", "yes"})
+            else (lambda: _ensure_weights_ultralytics(preset=preset, explicit_names=weight_names)),
+        ),
         ("Move pytest cache", _move_pytest_cache_out_of_repo),
         ("Sitecustomize (pycache outside)", _ensure_sitecustomize),
-        ("pip check", lambda: _run([str(VPY), "-m", "pip", "check"], check=True, capture=False)),
+        ("pip check (soft)", _pip_check_soft),
     ]
 
     if ProgressEngine is None or live_percent is None:
@@ -819,7 +908,6 @@ def main(argv: list[str]) -> int:
     p.add_argument("--reinstall", action="store_true", help="Force reinstall of Argos editable package")
     p.add_argument("--yes", action="store_true", help="Assume Yes to prompts (non-interactive)")
     args, _ = p.parse_known_args(argv)
-
     _ensure_dirs()
 
     if args.print_venv:

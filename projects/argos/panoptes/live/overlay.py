@@ -15,6 +15,19 @@ from __future__ import annotations
 
 from typing import Optional, Mapping, Iterable, List, Tuple, Dict, Sequence
 
+# Touch progress module lightly so this file participates in UX integration.
+# (No spinners here to avoid per-frame overhead.)
+try:
+    from panoptes.progress import should_enable_spinners as _progress_spinners_enabled  # type: ignore[import]
+except Exception:  # pragma: no cover
+    def _progress_spinners_enabled(*_a: object, **_k: object) -> bool: return False
+
+# Reference once to avoid "unused import" warnings in some linters (and avoid ALL_CAPS redefinition)
+try:
+    _progress_available = bool(_progress_spinners_enabled())
+except Exception:
+    _progress_available = False
+
 try:
     import numpy as np
 except Exception:
@@ -58,7 +71,6 @@ def draw_boxes_bgr(
         x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 210, 255), 2)
         label = nm.get(int(cls_id), str(cls_id)) if (cls_id is not None and nm) else ""
-        # "conf" is typed as float in Boxes; include it unconditionally.
         if label:
             label = f"{label} {conf:.2f}"
         else:

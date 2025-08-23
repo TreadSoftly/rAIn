@@ -12,6 +12,16 @@ from typing import Optional, TypedDict, Dict
 
 import platform
 
+# Lightweight progress note during hardware probing
+try:
+    from panoptes.progress import simple_status as _progress_simple_status  # type: ignore[import]
+except Exception:  # pragma: no cover
+    def _progress_simple_status(*_a: object, **_k: object):
+        class _N:
+            def __enter__(self): return self
+            def __exit__(self, *_: object) -> bool: return False
+        return _N()
+
 try:
     import torch  # type: ignore
 except Exception:
@@ -27,15 +37,17 @@ class HardwareInfo:
 
 def probe_hardware() -> HardwareInfo:
     """Detect very basic device/backends; keep it fast and robust."""
-    gpu = None
-    if torch is not None and torch.cuda.is_available():  # pragma: no cover
-        try:
-            idx = torch.cuda.current_device()
-            gpu = torch.cuda.get_device_name(idx)
-        except Exception:
-            gpu = "CUDA"
-    backend = "auto"
-    arch = platform.machine() or "unknown"
+    gpu: Optional[str] = None
+    backend: str = "auto"
+    arch: str = "unknown"
+    with _progress_simple_status("Probing hardware"):
+        if torch is not None and torch.cuda.is_available():  # pragma: no cover
+            try:
+                idx = torch.cuda.current_device()
+                gpu = torch.cuda.get_device_name(idx)
+            except Exception:
+                gpu = "CUDA"
+        arch = platform.machine() or "unknown"
     return HardwareInfo(gpu=gpu, backend=backend, arch=arch)
 
 
@@ -55,10 +67,8 @@ def select_models_for_live(task: str, hw: HardwareInfo) -> ModelSelection:
         return {"label": "laplacian-heatmap (no-ML)", "names": {}}
     if task.lower() in ("classify", "clf"):
         return {"label": "simple-classify (no-ML)", "names": {}}
-    if task.lower() in ("pose",):
+    if task.lower() in ("pose", "pse"):
         return {"label": "simple-pose (no-ML)", "names": {}}
-    if task.lower() in ("pse",):
-        return {"label": "simple-pse (no-ML)", "names": {}}
     if task.lower() in ("obb", "object"):
         return {"label": "simple-obb (no-ML)", "names": {}}
     return {"label": "custom", "names": {}}

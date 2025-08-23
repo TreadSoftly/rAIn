@@ -1,4 +1,4 @@
-# progress_ux.py — terminal UX helpers (spinners, status, OSC-8 links)
+# progress_ux.py — terminal UX helpers (HALO/Rich spinner, status, OSC-8 links)
 from __future__ import annotations
 
 import itertools
@@ -47,8 +47,14 @@ except Exception:  # pragma: no cover
 
 DEFAULT_COLORS: List[str] = [
     Fore.RED, Fore.GREEN, Fore.BLUE, Fore.YELLOW, Fore.CYAN, Fore.MAGENTA, Fore.WHITE,
-    Fore.LIGHTBLACK_EX, Fore.LIGHTBLUE_EX, Fore.LIGHTCYAN_EX, Fore.LIGHTGREEN_EX,
-    Fore.LIGHTMAGENTA_EX, Fore.LIGHTRED_EX, Fore.LIGHTWHITE_EX, Fore.LIGHTYELLOW_EX,
+    getattr(Fore, "LIGHTBLACK_EX", Fore.WHITE),
+    getattr(Fore, "LIGHTBLUE_EX", Fore.BLUE),
+    getattr(Fore, "LIGHTCYAN_EX", Fore.CYAN),
+    getattr(Fore, "LIGHTGREEN_EX", Fore.GREEN),
+    getattr(Fore, "LIGHTMAGENTA_EX", Fore.MAGENTA),
+    getattr(Fore, "LIGHTRED_EX", Fore.RED),
+    getattr(Fore, "LIGHTWHITE_EX", Fore.WHITE),
+    getattr(Fore, "LIGHTYELLOW_EX", Fore.YELLOW),
 ]
 
 class Spinner(Protocol):
@@ -65,6 +71,7 @@ class Spinner(Protocol):
 def _should_enable_spinners(enabled: bool, stream: Any | None = None) -> bool:
     if not enabled or Halo is None:
         return False
+    # Suppress nested spinners unless forced.
     if (os.environ.get("PANOPTES_PROGRESS_ACTIVE") == "1" and
         os.environ.get("PANOPTES_PROGRESS_FORCE", "").lower() not in {"1", "true", "yes"}):
         return False
@@ -121,9 +128,22 @@ def _make_const_text(value: str) -> Callable[[Dict[str, Any], str], str]:
     return _fn
 
 class DynamicSpinner:
-    def __init__(self, text_fn: Callable[[Dict[str, Any], str], str], state: Optional[Dict[str, Any]] = None, *,
-                interval: float = 0.1, colors: Optional[List[str]] = None, spinner_type: str = "dots",
-                enabled: bool = True, stream: Any | None = None, final_newline: bool = True):
+    """
+    A single-line, fixed-width spinner rendered via Halo with colored,
+    bracketed middle segments: [File: …] [Job: …] [Model: …] and a percent tail.
+    """
+    def __init__(
+        self,
+        text_fn: Callable[[Dict[str, Any], str], str],
+        state: Optional[Dict[str, Any]] = None,
+        *,
+        interval: float = 0.1,
+        colors: Optional[List[str]] = None,
+        spinner_type: str = "dots",
+        enabled: bool = True,
+        stream: Any | None = None,
+        final_newline: bool = True,
+    ):
         self._text_fn = text_fn
         self._state: Dict[str, Any] = dict(state or {})
         self._interval = interval
@@ -199,6 +219,11 @@ class DynamicSpinner:
                         pass
 
     def update(self, **kwargs: Any) -> "Spinner":
+        # Accepts keys: total, count, item/current, job, model
+        # Map legacy 'current' to [File: …] (item) — callers who want to update
+        # the [Job: …] slot should pass job=... explicitly or use JobAwareProxy.
+        if "current" in kwargs and "item" not in kwargs:
+            kwargs["item"] = kwargs.pop("current")
         self._state.update(kwargs)
         return self
 
@@ -209,30 +234,65 @@ class DynamicSpinner:
     def text(self, value: str) -> None:
         self._text_fn = _make_const_text(value)
 
-def enabled_spinner(enabled: bool = True, *, stream: Any | None = None, final_newline: bool = True) -> Callable[..., Spinner]:
-    def _ctor(text_fn: Callable[[Dict[str, Any], str], str], state: Optional[Dict[str, Any]] = None, *,
-            interval: float = 0.1, colors: Optional[List[str]] = None, spinner_type: str = "dots") -> Spinner:
+
+def enabled_spinner(
+    enabled: bool = True,
+    *,
+    stream: Any | None = None,
+    final_newline: bool = True,
+) -> Callable[..., Spinner]:
+    def _ctor(
+        text_fn: Callable[[Dict[str, Any], str], str],
+        state: Optional[Dict[str, Any]] = None,
+        *,
+        interval: float = 0.1,
+        colors: Optional[List[str]] = None,
+        spinner_type: str = "dots",
+    ) -> Spinner:
         chosen_stream = stream or sys.stderr
         if _should_enable_spinners(enabled, chosen_stream):
-            return DynamicSpinner(text_fn, state, interval=interval, colors=colors,
-                                spinner_type=spinner_type, enabled=True, stream=chosen_stream,
-                                final_newline=final_newline)
+            return DynamicSpinner(
+                text_fn,
+                state,
+                interval=interval,
+                colors=colors,
+                spinner_type=spinner_type,
+                enabled=True,
+                stream=chosen_stream,
+                final_newline=final_newline,
+            )
         return NullSpinner()
     return _ctor
 
-def running_task(task: str, subject: str, *, enabled: bool = True, spinner_type: str = "dots",
-                stream: Any | None = None, final_newline: bool = True) -> Spinner:
+
+def running_task(
+    task: str,
+    subject: str,
+    *,
+    enabled: bool = True,
+    spinner_type: str = "dots",
+    stream: Any | None = None,
+    final_newline: bool = True,
+) -> Spinner:
     ctor = enabled_spinner(enabled, stream=stream, final_newline=final_newline)
     def text_fn(_state: Dict[str, Any], color: str) -> str:
         return f"{color}{Style.BRIGHT}Running {task} on {subject}{Style.RESET_ALL}"
     return ctor(text_fn, spinner_type=spinner_type)
 
-def simple_status(label: str, *, enabled: bool = True, spinner_type: str = "dots",
-                stream: Any | None = None, final_newline: bool = True) -> Spinner:
+
+def simple_status(
+    label: str,
+    *,
+    enabled: bool = True,
+    spinner_type: str = "dots",
+    stream: Any | None = None,
+    final_newline: bool = True,
+) -> Spinner:
     ctor = enabled_spinner(enabled, stream=stream, final_newline=final_newline)
     def text_fn(_s: Dict[str, Any], color: str) -> str:
         return f"{color}{Style.BRIGHT}{label}{Style.RESET_ALL}"
     return ctor(text_fn, spinner_type=spinner_type)
+
 
 # helpers for percent spinner text
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -248,17 +308,24 @@ def _ellipsize_plain(s: str, n: int) -> str:
         return "…"
     return s[: n - 1].rstrip() + "…"
 
-def percent_spinner(prefix: str = "PROGRESS", *, enabled: bool = True, spinner_type: str = "dots",
-                    stream: Any | None = None, final_newline: bool = True) -> Spinner:
+
+def percent_spinner(
+    prefix: str = "PROGRESS",
+    *,
+    enabled: bool = True,
+    spinner_type: str = "dots",
+    stream: Any | None = None,
+    final_newline: bool = True,
+    interval: float | None = None,
+) -> Spinner:
     """
     Fixed-width, single-line progress:
-    <prefix> [ITEM:…] [JOB:…] [MODEL:…]  [DONE: x/y] [PROGRESS: zz.zz%]
+    <prefix> [File:…] [Job:…] [Model:…]  [i/N] [zz.zz%]
     We keep colours by shrinking only the VALUE parts.
+    The spinner is Halo-based; no other progress UI is used.
     """
-    ctor = enabled_spinner(enabled, stream=stream, final_newline=final_newline)
-
-    # width is only for visible budget (no terminal padding)
-    DEFAULT_LINE_COLS = 100  # matches the older look/feel
+    # Width (visible characters only)
+    DEFAULT_LINE_COLS = 100
     try:
         env_w = os.environ.get("PANOPTES_PROGRESS_WIDTH")
         latched_cols = max(20, int(env_w)) if env_w else DEFAULT_LINE_COLS
@@ -266,6 +333,19 @@ def percent_spinner(prefix: str = "PROGRESS", *, enabled: bool = True, spinner_t
         latched_cols = DEFAULT_LINE_COLS
 
     tail_mode = (os.environ.get("PANOPTES_PROGRESS_TAIL", "full") or "full").lower()
+
+    # Allow env overrides for spinner glyph, interval, and final newline
+    spinner_type = os.environ.get("PANOPTES_SPINNER", spinner_type)
+    if "PANOPTES_PROGRESS_FINAL_NEWLINE" in os.environ:
+        final_newline = (os.environ.get("PANOPTES_PROGRESS_FINAL_NEWLINE", "0").lower() in {"1", "true", "yes"})
+    if interval is None:
+        try:
+            interval = float(os.environ.get("PANOPTES_SPINNER_INTERVAL", "0.01"))
+        except Exception:
+            interval = 0.01
+
+    ctor = enabled_spinner(enabled, stream=stream, final_newline=final_newline)
+
     ITEM_MIN_W = 1
 
     def text_fn(state: Dict[str, Any], color: str) -> str:
@@ -273,7 +353,7 @@ def percent_spinner(prefix: str = "PROGRESS", *, enabled: bool = True, spinner_t
 
         count = max(0, int(state.get("count", 0)))
         total = max(1, int(state.get("total", 1)))
-        item  = str(state.get("current") or state.get("item") or "")
+        item  = str(state.get("item") or state.get("current") or "")
         job   = str(state.get("job") or "")
         model = str(state.get("model") or "")
         pct = min(100.0, max(0.0, (100.0 * count) / max(1, total)))
@@ -344,7 +424,9 @@ def percent_spinner(prefix: str = "PROGRESS", *, enabled: bool = True, spinner_t
 
         return f"{head}{mid_text}{tail}"
 
-    return ctor(text_fn, state={"count": 0, "total": 1, "current": None}, spinner_type=spinner_type)
+    # Pass selected interval to the DynamicSpinner via the ctor
+    return ctor(text_fn, state={"count": 0, "total": 1, "item": None}, interval=float(interval), spinner_type=spinner_type)
+
 
 def osc8(label: str, target: str) -> str:
     try:
@@ -355,6 +437,7 @@ def osc8(label: str, target: str) -> str:
     except Exception:
         uri = urllib.parse.quote(target, safe=":/#?&=%")
     return f"\x1b]8;;{uri}\x1b\\{label}\x1b]8;;\x1b\\"
+
 
 class AnimatedBanner:
     def __init__(self, lines: Sequence[str], mutator: Callable[[int, List[str]], List[str]], *, interval: float = 0.05):

@@ -9,6 +9,14 @@ run_image(src_img, *, out_dir, model=None, conf=None, iou=None, progress=None) -
 • Loads OBB model STRICTLY via panoptes.model_registry when *model* is None.
 • Prefers true oriented polygons from results. Falls back to axis‑aligned boxes if needed.
 • Writes <stem>_obb.<ext> under *out_dir* (uses source extension if jpg/png, else .jpg).
+
+Progress policy (single‑line UX)
+────────────────────────────────
+* This module NEVER creates its own spinner and NEVER changes totals/counters.
+* If a parent `progress` handle is supplied (the Halo/Rich spinner), we only update:
+      item=[File basename], job in {"object","infer","write result","done"},
+      model=<model-label>.
+* If `progress` is None, run completely quiet (no prints, no nested spinners).
 """
 
 from __future__ import annotations
@@ -20,6 +28,8 @@ from typing import TYPE_CHECKING, Any, List, Tuple, Union, cast
 
 import numpy as np
 from PIL import Image
+
+from .model_registry import load_obb  # strict registry
 
 if TYPE_CHECKING:
     import numpy as _np
@@ -33,22 +43,35 @@ else:
     PolyF32 = Any     # type: ignore[assignment]
     NDArrayAny = Any  # type: ignore[assignment]
 
+# OpenCV is optional at import; we require it at call sites.
 try:
-    import cv2  # type: ignore
+    import cv2 as _cv2_mod  # type: ignore
 except Exception:  # pragma: no cover
-    cv2 = None  # type: ignore
+    _cv2_mod = None  # type: ignore
 
-try:
-    from .model_registry import load_obb  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover
-    load_obb = None  # type: ignore
+def _require_cv2() -> Any:
+    if _cv2_mod is None:
+        raise RuntimeError("OpenCV is required for OBB drawing.")
+    return _cv2_mod  # typed as Any to silence 'attribute of None' linters
 
+# ─────────────────────────── logging ────────────────────────────
 _LOG = logging.getLogger("panoptes.obb")
 if not _LOG.handlers:
     h = logging.StreamHandler(sys.stderr)
     h.setFormatter(logging.Formatter("%(message)s"))
     _LOG.addHandler(h)
+# QUIET BY DEFAULT
 _LOG.setLevel(logging.WARNING)
+
+
+def _pupdate(progress: Any | None, **kwargs: Any) -> None:
+    """Best-effort progress.update(**kwargs) if a parent spinner is provided."""
+    if progress is None:
+        return
+    try:
+        progress.update(**kwargs)
+    except Exception:
+        pass
 
 
 def _ensure_bgr_u8_writable(arr: NDArrayAny) -> NDArrayU8:
@@ -94,6 +117,21 @@ def _as_bgr(img: Union[Image.Image, NDArrayAny, str, Path]) -> Tuple[NDArrayU8, 
 
     arr = np.asarray(img)
     return _ensure_bgr_u8_writable(arr), stem, suffix
+
+
+def _model_label(m: Any) -> str:
+    try:
+        for attr in ("ckpt_path", "weights", "weight", "model", "name"):
+            val = getattr(m, attr, None)
+            if isinstance(val, (str, Path)):
+                return Path(str(val)).stem
+            if val:
+                sv = getattr(val, "name", None)
+                if isinstance(sv, (str, Path)):
+                    return Path(str(sv)).stem
+        return m.__class__.__name__
+    except Exception:  # pragma: no cover
+        return "model"
 
 
 def _extract_polys(res: Any) -> List[PolyF32]:
@@ -148,30 +186,30 @@ def run_image(
     iou: float | None = None,
     progress: Any = None,
 ) -> Path:
-    if cv2 is None:
-        raise RuntimeError("OpenCV is required for OBB drawing.")
-
-    if progress:
-        try:
-            progress.update(current="obb")
-        except Exception:
-            pass
+    cv = _require_cv2()
 
     bgr, stem, suf = _as_bgr(src_img)
+    basename = f"{stem}{suf}"
+
+    # Parent progress provided → only update context segments
+    _pupdate(progress, item=basename, job="object")
 
     # Acquire OBB model
     mdl: Any
     if model is not None:
         mdl = model
     else:
-        if load_obb is None:
-            raise RuntimeError("OBB loader is unavailable (model_registry missing).")
-        loaded = load_obb()  # type: ignore[call-arg]
+        loaded = load_obb()  # strict loader; may raise
         if loaded is None:
             raise RuntimeError("OBB loader returned None (failed to load model).")
-        mdl = cast(Any, loaded)
+        mdl = loaded
+
+    # Update model label
+    _pupdate(progress, model=_model_label(mdl))
 
     # Inference
+    _pupdate(progress, job="infer")
+
     res_list: list[Any] = cast(
         list[Any],
         mdl.predict(
@@ -190,24 +228,15 @@ def run_image(
         polys = _extract_polys(res)
         for poly in polys:
             pts = np.asarray(poly, dtype=np.float32).reshape(4, 2).astype(np.int32)
-            cv2.polylines(bgr, [pts], isClosed=True, color=color, thickness=2)
+            cv.polylines(bgr, [pts], isClosed=True, color=color, thickness=2)
 
     # Save
-    if progress:
-        try:
-            progress.update(current="write result")
-        except Exception:
-            pass
+    _pupdate(progress, job="write result")
 
     out_ext = suf if suf in {".jpg", ".jpeg", ".png"} else ".jpg"
     out_path = (Path(out_dir).expanduser().resolve() / f"{stem}_obb{out_ext}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(bgr[:, :, ::-1]).save(out_path)
 
-    if progress:
-        try:
-            progress.update(current="done")
-        except Exception:
-            pass
-
+    _pupdate(progress, job="done")
     return out_path

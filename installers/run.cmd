@@ -27,6 +27,12 @@ set "FORCE_COLOR=1"
 set "PANOPTES_NESTED_PROGRESS=1"
 set "PANOPTES_PROGRESS_ACTIVE=0"
 
+rem ---- Prefer DSHOW, disable MSMF ----
+if /I "%OS%"=="Windows_NT" (
+  if not defined OPENCV_VIDEOIO_PRIORITY_DSHOW set "OPENCV_VIDEOIO_PRIORITY_DSHOW=1000"
+  if not defined OPENCV_VIDEOIO_PRIORITY_MSMF  set "OPENCV_VIDEOIO_PRIORITY_MSMF=0"
+)
+
 rem --- Parse args (preserving quotes safely) ---
 set "PROJ="
 set "SAW_BUILD=0"
@@ -96,6 +102,10 @@ if not defined OPNORM (
   if /I "%~1"=="obb"        set "OPNORM=obb"      & shift & goto parse
   if /I "%~1"=="object"     set "OPNORM=obb"      & shift & goto parse
 )
+
+rem ---- ARG FIXUPS: swallow legacy --no-headless / -no-headless ----
+if /I "%~1"=="--no-headless"  shift & goto parse
+if /I "%~1"=="-no-headless"   shift & goto parse
 
 rem Otherwise, accumulate token preserving quotes
 set "TOKENS=%TOKENS% "%~1""

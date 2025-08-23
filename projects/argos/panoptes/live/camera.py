@@ -2,16 +2,27 @@
 """
 Live capture sources for ARGOS.
 
-Prefers OpenCV backends with OS hints (DSHOW/AVFOUNDATION/V4L2) and falls back
+Prefers OpenCV backends with OS hints (DSHOW/AVFOUNDATION/V4L2/MSMF) and falls back
 quietly. Also provides a deterministic "synthetic" source for CI/headless runs.
 """
 
 from __future__ import annotations
 
-from typing import Iterator, Protocol, Tuple, Optional, Union, cast
-import time
-import sys
 import math
+import sys
+import time
+from typing import Any, Iterator, Optional, Protocol, Tuple, Union, cast
+
+# Lightweight progress status for open/init phases
+try:
+    from panoptes.progress import simple_status as _progress_simple_status  # type: ignore[import]
+except Exception:  # pragma: no cover
+    def _progress_simple_status(*_a: object, **_k: object):
+        class _N:
+            def __enter__(self): return self
+            def __exit__(self, *_: object) -> bool: return False
+            def update(self, **__: object): return self
+        return _N()
 
 try:
     import numpy as np
@@ -31,21 +42,36 @@ class FrameSource(Protocol):
     def release(self) -> None: ...
 
 
-def _guess_backend_id() -> int:
-    """Pick a platform-appropriate OpenCV backend if available."""
+def _guess_backend_ids() -> list[int]:
+    """Return a list of platform-appropriate OpenCV backend ids (try in order)."""
+    ids: list[int] = []
     if cv2 is None:
-        return 0
+        return ids
     plat = sys.platform
     if plat.startswith("win"):
-        return getattr(cv2, "CAP_DSHOW", 0)
-    if plat == "darwin":
-        return getattr(cv2, "CAP_AVFOUNDATION", 0)
-    if "linux" in plat:
-        return getattr(cv2, "CAP_V4L2", 0)
-    return 0
+        # Try DSHOW, then MSMF, then any/default.
+        for name in ("CAP_DSHOW", "CAP_MSMF"):
+            ids.append(getattr(cv2, name, 0))
+    elif plat == "darwin":
+        ids.append(getattr(cv2, "CAP_AVFOUNDATION", 0))
+    elif "linux" in plat:
+        ids.append(getattr(cv2, "CAP_V4L2", 0))
+    # Always end with 0 → default/auto
+    ids.append(0)
+    # Deduplicate but keep order
+    out: list[int] = []
+    for i in ids:
+        if i and i not in out:
+            out.append(i)
+    # Ensure default at end
+    out.append(0)
+    return out
 
 
 class _CVCamera(FrameSource):
+    # Explicit so Pyright knows the attribute exists
+    cap: Any
+
     def __init__(
         self,
         source: Union[str, int],
@@ -55,8 +81,7 @@ class _CVCamera(FrameSource):
     ) -> None:
         if cv2 is None:
             raise RuntimeError("OpenCV not available for camera capture.")
-        backend = _guess_backend_id()
-        # Index vs path (support negative indices like -1)
+        # Allow "0", "-1" strings, or file/rtsp paths
         if isinstance(source, str):
             try:
                 src_val: Union[str, int] = int(source)
@@ -64,27 +89,50 @@ class _CVCamera(FrameSource):
                 src_val = source
         else:
             src_val = source
-        # Prefer backend only for index sources
-        if isinstance(src_val, int) and backend:
-            self.cap = cv2.VideoCapture(src_val, backend)
-        else:
-            self.cap = cv2.VideoCapture(src_val)
-        if not self.cap or not self.cap.isOpened():
-            raise RuntimeError(f"Failed to open camera/source: {source}")
 
-        # Try to set properties (best effort)
-        if width is not None:
-            self.cap.set(getattr(cv2, "CAP_PROP_FRAME_WIDTH", 3), float(width))
-        if height is not None:
-            self.cap.set(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4), float(height))
-        if fps is not None:
-            self.cap.set(getattr(cv2, "CAP_PROP_FPS", 5), float(fps))
+        # Try a few backends if index source; file/rtsp → default only
+        backends = _guess_backend_ids() if isinstance(src_val, int) else [0]
+
+        last_err: Optional[Exception] = None
+        with _progress_simple_status(f"Opening source {source!r}"):
+            self.cap = None
+            for be in backends:
+                try:
+                    self.cap = cv2.VideoCapture(src_val, be) if be else cv2.VideoCapture(src_val)
+                    if self.cap and self.cap.isOpened():
+                        break
+                    if self.cap:
+                        self.cap.release()
+                        self.cap = None
+                except Exception as e:
+                    last_err = e
+                    self.cap = None
+            if not self.cap or not self.cap.isOpened():
+                raise RuntimeError(f"Failed to open camera/source: {source}") from last_err
+
+            # Try to set properties (best effort)
+            if width is not None:
+                self.cap.set(getattr(cv2, "CAP_PROP_FRAME_WIDTH", 3), float(width))
+            if height is not None:
+                self.cap.set(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4), float(height))
+            if fps is not None:
+                self.cap.set(getattr(cv2, "CAP_PROP_FPS", 5), float(fps))
 
     def frames(self) -> Iterator[tuple[NDArrayU8, float]]:
         assert cv2 is not None and np is not None
+        # Narrow Optional[Any] → Any for the loop
+        cap = self.cap
+        assert cap is not None
+        # Some cameras need a couple of warm-up grabs
+        warmups = 0
         while True:
-            ok, frame = self.cap.read()
+            ok, frame = cap.read()
             if not ok:
+                warmups += 1
+                if warmups <= 30:
+                    # Give the device a moment and retry
+                    time.sleep(0.01)
+                    continue
                 break
             # Ensure dtype=uint8 and narrow the type for the checker
             if getattr(frame, "dtype", None) is not None and frame.dtype != np.uint8:
@@ -92,9 +140,10 @@ class _CVCamera(FrameSource):
             yield cast(NDArrayU8, frame), time.time()
 
     def release(self) -> None:
-        if getattr(self, "cap", None) is not None:
+        cap = getattr(self, "cap", None)
+        if cap is not None:
             try:
-                self.cap.release()
+                cap.release()
             except Exception:
                 pass
 
@@ -105,10 +154,11 @@ class _SyntheticSource(FrameSource):
     def __init__(self, size: Tuple[int, int] = (640, 480), fps: int = 30) -> None:
         if np is None:
             raise RuntimeError("numpy is required for the synthetic source.")
-        self.w, self.h = int(size[0]), int(size[1])
-        self.fps = max(1, int(fps))
-        self._t0 = time.time()
-        self._n = 0
+        with _progress_simple_status(f"Opening synthetic {size[0]}x{size[1]} @ {fps}fps"):
+            self.w, self.h = int(size[0]), int(size[1])
+            self.fps = max(1, int(fps))
+            self._t0 = time.time()
+            self._n = 0
 
     def frames(self) -> Iterator[tuple[NDArrayU8, float]]:
         assert np is not None
@@ -148,7 +198,7 @@ def open_camera(
     If OpenCV is unavailable, raises. Use `synthetic_source()` for CI/headless.
     """
     if cv2 is None:
-        raise RuntimeError("OpenCV not available. Install opencv-python or use synthetic_source().")
+        raise RuntimeError("OpenCV not available. Install opencv-python (not headless) or use synthetic_source().")
     return _CVCamera(source, width=width, height=height, fps=fps)
 
 

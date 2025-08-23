@@ -52,6 +52,9 @@ while (($#)); do
     l) found_L=1; tokens+=("$t") ;;
     v) found_V=1; tokens+=("$t") ;;
 
+    # Drop legacy flag that isn't supported by the current CLI
+    --no-headless|-no-headless|/no-headless) ;;  # ← ignore silently
+
     *) tokens+=("$t") ;;
   esac
 done

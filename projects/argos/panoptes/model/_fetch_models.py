@@ -9,12 +9,12 @@ import subprocess
 import sys
 import textwrap
 import time
-from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import TracebackType
 from typing import (
     Any,
-    Callable,
     ContextManager,
     Dict,
     Iterable,
@@ -24,32 +24,84 @@ from typing import (
     Protocol,
     Set,
     Tuple,
-    Type,
     cast,
 )
 
 import typer
 
-# Optional progress (safe fallback if not importable or in CI/non-TTY)
+# ---------------------------------------------------------------------
+# Minimal no-op spinner (works with "with ... as sp: sp.update(...)")
+# ---------------------------------------------------------------------
+class _NoopSpinner:
+    def __enter__(self) -> "_NoopSpinner":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
+        return None
+
+    def update(self, **_: Any) -> "_NoopSpinner":
+        return self
+
+
+# ---------------------------------------------------------------------
+# Halo-based progress (Panoptes)
+# - Use a local Protocol to avoid "unknown type" warnings on Spinner
+# - Provide a Path-safe osc8 wrapper
+# - Provide no-op fallbacks if the package isn't available
+# ---------------------------------------------------------------------
+class _ProgressLike(Protocol):
+    def update(self, **kwargs: Any) -> Any: ...
+    def __enter__(self) -> "_ProgressLike": ...
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None: ...
+
+
 try:
-    import panoptes.progress as _prog  # type: ignore[reportMissingTypeStubs]
-except Exception:
-    _prog = None  # type: ignore[assignment]
+    from panoptes.progress import (  # type: ignore[reportMissingTypeStubs]
+        percent_spinner as _percent_spinner,
+        simple_status as _simple_status,
+        osc8 as _osc8_raw,
+    )
 
-ProgressEngine: Optional[Type[Any]]
-live_percent: Optional[Callable[..., ContextManager[Any]]]
-simple_status: Optional[Callable[..., ContextManager[Any]]]
+    def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
+        return _percent_spinner(*args, **kwargs)  # type: ignore[misc]
 
-if _prog is not None:
-    ProgressEngine = cast(Optional[Type[Any]], getattr(_prog, "ProgressEngine", None))
-    live_percent = cast(Optional[Callable[..., ContextManager[Any]]], getattr(_prog, "live_percent", None))
-    simple_status = cast(Optional[Callable[..., ContextManager[Any]]], getattr(_prog, "simple_status", None))
-else:
-    ProgressEngine = None
-    live_percent = None
-    simple_status = None
+    def simple_status(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
+        return _simple_status(*args, **kwargs)  # type: ignore[misc]
 
-# Our byte-accurate downloader (shows progress via ProgressEngine if provided)
+except Exception:  # pragma: no cover
+
+    def percent_spinner(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore[no-redef]
+        return _NoopSpinner()
+
+    def simple_status(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore[no-redef]
+        return _NoopSpinner()
+
+    def _osc8_raw(label: str, target: str) -> str:  # type: ignore[no-redef]
+        return str(target)
+
+
+def osc8_link(label: str, target: str | Path) -> str:
+    """
+    Safe wrapper so callers can pass either str or Path for 'target',
+    while deferring to Panoptes' osc8() implementation.
+    """
+    try:
+        return _osc8_raw(label, str(target))
+    except Exception:
+        return str(target)
+
+
+# Our byte-accurate downloader (works with a .update(total=..., count=..., current=...))
 try:
     from panoptes.progress.integrations.download_progress import download_url  # type: ignore
 except Exception:
@@ -113,7 +165,7 @@ DEFAULT_PACK: List[str] = [
     "yolo12x.onnx",
     "yolov8n.pt",
     "yolov8n.onnx",
-    "yolov8s.pt"
+    "yolov8s.pt",
     "yolov8s.onnx",
     "yolo11n.pt",
     "yolo11n.onnx",
@@ -153,7 +205,6 @@ DEFAULT_PACK: List[str] = [
     "yolov8s-obb.onnx",
     "yolo11x-obb.pt",
     "yolo11n-obb.onnx",
-    "yolo11s-obb.pt",
     "yolo11s-obb.onnx",
 ]
 
@@ -205,37 +256,22 @@ def _err(msg: str) -> None:
     typer.secho(msg, fg="red", err=True)
 
 
-def _osc8(label: str, path: Path, *, yellow: bool = True) -> str:
-    """
-    Return a clickable label.
-    • In capable terminals: OSC-8 hyperlink with bright-yellow bold label.
-    • In VS Code terminal: plain absolute path (no OSC-8) so Ctrl+Click opens.
-    """
-    # VS Code integrated terminal doesn’t reliably honor OSC-8 for file:// on custom labels.
-    is_vscode = (os.environ.get("TERM_PROGRAM", "").lower() == "vscode") or bool(os.environ.get("VSCODE_PID"))
-    if is_vscode:
-        return str(path.resolve())  # plain absolute path → VS Code opens it
-
+def _human_bytes(n: float | int) -> str:
     try:
-        uri = path.resolve().as_uri()
+        f = float(n)
     except Exception:
-        uri = "file:///" + str(path.resolve()).replace("\\", "/")
-
-    ESC   = "\x1b"
-    BR_YE = "\x1b[93m"   # bright yellow
-    BOLD  = "\x1b[1m"
-    RST   = "\x1b[0m"
-
-    text = f"{BR_YE}{BOLD}{label}{RST}" if yellow else label
-    return f"{ESC}]8;;{uri}{ESC}\\{text}{ESC}]8;;{ESC}\\"
+        f = 0.0
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for u in units:
+        if f < 1024.0 or u == units[-1]:
+            return f"{f:.1f}{u}"
+        f /= 1024.0
+    return f"{n}B"
 
 
-
-def _latest_exported_onnx() -> Optional[Path]:
-    hits = [Path(p) for p in glob.glob("runs/**/**/*.onnx", recursive=True)]
-    return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
-
-
+# ---------------------------------------------------------------------
+# Temporary env/context helpers
+# ---------------------------------------------------------------------
 @contextmanager
 def _cd(path: Path) -> Iterator[None]:
     """Temporarily chdir to *path* (restores on exit)."""
@@ -267,6 +303,9 @@ def _tqdm_disabled_env() -> Iterator[None]:
             os.environ["TQDM_DISABLE"] = old
 
 
+# ---------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------
 def _looks_like_text_header(bs: bytes) -> bool:
     s = bs.lstrip()
     if not s:
@@ -299,87 +338,90 @@ def _asset_url_for(name: str) -> str:
     return f"{ASSETS_BASE}/{Path(name).name}"
 
 
-class ProgressLike(Protocol):
-    def set_total(self, total_units: float) -> None: ...
-    def set_current(self, label: str) -> None: ...
-    def add(self, units: float, *, current_item: str | None = None) -> None: ...
+def _latest_exported_onnx() -> Optional[Path]:
+    hits = [Path(p) for p in glob.glob("runs/**/**/*.onnx", recursive=True)]
+    return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 
-class _ScaledProgress:
+# ---------------------------------------------------------------------
+# Spinner adapters (byte progress -> single-line UX without touching item totals)
+# ---------------------------------------------------------------------
+class _DownloadSpinnerAdapter:
     """
-    Wrap a parent ProgressEngine so a byte download maps to +1.0 for this item.
-    We ignore set_total() from the child and compute our own scale.
+    Adapter so download_progress can emit byte-accurate updates without
+    breaking the global item-based percent displayed by percent_spinner.
+
+    It translates update(total=<bytes>, count=<bytes_done>, current=<file>)
+    into spinner.update(current=<file>, job="dl X/Y", model=<file>) while preserving
+    spinner's [DONE x/y] summary of *items*.
     """
-    def __init__(self, parent: ProgressLike | None) -> None:
-        self.parent = parent
-        self.total_bytes: Optional[float] = None
-        self.scale: float = 0.0
-        self.added: float = 0.0
+    def __init__(self, spinner: _ProgressLike, *, items_total: int, items_done: int, label: Optional[str] = None) -> None:
+        self.spinner = spinner
+        self.items_total = int(max(1, items_total))
+        self.items_done = int(max(0, items_done))
+        self.label = label or ""
+        self.total_bytes: float = 0.0
+        self._last_pct: int = -1
 
-    def set_total(self, total_units: float) -> None:
+    def update(self, **kwargs: Any) -> "_DownloadSpinnerAdapter":
         try:
-            self.total_bytes = float(total_units)
-            self.scale = (1.0 / self.total_bytes) if self.total_bytes and self.total_bytes > 0 else 0.0
+            total = kwargs.get("total", None)
+            cur = kwargs.get("current", None)
+            cnt = kwargs.get("count", None)
+
+            if cur:
+                self.label = str(cur)
+
+            if isinstance(total, (int, float)):
+                self.total_bytes = float(total)
+
+            job_txt = "downloading"
+            if isinstance(cnt, (int, float)) and self.total_bytes > 0:
+                done = float(cnt)
+                pct = int(round(100.0 * done / self.total_bytes))
+                if pct != self._last_pct:
+                    self._last_pct = pct
+                job_txt = f"dl { _human_bytes(done) }/{ _human_bytes(self.total_bytes) }"
+
+            self.spinner.update(
+                total=self.items_total,
+                count=self.items_done,
+                current=self.label,
+                job=job_txt,
+                model=self.label,
+            )
         except Exception:
-            self.total_bytes, self.scale = None, 0.0
-
-    def set_current(self, label: str) -> None:
-        if self.parent is not None:
-            try:
-                self.parent.set_current(label)
-            except Exception:
-                pass
-
-    def add(self, units: float, *, current_item: str | None = None) -> None:
-        if self.parent is None:
-            return
-        if self.scale > 0.0:
-            delta = float(units) * self.scale
-            if delta > 0:
-                try:
-                    self.parent.add(delta)
-                    self.added += delta
-                except Exception:
-                    pass
-
-    # Top-up to exactly +1.0 for this item
-    def finalize(self) -> None:
-        if self.parent is None:
-            return
-        try:
-            if self.added < 1.0:
-                self.parent.add(1.0 - self.added)
-                self.added = 1.0
-        except Exception:
+            # Never let UX failures break downloads
             pass
+        return self
 
 
 # ---------------------------------------------------------------------
-# Fetch logic
+# Fetch logic (uses percent_spinner for global item progress)
 # ---------------------------------------------------------------------
-def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> Tuple[str, str]:
+def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_total: int, items_done: int) -> Tuple[str, str]:
     """
     Obtain *name* into *dst* and return (basename, action).
 
-    We prefer our own downloader (byte-accurate progress) and only fall
-    back to Ultralytics when needed (and silence its tqdm bars).
     Possible actions:
-      • "present"   - already existed in dst
-      • "download"  - fetched via direct URL (Argos progress)
-      • "copied"    - YOLO fetched elsewhere; we copied into dst
-      • "exported"  - exported ONNX from a matching .pt
-      • "failed"    - nothing worked
+    • "present"   - already existed in dst
+    • "download"  - fetched via direct URL (Argos progress)
+    • "copied"    - YOLO fetched elsewhere; we copied into dst
+    • "exported"  - exported ONNX from a matching .pt
+    • "failed"    - nothing worked
     """
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
 
+    # Always show what we're checking
+    if spinner is not None:
+        try:
+            spinner.update(total=items_total, count=items_done, current=target.name, job="check", model=target.name)
+        except Exception:
+            pass
+
     # Already present (and sane)
     if target.exists() and _validate_weight(target):
-        if engine is not None:
-            try:
-                engine.add(1.0)
-            except Exception:
-                pass
         return (target.name, "present")
     elif target.exists() and not _validate_weight(target):
         try:
@@ -390,15 +432,19 @@ def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> T
     # 1) Direct download (.pt only) with byte progress
     base = target.name
     if base.lower().endswith(".pt") and download_url is not None:
-        scaler = _ScaledProgress(engine)
         try:
-            ctx: ContextManager[Any] = (
-                simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
-                if simple_status is not None else cast(ContextManager[Any], nullcontext())
-            )
+            ctx: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
             with ctx:
-                download_url(_asset_url_for(base), str(target), scaler)
-            scaler.finalize()
+                if spinner is not None:
+                    adapter = _DownloadSpinnerAdapter(
+                        spinner,
+                        items_total=items_total,
+                        items_done=items_done,
+                        label=base,
+                    )
+                else:
+                    adapter = None
+                download_url(_asset_url_for(base), str(target), adapter)  # type: ignore[arg-type]
             if _validate_weight(target):
                 return (target.name, "download")
             else:
@@ -409,6 +455,8 @@ def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> T
     # 2) YOLO as a last-resort fetcher for .pt (silenced)
     if base.lower().endswith(".pt") and has_yolo and YOLO is not None:
         try:
+            if spinner is not None:
+                spinner.update(current=base, job="ultralytics", model=base)
             with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
                 m = YOLO(base)  # type: ignore
                 p = Path(getattr(m, "ckpt_path", base)).expanduser()
@@ -423,11 +471,6 @@ def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> T
         except Exception:
             pass
         if _validate_weight(target):
-            if engine is not None:
-                try:
-                    engine.add(1.0)
-                except Exception:
-                    pass
             # If YOLO wrote into cwd directly, treat as "download"
             return (target.name, "download" if (dst / base).exists() else "copied")
 
@@ -440,21 +483,27 @@ def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> T
         if not pt_path.exists() or not _validate_weight(pt_path):
             # try direct
             if download_url is not None:
-                scaler = _ScaledProgress(engine)
                 try:
-                    ctx: ContextManager[Any] = (
-                        simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
-                        if simple_status is not None else cast(ContextManager[Any], nullcontext())
-                    )
-                    with ctx:
-                        download_url(_asset_url_for(pt_name), str(pt_path), scaler)
-                    scaler.finalize()
+                    ctx2: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
+                    with ctx2:
+                        if spinner is not None:
+                            adapter2 = _DownloadSpinnerAdapter(
+                                spinner,
+                                items_total=items_total,
+                                items_done=items_done,
+                                label=pt_name,
+                            )
+                        else:
+                            adapter2 = None
+                        download_url(_asset_url_for(pt_name), str(pt_path), adapter2)  # type: ignore[arg-type]
                 except Exception:
                     pass
 
             # YOLO fallback for fetching the .pt
             if (not pt_path.exists() or not _validate_weight(pt_path)) and has_yolo and YOLO is not None:
                 try:
+                    if spinner is not None:
+                        spinner.update(current=pt_name, job="ultralytics", model=pt_name)
                     with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
                         m_pt = YOLO(pt_name)  # type: ignore
                         p_pt = Path(getattr(m_pt, "ckpt_path", pt_name)).expanduser()
@@ -468,6 +517,8 @@ def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> T
         # Export ONNX
         if has_yolo and YOLO is not None and pt_path.exists() and _validate_weight(pt_path):
             try:
+                if spinner is not None:
+                    spinner.update(current=base, job="export onnx", model=pt_name)
                 with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
                     try:
                         YOLO(str(pt_path)).export(format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu")  # type: ignore
@@ -479,11 +530,6 @@ def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> T
 
                 # success path (a)
                 if target.exists() and _validate_weight(target):
-                    if engine is not None:
-                        try:
-                            engine.add(1.0)
-                        except Exception:
-                            pass
                     return (target.name, "exported")
 
                 # success path (b): look under runs/
@@ -497,21 +543,11 @@ def _fetch_one(name: str, dst: Path, engine: Optional[ProgressLike] = None) -> T
                         except Exception:
                             pass
                 if target.exists() and _validate_weight(target):
-                    if engine is not None:
-                        try:
-                            engine.add(1.0)
-                        except Exception:
-                            pass
                     return (target.name, "exported")
             except Exception:
                 pass
 
     # If we reach here, we failed to produce the artifact
-    if engine is not None:
-        try:
-            engine.add(1.0)
-        except Exception:
-            pass
     return (target.name, "failed")
 
 
@@ -519,39 +555,37 @@ def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
     """
     Fetch all *names* into MODEL_DIR with an aggregated progress view.
 
-    We set the global total to len(names) and let each item contribute +1.0.
-    For downloads, bytes are scaled into that +1.0; for present/export/copy we
-    add +1.0 when done.
+    The single-line spinner shows:
+    • [File:<current>] [Job:<phase>] [Model:<weight>]  [DONE: i/N] [PROGRESS: %]
+    Where i/N represents *items*, while download bytes appear in Job.
     """
     results: List[Tuple[str, str]] = []
     failed: List[str] = []
 
-    # Fast path if progress infra is unavailable
-    if (ProgressEngine is None) or (live_percent is None):
-        for nm in names:
-            base, action = _fetch_one(nm, MODEL_DIR, None)
-            results.append((base, action))
-            if action == "failed":
-                failed.append(base)
-        return results, failed
+    # No fancy environment probing here; percent_spinner already handles TTY/CI.
+    with percent_spinner(prefix="FETCH MODELS") as sp:
+        total = len(names)
+        sp.update(total=max(1, total), count=0)
 
-    # Narrow types for engine and context manager
-    assert ProgressEngine is not None
-    assert live_percent is not None
-
-    eng_any = ProgressEngine()
-    eng = cast(ProgressLike, eng_any)
-    with live_percent(eng, prefix="FETCHING MODELS"):
-        eng.set_total(float(len(names)))
+        done = 0
         for nm in names:
+            # Per-item
             try:
-                eng.set_current(nm)
+                sp.update(current=nm, job="start", model=nm)
             except Exception:
                 pass
-            base, action = _fetch_one(nm, MODEL_DIR, eng)
+
+            base, action = _fetch_one(nm, MODEL_DIR, spinner=sp, items_total=total, items_done=done)
             results.append((base, action))
             if action == "failed":
                 failed.append(base)
+
+            done += 1
+            try:
+                sp.update(count=done, job="", model=base)
+            except Exception:
+                pass
+
     return results, failed
 
 
@@ -559,7 +593,7 @@ def _write_manifest(selected: List[str], installed: List[str]) -> Path:
     """
     Write a user-agnostic manifest:
       • model_dir is stored *relative* to projects/argos to avoid absolute user paths
-      • paths use forward slashes for cross-platform consistency
+    • paths use forward slashes for cross-platform consistency
     """
     repo_root = Path(__file__).resolve().parents[2]  # .../projects/argos
     rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
@@ -572,6 +606,7 @@ def _write_manifest(selected: List[str], installed: List[str]) -> Path:
     man = MODEL_DIR / "manifest.json"
     man.write_text(json.dumps(data, indent=2))
     return man
+
 
 # ---------------------------------------------------------------------
 # Interactive helpers
@@ -630,6 +665,7 @@ def _build_combo(
                 for ext in formats:
                     names.append(_mk(ver, sz, task, ext))
     return _dedupe(names)
+
 
 # ---------------------------------------------------------------------
 # Menus
@@ -758,11 +794,9 @@ def _ask_custom() -> List[str]:
 
     return _dedupe(names)
 
+
 # ---------------------------------------------------------------------
-# Quick smoke (progress-enabled)
-# ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
-# Quick smoke (progress-enabled)  — ALWAYS produces fresh outputs
+# Quick smoke (progress-enabled) — now clears results in place (no backups)
 # ---------------------------------------------------------------------
 def _quick_check() -> None:
     if not typer.confirm("Run a quick smoke check now?", default=False):
@@ -770,12 +804,16 @@ def _quick_check() -> None:
 
     # Accept full names and short aliases
     raw_task = typer.prompt(
-        "Task [detect|heatmap|geojson] [d|hm|gj]", default="heatmap"
+        "Task [detect|heatmap|geojson|classify|pose|obb]  (aliases: d|hm|gj|cls|pse|object)",
+        default="heatmap",
     ).strip().lower()
     task_alias = {
         "d": "detect", "det": "detect", "detect": "detect",
         "hm": "heatmap", "heatmap": "heatmap",
         "gj": "geojson", "geojson": "geojson",
+        "cls": "classify", "classify": "classify", "clf": "classify",
+        "pose": "pose", "pse": "pose",
+        "obb": "obb", "object": "obb",
     }
     task = task_alias.get(raw_task, "heatmap")
 
@@ -792,47 +830,29 @@ def _quick_check() -> None:
     results_dir = repo_root / "tests" / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    # Always rotate/clear previous results so we detect new files every run.
-    # Set PANOPTES_SMOKE_KEEP_PREV=1 to preserve the folder as-is.
+    # CLEAR previous results (no backups). Set PANOPTES_SMOKE_KEEP_PREV=1 to keep existing files.
     keep_prev = (os.environ.get("PANOPTES_SMOKE_KEEP_PREV", "").lower() in {"1", "true", "yes"})
-    if any(results_dir.iterdir()) and not keep_prev:
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup = results_dir.parent / f"results.prev-{stamp}"
-        try:
-            backup.mkdir(parents=True, exist_ok=True)
-            for p in list(results_dir.iterdir()):
-                try:
-                    shutil.move(str(p), str(backup / p.name))
-                except Exception:
-                    # fallback: try to remove in place
-                    try:
-                        if p.is_file():
-                            p.unlink()
-                        else:
-                            shutil.rmtree(p, ignore_errors=True)
-                    except Exception:
-                        pass
-        except Exception:
-            # last resort: try to clear in place
-            for p in list(results_dir.iterdir()):
-                try:
-                    if p.is_file():
-                        p.unlink()
-                    else:
-                        shutil.rmtree(p, ignore_errors=True)
-                except Exception:
-                    pass
+    if not keep_prev:
+        for p in list(results_dir.iterdir()):
+            try:
+                if p.is_file():
+                    p.unlink()
+                else:
+                    shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                # best-effort cleanup; continue even if some files are locked
+                pass
 
     # Expected items = number of raw inputs (bounded to ≥1)
     # Match CLI’s notion of supported inputs for a better initial estimate
     try:
         from panoptes import cli as _cli  # type: ignore
-        _img: Set[str] = set(cast(Iterable[str], getattr(_cli, "_IMAGE_EXTS", ())))
-        _vid: Set[str] = set(cast(Iterable[str], getattr(_cli, "_VIDEO_EXTS", ())))
+        _img: Set[str] = set(cast(Iterable[str], getattr(_cli, "_IMAGE_EXTS", ())))  # type: ignore[misc]
+        _vid: Set[str] = set(cast(Iterable[str], getattr(_cli, "_VIDEO_EXTS", ())))  # type: ignore[misc]
         exts: Set[str] = _img | _vid
     except Exception:
         exts: Set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif",
-                        ".mp4", ".mov", ".avi", ".mkv", ".webm"}
+                          ".mp4", ".mov", ".avi", ".mkv", ".webm"}
     expected = 1
     if inp.lower() == "all":
         expected = sum(1 for p in raw_dir.glob("*") if p.suffix.lower() in exts)
@@ -843,36 +863,11 @@ def _quick_check() -> None:
     def _list_created() -> List[Path]:
         # Flat results dir; include files only
         return sorted([p for p in results_dir.glob("*") if p.is_file()],
-                    key=lambda p: p.name.lower())
+                      key=lambda p: p.name.lower())
 
-    # No progress infra? Just run it (still using cwd=repo_root) and print results.
-    if (ProgressEngine is None) or (live_percent is None):
-        try:
-            subprocess.check_call([py, *args], cwd=repo_root)
-            created = _list_created()
-            _ok("Smoke check finished.")
-            if created:
-                typer.secho("Results (Ctl + Click To Open):", bold=True)
-                for p in created:
-                    typer.echo(f"  • {_osc8(p.name, p)}")
-            else:
-                _warn("CLI ran but produced no files.")
-        except Exception as e:
-            _warn(f"Smoke check failed: {e!s}")
-        return
-
-    # Progress-enabled path: bound progress to expected so it never exceeds 100%.
-    eng_any = ProgressEngine()  # type: ignore[call-arg]
-    eng = cast(ProgressLike, eng_any)
-    with live_percent(eng, prefix=f"ARGOS TESTING {task.upper()}"):  # type: ignore[misc]
-        try:
-            eng.set_total(float(expected))
-        except Exception:
-            pass
-        try:
-            eng.set_current("starting")
-        except Exception:
-            pass
+    # Progress spinner bound to expected items
+    with percent_spinner(prefix=f"ARGOS TESTING {task.upper()}") as sp:
+        sp.update(total=float(expected), count=0, current="starting", job="spawn", model=task)
 
         # Run CLI quiet, but from repo root so paths resolve consistently
         proc = subprocess.Popen([py, *args],
@@ -895,23 +890,20 @@ def _quick_check() -> None:
                     # If we produced more than initially expected, grow the total.
                     if n > expected:
                         try:
-                            eng.set_total(float(n))
+                            sp.update(total=float(n))
                         except Exception:
                             pass
 
                     delta = n - done_reported
                     if delta > 0:
                         try:
-                            eng.add(float(delta))
+                            sp.update(count=done_reported + delta,
+                                      current=(created[-1].name if created else "working"),
+                                      job="write",
+                                      model=task)
                         except Exception:
                             pass
                         done_reported = n
-
-                    if created:
-                        try:
-                            eng.set_current(created[-1].name)
-                        except Exception:
-                            pass
 
                 if rc is not None:
                     break
@@ -922,13 +914,16 @@ def _quick_check() -> None:
             n = len(created)
             if n > expected:
                 try:
-                    eng.set_total(float(n))
+                    sp.update(total=float(n))
                 except Exception:
                     pass
             delta = n - done_reported
             if delta > 0:
                 try:
-                    eng.add(float(delta))
+                    sp.update(count=done_reported + delta,
+                              current=(created[-1].name if created else "done"),
+                              job="finalize",
+                              model=task)
                 except Exception:
                     pass
                 done_reported = n
@@ -938,7 +933,7 @@ def _quick_check() -> None:
                 if created:
                     typer.secho("Results (Ctl + Click To Open):", bold=True)
                     for p in created:
-                        typer.echo(f"  • {_osc8(p.name, p)}")
+                        typer.echo(f"  • {osc8_link(p.name, p)}")
                 else:
                     _warn("CLI ran but produced no files.")
             else:
@@ -1022,7 +1017,7 @@ def main() -> None:
     if installed:
         typer.secho("Ready (Ctl + Click To Open):", bold=True)
         for bn in _dedupe(installed):
-            typer.echo(f"  • {_osc8(bn, MODEL_DIR / bn)}")
+            typer.echo(f"  • {osc8_link(bn, MODEL_DIR / bn)}")
 
     if bad:
         _warn(f"Skipped/failed: {len(bad)}")
@@ -1032,11 +1027,10 @@ def main() -> None:
 
     # Manifest for reproducibility (user-agnostic, relative paths)
     man = _write_manifest(selected, installed)
-    typer.echo(f"\nManifest: {_osc8('manifest.json', man)}")
+    typer.echo(f"\nManifest: {osc8_link('manifest.json', man)}")
 
     _quick_check()
 
 
 if __name__ == "__main__":
     main()
-

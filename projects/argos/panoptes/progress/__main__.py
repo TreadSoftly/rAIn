@@ -10,13 +10,10 @@ from . import (
     percent_spinner,
 )
 
-
 # Tell the type checker what the engine supports
 class ProgressLike(Protocol):
     def set_total(self, total_units: float) -> None: ...
-
     def set_current(self, label: str) -> None: ...
-
     def add(self, units: float, *, current_item: str | None = None) -> None: ...
 
 
@@ -40,9 +37,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         with percent_spinner(prefix="ARGOS") as sp:
             sp.update(total=len(items))
             for i, it in enumerate(items, 1):
-                sp.update(current=it)
+                sp.update(item=it)   # keep [File: …] pinned
                 time.sleep(0.15)
-                sp.update(count=i)
+                sp.update(count=i, job="demo")  # [Job: demo]
         return 0
 
     eng: ProgressLike = cast(ProgressLike, ProgressEngine())  # type: ignore[call-arg]

@@ -1,32 +1,3 @@
-# \rAIn\projects\argos\panoptes\cli.py
-"""
-panoptes.cli - unified Typer front-end (“argos”)
-
-Tasks: detect | heatmap | geojson | classify | pose | obb on images **and** videos.
-Model selection is delegated to *panoptes.model_registry* and is strictly enforced.
-
-Progress & UX (this build)
-──────────────────────────────────────────────────────────────────────────────
-• Single, pinned progress line for the whole run:
-    ARGOS DETECT — [DONE i/N • xx%] current_item
-  Falls back to an ANSI pinned-line writer when the progress package is absent.
-
-• Accurate counts for ALL/globs; % done is shown live.
-
-• At the end, prints a **clickable list** of just the basenames for outputs
-  (OSC-8 hyperlinks that open the real file path in supported terminals/editors).
-
-• While the line is active, stdout/stderr from workers is silenced unless --verbose.
-
-• Spinner writes to sys.__stderr__ so it remains visible even when stdio is redirected.
-
-Notes
-─────
-• We detect per-item outputs by diffing the results directory before/after each
-  item, so we can still list results even if the task functions don’t return paths
-  yet. When the task layer starts returning paths, we’ll prefer those.
-"""
-
 from __future__ import annotations
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -52,23 +23,11 @@ import os
 import re
 import sys
 import textwrap
-import time
 import urllib.parse
-from contextlib import contextmanager
-from contextlib import redirect_stderr
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import TracebackType
-from typing import Any
-from typing import Callable
-from typing import Final
-from typing import Iterable
-from typing import Iterator
-from typing import List
-from typing import Literal
-from typing import Optional
-from typing import Protocol
-from typing import cast
+from typing import Any, Callable, Final, Iterable, Iterator, List, Literal, Optional, Protocol, cast
 
 import typer
 
@@ -115,6 +74,10 @@ _ALIAS = {
     "--pose": "pose",
     "-pose": "pose",
     "kp": "pose",
+    # pse (alias of pose for convenience / console-script compatibility)
+    "pse": "pose",
+    "--pse": "pose",
+    "-pse": "pose",
     # oriented bounding boxes
     "obb": "obb",
     "--obb": "obb",
@@ -155,9 +118,9 @@ _SEARCH_DIRS: list[Path] = [
 _NOISE = {"argos", "run", "me"}
 _GLOB_CHARS = set("*?[]")
 
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  rich manual / examples / tutorial text
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 
 def _join_lines(*parts: Optional[str]) -> str:
     return "\n".join((p or "").rstrip() for p in parts if p is not None)
@@ -176,21 +139,22 @@ def _man_header() -> str:
 
     DESCRIPTION
         A zero-fiddling front-end over Panoptes tasks:
-          • detect    — object detection boxes
-          • heatmap   — segmentation heat-map overlay
-          • geojson   — polygon extraction to GeoJSON (images only)
-          • classify  — top-K image classification overlay
-          • pose      — 2D keypoints + COCO-like skeleton (K=17)
-          • obb       — oriented bounding boxes (quads)
+        • detect    — object detection boxes
+        • heatmap   — segmentation heat-map overlay
+        • geojson   — polygon extraction to GeoJSON (images only)
+        • classify  — top-K image classification overlay
+        • pose      — 2D keypoints + COCO-like skeleton (K=17)
+        • obb       — oriented bounding boxes (quads)
 
         You can put task tokens anywhere:
             argos mildrone d
             detect mildrone.avif
             d mildrone
             hm camo
-            cls fuji
+            cls assets
             pose human
-            obb ship
+            pse runner.jpg     (alias of pose)
+            obb all
             argos -d all
             argos --heatmap all .jpg
 
@@ -206,7 +170,7 @@ def _man_header() -> str:
             gj all .jpg
             cls *.jpg
             pose all
-            obb all .png
+            obb all
             argos all d
     """).strip("\n")
 
@@ -218,6 +182,7 @@ def _man_tasks() -> str:
         geojson   Extract polygons from images as GeoJSON (videos are skipped).
         classify  Top-K label card on images or per-frame in videos.
         pose      Draw keypoints and (if K==17) COCO-like skeleton.
+        pse       Alias of pose (kept for entrypoint compatibility).
         obb       Draw oriented bounding boxes (quads), fallback to AABB.
     """).strip("\n")
 
@@ -226,7 +191,7 @@ def _man_inputs() -> str:
     INPUTS
         • Plain filenames or stems (we search known dirs)
         • URLs (http/https or data:image/* base64) — URL mode currently supported
-          for detect/heatmap/geojson; classify/pose/obb expect local files.
+        for detect/heatmap/geojson; classify/pose/obb expect local files.
         • Globs: "*.jpg", "*"
         • ALL:   "all" (optionally followed by ".ext"/"ext"/"*.ext")
 
@@ -240,11 +205,11 @@ def _man_models() -> str:
         Weights are picked by the model registry strictly (no silent fallbacks).
         Use --small/--fast to prefer lightweight models for live video (detect/heatmap).
         Per-task override:
-          --det-weights  PATH   (detect/geojson)
-          --seg-weights  PATH   (heatmap)
-          --cls-weights  PATH   (classify)
-          --pose-weights PATH   (pose)
-          --obb-weights  PATH   (obb)
+        --det-weights  PATH   (detect/geojson)
+        --seg-weights  PATH   (heatmap)
+        --cls-weights  PATH   (classify)
+        --pose-weights PATH   (pose)
+        --obb-weights  PATH   (obb)
 
         If a required weight is missing, the command exits with code 1.
     """).strip("\n")
@@ -284,10 +249,11 @@ def _man_shortcuts() -> str:
     SHORTCUT ENTRYPOINTS (optional, via project.scripts)
         d         -> prepends "d"        e.g., `d all`
         hm        -> prepends "hm"       e.g., `hm all`
-        gj        -> prepends "gj"       e.g., `gj fuji`
-        cls       -> prepends "cls"      e.g., `cls beach.jpg`
-        pose      -> prepends "pose"     e.g., `pose person.png`
-        obb       -> prepends "obb"      e.g., `obb ship.png`
+        gj        -> prepends "gj"       e.g., `gj assets`
+        cls       -> prepends "cls"      e.g., `cls ocean.jpg`
+        pose      -> prepends "pose"     e.g., `pose robodog.png`
+        pse       -> prepends "pose"     e.g., `pse runner.jpg`   (alias of pose)
+        obb       -> prepends "obb"      e.g., `obb subdrones.png`
         detect    -> prepends "d"        e.g., `detect midtown`
         heatmap   -> prepends "hm"       e.g., `heatmap all .jpg`
         geojson   -> prepends "gj"
@@ -303,22 +269,23 @@ def _man_examples() -> str:
 
         Detect (single file by stem search):
             argos d midtown
-            argos detect fuji.jpg
+            argos detect assets.jpg
 
         Heat-map overlay:
             argos hm camo
             argos --heatmap gerbera-drones.png
 
         GeoJSON (images only):
-            argos gj fuji
+            argos gj assets
             argos geojson assets.jpg
 
         Classification:
-            argos cls fuji.jpg
+            argos cls assets.jpg
             argos classify all .png --topk 3
 
         Pose (keypoints + skeleton):
-            argos pose runner.jpg
+            argos pose midtown.jpg
+            argos pse runner.jpg
             argos pose all --conf 0.30 --iou 0.45
 
         Oriented Bounding Boxes:
@@ -344,9 +311,9 @@ def _man_examples() -> str:
             argos --dry-run hm all .png
 
         Force weights:
-            argos d fuji --det-weights projects/argos/panoptes/model/yolov8x.pt
+            argos d assets --det-weights projects/argos/panoptes/model/yolov8x.pt
             argos hm camo --seg-weights projects/argos/panoptes/model/yolov8x-seg.pt
-            argos cls fuji --cls-weights weights/classify.pt
+            argos cls assets --cls-weights weights/classify.pt
             argos pose runner --pose-weights weights/pose.pt
             argos obb ship --obb-weights weights/obb.pt
     """).strip("\n")
@@ -378,8 +345,8 @@ def _examples_page() -> str:
         "Try these first:",
         "  argos hm camo",
         "  argos d mildrone",
-        "  argos gj fuji",
-        "  argos cls fuji.jpg",
+        "  argos gj assets",
+        "  argos cls assets.jpg",
         "  argos pose runner.jpg",
         "  argos obb ship.png",
         "  argos d bunny.mp4",
@@ -412,10 +379,10 @@ def _tutorial_page() -> str:
         "   argos hm camo --alpha 0.45 --cmap COLORMAP_JET",
         "",
         "3) Extract polygons",
-        "   argos gj fuji",
+        "   argos gj assets",
         "",
         "4) Classify an image",
-        "   argos cls fuji.jpg --topk 3",
+        "   argos cls assets.jpg --topk 3",
         "",
         "5) Pose estimation",
         "   argos pose runner.jpg",
@@ -446,9 +413,9 @@ _MAN_TOPICS = {
     "tutorial": _tutorial_page,
 }
 
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  helper utils (resolution)
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 def _is_url(text: str) -> bool:
     return urllib.parse.urlparse(text).scheme in {"http", "https"} or bool(_URL_RE.match(text))
 
@@ -467,8 +434,7 @@ def _extract_task(tokens: List[str]) -> tuple[Optional[str], List[str]]:
     uniq = {alias for _, alias in hits if alias in _VALID}
     if len(uniq) > 1:
         typer.secho(
-            f"[bold red]  more than one task alias supplied "
-            f"({', '.join(sorted(uniq))})",
+            f"[bold red]  more than one task alias supplied ({', '.join(sorted(uniq))})",
             err=True,
         )
         raise typer.Exit(2)
@@ -573,9 +539,9 @@ def _expand_tokens(positional: list[str], task_final: str) -> list[str]:
     """
     Expand tokens into concrete input paths.
     Supports:
-      - stems/paths/URLs
-      - globs: "*.jpg", "*"
-      - "all" [optional ".ext"/"ext"/"*.ext"]
+    - stems/paths/URLs
+    - globs: "*.jpg", "*"
+    - "all" [optional ".ext"/"ext"/"*.ext"]
     Search base for globs/'all' is tests/raw.
     """
     i = 0
@@ -658,9 +624,8 @@ def _clickable_basename(p: Path) -> str:
         return str(p.resolve())  # VS Code link detector picks this up
     return _osc8(p.name, _as_file_uri(p), yellow=True)
 
-
 # ────────────────────────────────────────────────────────────────────────────
-#  optional progress wrapper
+#  progress (Halo/Rich only — hard-required)
 # ────────────────────────────────────────────────────────────────────────────
 class SpinnerLike(Protocol):
     def __enter__(self) -> "SpinnerLike": ...
@@ -674,86 +639,13 @@ class SpinnerLike(Protocol):
 
 _SpinnerFactory = Callable[..., SpinnerLike]
 
+# Hard-require our Halo/Rich spinner from the local progress package.
+# No console/text fallback exists anymore.
 try:
-    # neutral Halo/Colorama spinner (template lives in progress_ux.py)
-    from panoptes.progress import percent_spinner as _percent_spinner  # type: ignore[reportMissingTypeStubs]
+    from .progress import percent_spinner as _percent_spinner  # type: ignore[reportMissingTypeStubs]
     _spinner_factory: Optional[_SpinnerFactory] = cast(_SpinnerFactory, _percent_spinner)
 except Exception:
     _spinner_factory = None  # type: ignore[assignment]
-
-class _ConsoleSpinner:
-    """
-    Minimal pinned-line progress for when the progress package is unavailable.
-    Updates a single line with:  "{prefix} — [DONE i/N • xx%] current"
-    Writes to sys.__stderr__ to bypass redirected stdio.
-    """
-    def __init__(self, *, prefix: str, stream: Any | None = None, final_newline: bool = True) -> None:
-        self.prefix = prefix
-        self._stream = stream or getattr(sys, "__stderr__", sys.stdout)
-        self._total = 0
-        self._count = 0
-        self._current: Optional[str] = None
-        self._start = time.time()
-        self._active = False
-        self._final_newline = bool(final_newline)
-
-    def __enter__(self) -> "_ConsoleSpinner":
-        self._active = True
-        self._render()
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> bool:
-        # finalize line; optional newline so next prints are clean
-        self._active = False
-        self._render(final=True)
-        try:
-            if self._final_newline:
-                self._stream.write("\n")
-                self._stream.flush()
-        except Exception:
-            pass
-        return False
-
-    def update(self, **kwargs: Any) -> "_ConsoleSpinner":
-        if "total" in kwargs:
-            try:
-                self._total = max(0, int(float(kwargs["total"])))
-            except Exception:
-                pass
-        if "count" in kwargs:
-            try:
-                self._count = max(0, int(float(kwargs["count"])))
-            except Exception:
-                pass
-        cur = kwargs.get("current", None)
-        if isinstance(cur, str) or cur is None:
-            self._current = cur
-        self._render()
-        return self
-
-    def _render(self, *, final: bool = False) -> None:
-        if not self._active and not final:
-            return
-        tot = max(0, self._total)
-        done = max(0, min(self._count, tot if tot else self._count))
-        pct = int(round((100.0 * done / (tot or 1)), 0)) if tot else (100 if final else 0)
-        cur = f" {self._current}" if self._current else ""
-        line = f"{self.prefix} — [DONE {done}/{tot or '?'} • {pct:>3}%]{cur}"
-        try:
-            import shutil as _sh
-            width = _sh.get_terminal_size((100, 20)).columns
-            self._stream.write("\r" + " " * (width - 1) + "\r")
-            self._stream.write(line)
-            self._stream.flush()
-        except Exception:
-            pass
-
-# import after definition to avoid early import costs
 
 @contextmanager
 def _silence_stdio(enabled: bool) -> Iterator[None]:
@@ -777,20 +669,32 @@ def _silence_stdio(enabled: bool) -> Iterator[None]:
 @contextmanager
 def _maybe_spinner(prefix: str, *, final_newline: bool = True) -> Iterator[SpinnerLike]:
     """
-    Single pinned spinner (or a console fallback) used by the whole CLI run.
-
-    NOTE: We do NOT set any env overrides here. The rich spinner (if present)
-    marks PANOPTES_PROGRESS_ACTIVE=1 when it starts, which automatically
-    silences nested spinners. This prevents flicker/scroll.
+    Open the ONE Halo/Rich spinner for the whole CLI scope.
+    If the progress package is unavailable, abort with a clear error.
+    While active, set PANOPTES_PROGRESS_ACTIVE=1 so children never spawn their own spinners.
     """
-    stream = getattr(sys, "__stderr__", sys.stdout)  # bypass redirected sys.stderr
     if _spinner_factory is None:
-        sp: SpinnerLike = cast(SpinnerLike, _ConsoleSpinner(prefix=prefix, stream=stream, final_newline=final_newline))
-    else:
-        # progress.percent_spinner supports final_newline
-        sp: SpinnerLike = _spinner_factory(prefix=prefix, stream=stream, final_newline=final_newline)  # type: ignore[call-arg]
-    with sp:
-        yield sp
+        typer.secho(
+            "[bold red]Halo/Rich progress package is required but unavailable.\n"
+            "Install the project with progress extras and retry.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    stream = getattr(sys, "__stderr__", sys.stdout)  # keep progress visible even with stdout redirection
+    sp: SpinnerLike = _spinner_factory(prefix=prefix, stream=stream, final_newline=final_newline)  # type: ignore[call-arg]
+
+    # Guard against nested/local spinners
+    prev_env = os.environ.get("PANOPTES_PROGRESS_ACTIVE", None)
+    os.environ["PANOPTES_PROGRESS_ACTIVE"] = "1"
+    try:
+        with sp:
+            yield sp
+    finally:
+        if prev_env is None:
+            os.environ.pop("PANOPTES_PROGRESS_ACTIVE", None)
+        else:
+            os.environ["PANOPTES_PROGRESS_ACTIVE"] = prev_env
 
 # ────────────────────────────────────────────────────────────────────────────
 #  lightweight wrappers for lazy imports
@@ -835,16 +739,70 @@ class _JobAwareProxy:
     """
     Intercepts update(current=...) from child layers and treats it as JOB,
     so our ITEM stays the filename/URL on the main line.
+
+    Also normalizes common alias fields used by older or third-party workers:
+      - {phase, step, stage, status, task}   → job
+      - {N, total_frames, frames_total}      → total
+      - {i, frame, frames_done, progress}    → count
+      - {file, path}                         → item
+      - {weight, weights, model_name}        → model
     """
+    _JOB_KEYS   = ("job", "phase", "step", "stage", "status", "task")
+    _TOT_KEYS   = ("total", "N", "total_frames", "frames_total", "progress_total")
+    _CNT_KEYS   = ("count", "i", "frame", "frames_done", "progress_count")
+    _ITEM_KEYS  = ("item", "file", "path")
+    _MODEL_KEYS = ("model", "weight", "weights", "model_name")
+
     def __init__(self, spinner: SpinnerLike) -> None:
         self._sp = spinner
 
     def update(self, **kw: Any) -> "_JobAwareProxy":
+        # Map legacy 'current' to 'job'
         cur = kw.pop("current", None)
         if cur is not None:
             txt = str(cur).strip()
             if txt:
                 kw.setdefault("job", txt)
+
+        # Normalize synonyms → canonical keys
+        # job
+        if not any(k in kw for k in ("job",)):
+            for k in self._JOB_KEYS:
+                if k in kw and isinstance(kw[k], (str, int, float)):
+                    kw["job"] = str(kw.pop(k))
+                    break
+        # total
+        if "total" not in kw:
+            for k in self._TOT_KEYS:
+                if k in kw:
+                    try:
+                        kw["total"] = int(kw.pop(k))
+                    except Exception:
+                        kw.pop(k, None)
+                    break
+        # count
+        if "count" not in kw:
+            for k in self._CNT_KEYS:
+                if k in kw:
+                    try:
+                        kw["count"] = int(kw.pop(k))
+                    except Exception:
+                        kw.pop(k, None)
+                    break
+        # item
+        if "item" not in kw:
+            for k in self._ITEM_KEYS:
+                if k in kw and isinstance(kw[k], (str, Path)):
+                    kw["item"] = str(kw.pop(k))
+                    break
+        # model
+        if "model" not in kw:
+            for k in self._MODEL_KEYS:
+                if k in kw and isinstance(kw[k], (str, Path)):
+                    val = kw.pop(k)
+                    kw["model"] = Path(val).name if k != "model" else str(val)
+                    break
+
         self._sp.update(**kw)
         return self
 
@@ -871,7 +829,7 @@ def _run_single(
     )
 
 # ────────────────────────────────────────────────────────────────────────────
-#  results tracking (for clickable list)
+#  results tracking (for clickable file names)
 # ────────────────────────────────────────────────────────────────────────────
 def _snapshot_results(bases: Optional[list[Path]] = None) -> set[Path]:
     """
@@ -897,12 +855,12 @@ def target(  # noqa: C901
     # flexible: explicit task name
     task: Optional[str] = typer.Option(None, "--task", "-t", help="- task detect | heatmap | geojson | classify | pose | obb"),
     # convenience boolean flags for task selection
-    detect_flag: bool = typer.Option(False, "--detect", "-d", help="d is shortcut for --task detect | d YourFile /or/ YourFile d"),
-    heatmap_flag: bool = typer.Option(False, "--heatmap", help="hm is shortcut for --task heatmap | hm YourFile /or/ YourFile hm"),
-    geojson_flag: bool = typer.Option(False, "--geojson", help="gj is shortcut for --task geojson | gj YourFile /or/ YourFile gj"),
-    classify_flag: bool = typer.Option(False, "--classify", "--cls", help="cls is shortcut for --task classify | cls YourFile /or/ YourFile cls"),
-    pose_flag: bool = typer.Option(False, "--pose", help="pose is shortcut for --task pose | pose YourFile /or/ YourFile pose"),
-    obb_flag: bool = typer.Option(False, "--obb", help="obb is shortcut for --task obb | obb YourFile /or/ YourFile obb"),
+    detect_flag: bool = typer.Option(False, "--detect", "-d", help="d is shortcut for --task detect | d is also a positional token"),
+    heatmap_flag: bool = typer.Option(False, "--heatmap", help="hm is shortcut for --task heatmap | hm is also a positional token"),
+    geojson_flag: bool = typer.Option(False, "--geojson", help="gj is shortcut for --task geojson | gj is also a positional token"),
+    classify_flag: bool = typer.Option(False, "--classify", "--cls", help="cls is shortcut for --task classify | cls is also a positional token"),
+    pose_flag: bool = typer.Option(False, "--pose", help="pose is shortcut for --task pose | pose is also a positional token"),
+    obb_flag: bool = typer.Option(False, "--obb", help="obb is shortcut for --task obb | obb is also a positional token"),
     # meta/help UX
     man_flag: bool = typer.Option(False, "--man", help="Open the full manual and exit"),
     examples_flag: bool = typer.Option(False, "--examples", help="Show examples and exit"),
@@ -995,13 +953,13 @@ def target(  # noqa: C901
             raise typer.Exit(2)
         if flag_tasks and flag_tasks[0] != task:
             typer.secho(
-                f"[bold red]  conflicting task: flag={flag_tasks[0]!r}  --task={task!r}",
+                f"[bold red]  conflicting task: flag={flag_tasks[0]!r} --task={task!r}",
                 err=True,
             )
             raise typer.Exit(2)
         if token_task is not None and token_task != task:
             typer.secho(
-                f"[bold red]  conflicting task: token={token_task!r}  --task={task!r}",
+                f"[bold red]  conflicting task: token={token_task!r} --task={task!r}",
                 err=True,
             )
             raise typer.Exit(2)
@@ -1009,7 +967,7 @@ def target(  # noqa: C901
     elif flag_tasks:
         if token_task is not None and token_task != flag_tasks[0]:
             typer.secho(
-                f"[bold red]  conflicting task: token={token_task!r}  flag={flag_tasks[0]!r}",
+                f"[bold red]  conflicting task: token={token_task!r} flag={flag_tasks[0]!r}",
                 err=True,
             )
             raise typer.Exit(2)
@@ -1065,7 +1023,7 @@ def target(  # noqa: C901
     # Short status spinner during model init (covers downloads) — do NOT add a newline
     model_cls = model_pose = model_obb = None
     with _maybe_spinner(prefix="ARGOS INIT", final_newline=False) as sp_init:
-        sp_init.update(total=1, count=0, current="init models (may download)")
+        sp_init.update(total=1, count=0, job="init models (may download)")
         if task_final == "detect":
             _reinit_models(detect_small=small, det_override=det_override)
         elif task_final == "heatmap":
@@ -1073,13 +1031,12 @@ def target(  # noqa: C901
         elif task_final == "geojson":
             _reinit_models(detect_small=small, det_override=det_override)
         elif task_final == "classify":
-            # Strict registry load with optional override
             model_cls = _load_classifier(override=cls_override)
         elif task_final == "pose":
             model_pose = _load_pose(override=pose_override)
         elif task_final == "obb":
             model_obb = _load_obb(override=obb_override)
-        sp_init.update(count=1, current="ready")
+        sp_init.update(count=1, job="ready")
 
     # Progress wrapper (counts processed inputs) — SINGLE pinned spinner
     done = 0
@@ -1089,13 +1046,13 @@ def target(  # noqa: C901
 
     prefix = task_final.upper()
     with _maybe_spinner(prefix=f"ARGOS {prefix}", final_newline=True) as sp:
-        sp.update(total=len(norm_inputs), count=0, current=None)
+        sp.update(total=len(norm_inputs), count=0)
 
         # loop over inputs
         for item in norm_inputs:
             low = item.lower()
             label = ("URL" if _is_url(item) else Path(item).name)
-            sp.update(current=label)
+            sp.update(item=label)  # pin FILE explicitly so child 'current' can become JOB via proxy
 
             # snapshot results so we can diff per item (cover both default and custom out dirs)
             before = _snapshot_results(snapshot_bases)
@@ -1103,7 +1060,7 @@ def target(  # noqa: C901
             # videos
             if low.endswith(tuple(_VIDEO_EXTS)):
                 if task_final == "geojson":
-                    sp.update(current=f"skip video: {label}")
+                    sp.update(item=label, job="skip video")
                     done += 1
                     sp.update(count=done)
                     per_input_outs[label] = []
@@ -1133,28 +1090,46 @@ def target(  # noqa: C901
 
                 # Show ITEM + JOB + MODEL on the progress line up-front
                 sp.update(
-                    current=label,
+                    item=label,
                     job=task_final,
                     model=(Path(weight).name if weight else "")
                 )
 
-                # Silence worker output while spinner is live
+                # Silence worker output while spinner is live; always route child updates through proxy
                 with _silence_stdio(quiet):
                     if task_final == "heatmap":
                         from .predict_heatmap_mp4 import main as _heat_vid
-                        _heat_vid(item, weights=weight, **hm_kwargs)
+                        try:
+                            _heat_vid(item, weights=weight, progress=_JobAwareProxy(sp), **hm_kwargs)
+                        except TypeError:
+                            _heat_vid(item, weights=weight, **hm_kwargs)
                     elif task_final == "detect":
                         from .predict_mp4 import main as _detect_vid
-                        _detect_vid(item, conf=conf, weights=weight)
+                        try:
+                            _detect_vid(item, conf=conf, weights=weight, progress=_JobAwareProxy(sp))
+                        except TypeError:
+                            _detect_vid(item, conf=conf, weights=weight)
                     elif task_final == "classify":
                         from .predict_classify_mp4 import main as _cls_vid
-                        _cls_vid(item, weights=weight, topk=int(max(1, topk)), conf=conf)
+                        try:
+                            _cls_vid(item, weights=weight, topk=int(max(1, topk)), conf=conf,
+                                     progress=_JobAwareProxy(sp))
+                        except TypeError:
+                            _cls_vid(item, weights=weight, topk=int(max(1, topk)), conf=conf)
                     elif task_final == "pose":
                         from .predict_pose_mp4 import main as _pose_vid
-                        _pose_vid(item, weights=weight, conf=conf, iou=iou)
+                        try:
+                            _pose_vid(item, weights=weight, conf=conf, iou=iou,
+                                      progress=_JobAwareProxy(sp))
+                        except TypeError:
+                            _pose_vid(item, weights=weight, conf=conf, iou=iou)
                     elif task_final == "obb":
                         from .predict_obb_mp4 import main as _obb_vid
-                        _obb_vid(item, weights=weight, conf=conf, iou=iou)
+                        try:
+                            _obb_vid(item, weights=weight, conf=conf, iou=iou,
+                                     progress=_JobAwareProxy(sp))
+                        except TypeError:
+                            _obb_vid(item, weights=weight, conf=conf, iou=iou)
 
                 # diff results
                 after = _snapshot_results(snapshot_bases)
@@ -1177,32 +1152,32 @@ def target(  # noqa: C901
                 if task_final == "detect":
                     w = Path(det_override) if det_override is not None else _pick_weight("detect", small=small)
                     model_name = Path(w).name if w else ""
-                    sp.update(current=label, job="detect", model=model_name)
+                    sp.update(item=label, job="detect", model=model_name)
                     if not quiet:
                         typer.secho(f"[panoptes] image/url: {item} → task=detect weight={w}", err=True)
                 elif task_final == "heatmap":
                     w = Path(seg_override) if seg_override is not None else _pick_weight("heatmap", small=small)
                     model_name = Path(w).name if w else ""
-                    sp.update(current=label, job="heatmap", model=model_name)
+                    sp.update(item=label, job="heatmap", model=model_name)
                     if not quiet:
                         typer.secho(f"[panoptes] image/url: {item} → task=heatmap weight={w}", err=True)
                 elif task_final == "classify":
-                    sp.update(current=label, job="classify", model="")
+                    sp.update(item=label, job="classify", model="")
                     if not quiet:
                         typer.secho(f"[panoptes] image: {item} → task=classify", err=True)
                 elif task_final == "pose":
-                    sp.update(current=label, job="pose", model="")
+                    sp.update(item=label, job="pose", model="")
                     if not quiet:
                         typer.secho(f"[panoptes] image: {item} → task=pose", err=True)
                 elif task_final == "obb":
-                    sp.update(current=label, job="obb", model="")
+                    sp.update(item=label, job="obb", model="")
                     if not quiet:
                         typer.secho(f"[panoptes] image: {item} → task=obb", err=True)
                 else:
                     # geojson (image or URL) — uses the detector backbone underneath
                     w = Path(det_override) if det_override is not None else _pick_weight("detect", small=small)
                     model_name = Path(w).name if w else ""
-                    sp.update(current=label, job="geojson", model=model_name)
+                    sp.update(item=label, job="geojson", model=model_name)
                     if not quiet:
                         typer.secho(f"[panoptes] image/url: {item} → task=geojson weight={w}", err=True)
 
@@ -1228,19 +1203,19 @@ def target(  # noqa: C901
                         from . import classify as _cls_mod  # type: ignore
                         result = _cls_mod.run_image(
                             item, out_dir=(out_dir or _RESULTS_DIR),
-                            model=model_cls, progress=sp, **cls_kwargs
+                            model=model_cls, progress=_JobAwareProxy(sp), **cls_kwargs
                         )
                     elif task_final == "pose":
                         from . import pose as _pose_mod  # type: ignore
                         result = _pose_mod.run_image(
                             item, out_dir=(out_dir or _RESULTS_DIR),
-                            model=model_pose, progress=sp, **pose_kwargs
+                            model=model_pose, progress=_JobAwareProxy(sp), **pose_kwargs
                         )
                     elif task_final == "obb":
                         from . import obb as _obb_mod  # type: ignore
                         result = _obb_mod.run_image(
                             item, out_dir=(out_dir or _RESULTS_DIR),
-                            model=model_obb, progress=sp, **obb_kwargs
+                            model=model_obb, progress=_JobAwareProxy(sp), **obb_kwargs
                         )
 
                 # Mark that JSON was printed for remote-URL geojson so we don't add any trailing text.
@@ -1319,6 +1294,11 @@ def main_classify() -> None:  # pragma: no cover
     main()
 
 def main_pose() -> None:  # pragma: no cover
+    _prepend_argv("pose")
+    main()
+
+def main_pse() -> None:  # pragma: no cover
+    # Alias of pose — added to satisfy `pse.exe` console-script.
     _prepend_argv("pose")
     main()
 

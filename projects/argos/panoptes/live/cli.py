@@ -8,18 +8,37 @@ import typer
 
 from .pipeline import LivePipeline
 
+# Progress helpers for short-lived CLI phases (non-nested, single line)
+try:
+    from panoptes.progress import running_task as _progress_running_task  # type: ignore[import]
+except Exception:  # pragma: no cover
+    def _progress_running_task(*_a: object, **_k: object):
+        class _N:
+            def __enter__(self): return self
+            def __exit__(self, *_: object) -> bool: return False
+        return _N()
+
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 
-# allow short and long spellings (only tokens you authorized)
+# ---------------------------------------------------------------------------
+# Allowed task tokens (short and long spellings).
+# NOTE: Map *aliases* to the canonical task names used by LivePipeline.
+# ---------------------------------------------------------------------------
 _TASK_CHOICES = {
+    # detect
     "d": "detect",
     "detect": "detect",
+    # heatmap
     "hm": "heatmap",
     "heatmap": "heatmap",
+    # classify
     "clf": "classify",
+    "cls": "classify",
     "classify": "classify",
-    "pse": "pse",
+    # pose
+    "pse": "pose",      # ensure pse maps to pose (alias)
     "pose": "pose",
+    # oriented bounding boxes
     "obb": "obb",
     "object": "obb",
 }
@@ -34,7 +53,8 @@ _LIVE_MARKERS = {
     "lvd",
     "live",
     "video",
-    "l",   # spaced variant "l d v" — treat 'l' and 'v' as noise here
+    # spaced variants like "l d v" — treat 'l' and 'v' as noise here
+    "l",
     "v",
 }
 
@@ -44,7 +64,10 @@ def run(
     tokens: List[str] = typer.Argument(
         None,
         metavar="[TASK] [SOURCE]",
-        help="Task (d|detect|hm|heatmap|clf|classify|pse|pose|obb|object) and source (camera index, path, or 'synthetic').",
+        help=(
+            "Task (d|detect|hm|heatmap|clf|cls|classify|pse|pose|obb|object) and source "
+            "(camera index, path, or 'synthetic')."
+        ),
     ),
     *,
     duration: Optional[float] = typer.Option(None, "--duration", help="Seconds to run; default until quit."),
@@ -77,7 +100,7 @@ def run(
     source_tok: Optional[str] = None
 
     for tok in (tokens or []):
-        low = tok.lower()
+        low = tok.lower().strip()
 
         # Some wrappers prepend "run"; treat it as noise.
         if low == "run":
@@ -88,7 +111,7 @@ def run(
             continue
 
         # First recognized task token wins, the next token becomes the source
-        if low in _TASK_CHOICES and task_tok is None:
+        if task_tok is None and low in _TASK_CHOICES:
             task_tok = low
             continue
 
@@ -102,32 +125,39 @@ def run(
 
     # Defaults
     task_tok = task_tok or "detect"
-    t = _TASK_CHOICES[task_tok]
+    t = _TASK_CHOICES[task_tok]  # canonical task for LivePipeline
 
     # Normalize source: allow "synthetic", signed integers, or paths
     s: str = (source_tok or "0").strip()
     if s.lower().startswith("synthetic"):
         src: Union[int, str] = "synthetic"
     elif s.lstrip("+-").isdigit():
+        # camera index (e.g., "0", "1", "-1")
         src = int(s)
     else:
+        # treat as filesystem path
         src = s
 
     size: Optional[Tuple[int, int]] = (width, height) if (width and height) else None
 
-    pipe = LivePipeline(
-        source=src,
-        task=t,
-        autosave=bool(save),
-        out_path=save,
-        prefer_small=small,
-        fps=fps,
-        size=size,
-        headless=headless,
-        conf=conf,
-        iou=iou,
-        duration=duration,
-    )
+    # Short, non-nested progress note during pipeline construction
+    pipe: Optional[LivePipeline] = None
+    with _progress_running_task("LIVE", f"{t} on {src}") as _:
+        pipe = LivePipeline(
+            source=src,
+            task=t,
+            autosave=bool(save),
+            out_path=save,
+            prefer_small=small,
+            fps=fps,
+            size=size,
+            headless=headless,
+            conf=conf,
+            iou=iou,
+            duration=duration,
+        )
+    assert pipe is not None
+
     out = pipe.run()
     if out:
         print(out)

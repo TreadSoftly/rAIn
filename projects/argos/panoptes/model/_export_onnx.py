@@ -5,22 +5,72 @@ import glob
 import os
 import shutil
 import sys
-from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Generator, List, Optional, Tuple, cast
+from types import TracebackType
+from typing import Any, ContextManager, Generator, List, Optional, Tuple, cast
 
-# Optional progress (auto-disables off-TTY / in CI)
+
+# ---------------------------------------------------------------------
+# Minimal no-op spinner (works with "with ... as sp: sp.update(...)")
+# ---------------------------------------------------------------------
+class _NoopSpinner:
+    def __enter__(self) -> "_NoopSpinner":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool | None:
+        return None
+
+    def update(self, **_: Any) -> "_NoopSpinner":
+        return self
+
+
+# ---------------------------------------------------------------------
+# Panoptes progress (Halo-based, single-line)
+# - Provide a wrapper for osc8 so we can pass Path safely
+# - Provide no-op fallbacks if the package isn't available
+# ---------------------------------------------------------------------
 try:
-    from panoptes.progress import ( # type: ignore[reportMissingTypeStubs]
-        ProgressEngine,  # type: ignore[reportMissingTypeStubs]; type: ignore
-        live_percent,
-        simple_status,
+    from panoptes.progress import osc8 as _osc8_raw  # type: ignore[reportMissingTypeStubs]
+    from panoptes.progress import (  # type: ignore[reportMissingTypeStubs]
+        percent_spinner as _percent_spinner,
     )
-except Exception:
-    ProgressEngine = None  # type: ignore[assignment]
-    live_percent = None    # type: ignore[assignment]
-    simple_status = None   # type: ignore[assignment]
+    from panoptes.progress import simple_status as _simple_status  # type: ignore[reportMissingTypeStubs]
+
+    def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
+        return _percent_spinner(*args, **kwargs)  # type: ignore[misc]
+
+    def simple_status(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
+        return _simple_status(*args, **kwargs)  # type: ignore[misc]
+
+except Exception:  # pragma: no cover
+
+    def percent_spinner(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore[no-redef]
+        return _NoopSpinner()
+
+    def simple_status(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore[no-redef]
+        return _NoopSpinner()
+
+    def _osc8_raw(label: str, target: str) -> str:  # type: ignore[no-redef]
+        return str(target)
+
+
+def osc8_link(label: str, target: str | Path) -> str:
+    """
+    Safe wrapper so callers can pass either str or Path for 'target',
+    while deferring to Panoptes' osc8() implementation.
+    """
+    try:
+        return _osc8_raw(label, str(target))
+    except Exception:
+        return str(target)
+
 
 # --- Ultralytics (quiet logging, version-agnostic) ---
 has_yolo: bool = False
@@ -47,14 +97,6 @@ except Exception:
 MODEL_DIR = Path(__file__).resolve().parent  # panoptes/model
 
 
-def _osc8(label: str, path: Path) -> str:
-    try:
-        uri = path.resolve().as_uri()
-    except Exception:
-        uri = "file:///" + str(path.resolve()).replace("\\", "/")
-    return f"\x1b]8;;{uri}\x1b\\{label}\x1b]8;;\x1b\\"
-
-
 @contextmanager
 def _cd(p: Path) -> Generator[None, None, None]:
     prev = Path.cwd()
@@ -74,7 +116,13 @@ def _looks_like_text_header(bs: bytes) -> bool:
     s = bs.lstrip()
     if not s:
         return False
-    return s.startswith(b"<") or s.startswith(b"{") or b"AccessDenied" in s or b"Error" in s or b"<!DOCTYPE" in s
+    return (
+        s.startswith(b"<")
+        or s.startswith(b"{")
+        or b"AccessDenied" in s
+        or b"Error" in s
+        or b"<!DOCTYPE" in s
+    )
 
 
 def _validate_weight(p: Path) -> bool:
@@ -99,7 +147,7 @@ def _synonyms(name: str) -> List[str]:
     alts = {base}
     for ver in ("8", "11", "12"):
         alts.add(base.replace(f"yolov{ver}", f"yolo{ver}"))
-        alts.add(base.replace(f"yolo{ver}",  f"yolov{ver}"))
+        alts.add(base.replace(f"yolo{ver}", f"yolov{ver}"))
     return [a for a in alts if a]
 
 
@@ -109,13 +157,16 @@ def _silence_stdio() -> Generator[None, None, None]:
     with redirect_stdout(buf_out), redirect_stderr(buf_err):
         yield
 
+
 def _status_cm(label: str) -> ContextManager[Any]:
-    """Typed wrapper for optional simple_status."""
+    """
+    Typed wrapper over progress.simple_status; auto-disables if nested.
+    """
     enabled = (os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1")
-    if simple_status is not None:
-        fn = cast(Callable[..., ContextManager[Any]], simple_status)
-        return fn(label, enabled=enabled)  # type: ignore[misc]
-    return cast(ContextManager[Any], nullcontext())
+    try:
+        return cast(ContextManager[Any], simple_status(label, enabled=enabled))  # type: ignore[misc]
+    except Exception:
+        return _NoopSpinner()
 
 
 def _export_one(arg: str) -> Tuple[Path, str]:
@@ -222,26 +273,28 @@ def main(argv: List[str]) -> int:
 
     results: List[Tuple[Path, str]] = []
 
-    # Nice percent progress if available
-    if ProgressEngine is not None and live_percent is not None:
-        eng = ProgressEngine()  # type: ignore[call-arg]
-        with live_percent(eng, prefix="ONNX"):  # type: ignore[misc]
-            eng.set_total(len(argv))
-            for a in argv:
-                eng.set_current(a)
-                path, action = _export_one(a)
-                results.append((path, action))
-                eng.add(1)
-    else:
-        for a in argv:
+    # Halo spinner progress (single-line, fixed width)
+    with percent_spinner(prefix="ONNX") as sp:
+        sp.update(total=len(argv), count=0)
+        for i, a in enumerate(argv, start=1):
+            try:
+                # show model (weight base) while exporting
+                model_name = Path(a).name
+                sp.update(current=a, job="export", model=model_name)
+            except Exception:
+                pass
             path, action = _export_one(a)
             results.append((path, action))
+            try:
+                sp.update(count=i, job="", model=Path(path).name)
+            except Exception:
+                pass
 
     icons = {"present": "↺", "exported": "⎘", "failed": "✗"}
     for path, action in results:
         base = path.name
         if action == "exported":
-            print(f"{icons.get(action, '•')} {_osc8(base, path)} ({action})")
+            print(f"{icons.get(action, '•')} {osc8_link(base, path)} ({action})")
         else:
             print(f"{icons.get(action, '•')} {path} ({action})")
 

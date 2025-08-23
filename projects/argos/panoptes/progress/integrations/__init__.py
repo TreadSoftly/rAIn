@@ -1,7 +1,13 @@
+# projects/argos/panoptes/progress/integrations/__init__.py
 """
-Integrations emit *real* units so our progress is accurate:
+Integration helpers that emit *real* measurable units to the Argos ProgressEngine
+(the Halo/Rich spinner). These modules **never** create their own progress UI;
+they only report to a provided engine so your single spinner remains the sole
+progress surface.
+
+Included:
 - pip / wheel installs (parse output, count packages/files)
-- subprocess (line counting, byte counting)
+- subprocess streaming (optional echo, byte counting)
 - downloads (Content-Length, bytes streamed)
 - hashing / file IO (bytes)
 """
