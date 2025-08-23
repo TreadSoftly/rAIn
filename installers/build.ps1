@@ -1,6 +1,9 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\installers\build.ps1
-[CmdletBinding()] param([Parameter(ValueFromRemainingArguments = $true)][string[]]$BuildArgs)
-$ErrorActionPreference = "Stop"
+# rAIn - Windows bootstrap (ASCII-only, PS 5.1+ compatible)
+[CmdletBinding()] param(
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$BuildArgs
+)
+$ErrorActionPreference = 'Stop'
 
 # --- Progress-friendly environment ---
 if (-not $env:TERM) { $env:TERM = 'xterm-256color' }
@@ -10,35 +13,33 @@ $env:FORCE_COLOR = '1'
 $env:PANOPTES_NESTED_PROGRESS = '1'
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
 
-# Skip weight downloads during non-interactive bootstrap (the interactive builder runs later)
+# Skip weight downloads during non-interactive bootstrap (interactive builder runs later)
 $env:ARGOS_SKIP_WEIGHTS = '1'
 # Ensure final confirm is interactive (do NOT auto-accept)
 Remove-Item Env:ARGOS_ASSUME_YES -ErrorAction SilentlyContinue
 
+# Try to enable ANSI on PS 7+ (safe no-op on PS 5.1)
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 
 # Accept optional leading token from subproject launchers (e.g., "argos")
-if ($BuildArgs.Length -gt 0 -and $BuildArgs[0] -eq 'argos') { $BuildArgs = $BuildArgs[1..($BuildArgs.Length - 1)] }
+if ($BuildArgs.Length -gt 0 -and $BuildArgs[0] -eq 'argos') {
+  if ($BuildArgs.Length -gt 1) {
+    $BuildArgs = $BuildArgs[1..($BuildArgs.Length - 1)]
+  } else {
+    $BuildArgs = @()
+  }
+}
 
-# Robust script location (works even if pasted into a console)
-function _Here {
+# Robust script location (works even if pasted)
+function Resolve-Here {
   if ($PSCommandPath) { return (Split-Path -Parent $PSCommandPath) }
   if ($MyInvocation.MyCommand.Path) { return (Split-Path -Parent $MyInvocation.MyCommand.Path) }
   return (Get-Location).Path
 }
-$HERE = _Here
+$HERE = Resolve-Here
 $ROOT = Split-Path -Parent $HERE
 
-# PS 5.1-safe Python detection
-$pyExe = $null
-$pyArgs = @()
-$cmd = Get-Command py -ErrorAction SilentlyContinue
-if ($cmd) { $pyExe = $cmd.Source; $pyArgs = @('-3') }
-if (-not $pyExe) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue; if ($cmd) { $pyExe = $cmd.Source } }
-if (-not $pyExe) { $cmd = Get-Command python  -ErrorAction SilentlyContinue; if ($cmd) { $pyExe = $cmd.Source } }
-if (-not $pyExe) { throw "Python 3 not found." }
-
-# Progress helpers + optional hooks  (robust import with fallbacks)
+# Progress helpers + optional hooks (robust import with fallbacks)
 $progMod = Join-Path $HERE 'lib\progress.psm1'
 if (Test-Path -LiteralPath $progMod) {
   try { Import-Module $progMod -Force -DisableNameChecking -ErrorAction Stop }
@@ -55,37 +56,126 @@ if (-not (Get-Command Start-ProgressPhase -ErrorAction SilentlyContinue)) {
 
 if (Test-Path (Join-Path $HERE 'build-hooks.ps1')) { . (Join-Path $HERE 'build-hooks.ps1') }
 
-# ── Build phase: ONLY non-interactive steps here ─────────────────────────────
+# ----- Python detection and optional auto-install -----
+
+function Get-PythonCandidate {
+  $pyExe = $null; $pyArgs = @()
+  $c = Get-Command py -ErrorAction SilentlyContinue
+  if ($c) { return @{ Exe = $c.Source; Args = @('-3') } }
+  $c = Get-Command python3 -ErrorAction SilentlyContinue
+  if ($c) { return @{ Exe = $c.Source; Args = @() } }
+  $c = Get-Command python -ErrorAction SilentlyContinue
+  if ($c) { return @{ Exe = $c.Source; Args = @() } }
+  return $null
+}
+
+function Install-PythonIfMissing {
+  $candidate = Get-PythonCandidate
+  if ($candidate) { return $candidate }
+
+  Write-Host 'Python 3 was not found. Attempting automatic installation...'
+  $installed = $false
+
+  # 1) winget
+  $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
+  if ($wingetCmd -and -not $installed) {
+    try {
+      Write-Host 'Installing Python via winget (silent).'
+      & $wingetCmd.Source install --id Python.Python.3.12 --source winget --accept-source-agreements --accept-package-agreements --silent
+      if ($LASTEXITCODE -eq 0) { $installed = $true }
+    } catch { }
+  }
+
+  # 2) Chocolatey
+  $chocoCmd = Get-Command choco -ErrorAction SilentlyContinue
+  if ($chocoCmd -and -not $installed) {
+    try {
+      Write-Host 'Installing Python via Chocolatey (silent).'
+      & $chocoCmd install python -y --no-progress
+      if ($LASTEXITCODE -eq 0) { $installed = $true }
+    } catch { }
+  }
+
+  # 3) Official installer download (silent)
+  if (-not $installed) {
+    try {
+      $arch = if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { 'win32' }
+      $url  = if ($arch -eq 'amd64') {
+        'https://www.python.org/ftp/python/3.12.4/python-3.12.4-amd64.exe'
+      } else {
+        'https://www.python.org/ftp/python/3.12.4/python-3.12.4.exe'
+      }
+      $temp = Join-Path $env:TEMP 'python-installer.exe'
+      Write-Host ('Downloading Python installer from: {0}' -f $url)
+      try {
+        Invoke-WebRequest -Uri $url -OutFile $temp -UseBasicParsing
+      } catch {
+        # fallback if Invoke-WebRequest is restricted
+        Start-BitsTransfer -Source $url -Destination $temp
+      }
+      Write-Host 'Running Python installer (quiet).'
+      Start-Process -FilePath $temp -ArgumentList '/quiet','InstallAllUsers=1','PrependPath=1','Include_test=0','SimpleInstall=1' -Wait -PassThru | Out-Null
+      Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+      $installed = $true
+    } catch {
+      Write-Host 'Automatic Python installation failed.'
+    }
+  }
+
+  if ($installed) {
+    # Refresh PATH in this session
+    $env:PATH = [Environment]::GetEnvironmentVariable('PATH','Machine') + ';' + [Environment]::GetEnvironmentVariable('PATH','User')
+    Start-Sleep -Seconds 2
+    $candidate = Get-PythonCandidate
+    if ($candidate) { return $candidate }
+  }
+
+  throw 'Python 3 not found and automatic installation was unsuccessful.'
+}
+
+# Acquire Python
+$py = Get-PythonCandidate
+if (-not $py) { $py = Install-PythonIfMissing }
+
+$pyExe  = $py['Exe']
+$pyArgs = $py['Args']
+
+# ----- Build phase: ONLY non-interactive steps here -----
 # Mark PS-driven progress as active so Python progress stays quiet during these tiny phases.
 $env:PANOPTES_PROGRESS_ACTIVE = '1'
-Start-ProgressPhase "Build ARGOS" -Total 3
+Start-ProgressPhase 'Build ARGOS' -Total 3
 try {
-  Invoke-Step -Name "Bootstrap venv" -Weight 1 -Body {
+  Invoke-Step -Name 'Bootstrap venv' -Weight 1 -Body {
     # Write a detailed log to Desktop\Argos\Logs for easy access
     $desktop = [Environment]::GetFolderPath('Desktop')
     $logDir  = Join-Path $desktop 'Argos\Logs'
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    $tmpLog  = Join-Path $logDir ("argos-bootstrap-" + [guid]::NewGuid().ToString() + ".log")
+    $tmpLog  = Join-Path $logDir ('argos-bootstrap-' + [guid]::NewGuid().ToString() + '.log')
+
+    Write-Host 'Bootstrapping virtual environment (details are logged to Desktop\Argos\Logs)...'
     # Capture both stdout/stderr to a log so failures are debuggable; keep console minimal during progress
     & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall *>&1 | Tee-Object -FilePath $tmpLog | Out-Null
     if ($LASTEXITCODE -ne 0) {
-      Write-Host ""
-      Write-Host "═══ BOOTSTRAP FAILED — detailed log ══════════════════════════════════════"
+      Write-Host ''
+      Write-Host '==== BOOTSTRAP FAILED - detailed log ====================================='
       Get-Content -LiteralPath $tmpLog | Write-Host
-      Write-Host "═════ end log ═════════════════════════════════════════════════════════════"
-      throw "bootstrap failed ($LASTEXITCODE)"
+      Write-Host '==== end log =============================================================='
+      throw ('bootstrap failed ({0})' -f $LASTEXITCODE)
     }
   }
+
   # Resolve venv Python for subsequent steps
   $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
-  Invoke-Step -Name "Sanity check" -Weight 1 -Body {
+
+  Invoke-Step -Name 'Sanity check' -Weight 1 -Body {
     # Soft-check: print problems but don't fail the whole build (bootstrap already ran soft pip check)
     & $vpy -m pip check
     if ($LASTEXITCODE -ne 0) {
-      Write-Host "⚠️  'pip check' reported issues; continuing."
+      Write-Host "WARNING: 'pip check' reported issues; continuing."
     }
   }
-  Invoke-Step -Name "Setup PATH" -Weight 1 -Body {
+
+  Invoke-Step -Name 'Setup PATH' -Weight 1 -Body {
     & (Join-Path $HERE 'setup-path.ps1') -Quiet
   }
 }
@@ -96,17 +186,16 @@ finally {
   $env:PANOPTES_PROGRESS_ACTIVE = '0'
 }
 
-# ── Interactive model builder runs AFTER progress is cleared ────────────────
+# ----- Interactive model builder runs AFTER progress is cleared -----
 # IMPORTANT: Do NOT auto-feed "1" unless the user explicitly opts in.
 $auto = ($env:ARGOS_AUTOBUILD -eq '1')   # CI no longer forces auto
 if ($auto) {
-  "1" | & $vpy -m panoptes.tools.build_models @BuildArgs
-}
-else {
+  '1' | & $vpy -m panoptes.tools.build_models @BuildArgs
+} else {
   & $vpy -m panoptes.tools.build_models @BuildArgs
 }
 
-if ($LASTEXITCODE -ne 0) { throw "build_models failed ($LASTEXITCODE)" }
+if ($LASTEXITCODE -ne 0) { throw ('build_models failed ({0})' -f $LASTEXITCODE) }
 
 # Propagate status without exiting the host
 return

@@ -1,4 +1,7 @@
-﻿[CmdletBinding()] param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+﻿[CmdletBinding()] param(
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$Args
+)
 $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
 $env:FORCE_COLOR = "1"
@@ -6,4 +9,4 @@ if (-not $env:TERM) { $env:TERM = "xterm-256color" }
 Remove-Item Env:PANOPTES_PROGRESS_ACTIVE -ErrorAction SilentlyContinue
 # Do NOT set ARGOS_AUTOBUILD here; keep selection interactive by default.
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-& (Join-Path $Here 'installers\build.ps1') @Args
+& (Join-Path $Here '..\..\installers\build.ps1') 'argos' @Args
