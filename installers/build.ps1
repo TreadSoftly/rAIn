@@ -23,11 +23,7 @@ try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 
 # Accept optional leading token from subproject launchers (e.g., "argos")
 if ($BuildArgs.Length -gt 0 -and $BuildArgs[0] -eq 'argos') {
-  if ($BuildArgs.Length -gt 1) {
-    $BuildArgs = $BuildArgs[1..($BuildArgs.Length - 1)]
-  } else {
-    $BuildArgs = @()
-  }
+  if ($BuildArgs.Length -gt 1) { $BuildArgs = $BuildArgs[1..($BuildArgs.Length - 1)] } else { $BuildArgs = @() }
 }
 
 # Robust script location (works even if pasted)
@@ -45,7 +41,7 @@ if (Test-Path -LiteralPath $progMod) {
   try { Import-Module $progMod -Force -DisableNameChecking -ErrorAction Stop }
   catch { . $progMod }
 }
-# Last-resort: define no-op shims so the build never fails due to progress
+# Last-resort: no-op shims so build never fails due to progress helpers missing
 if (-not (Get-Command Start-ProgressPhase -ErrorAction SilentlyContinue)) {
   function Start-ProgressPhase { param([string]$Activity, [int]$Total = 100) }
   function Set-Progress { param([int]$Done, [string]$Status = "") }
@@ -57,9 +53,7 @@ if (-not (Get-Command Start-ProgressPhase -ErrorAction SilentlyContinue)) {
 if (Test-Path (Join-Path $HERE 'build-hooks.ps1')) { . (Join-Path $HERE 'build-hooks.ps1') }
 
 # ----- Python detection and optional auto-install -----
-
 function Get-PythonCandidate {
-  $pyExe = $null; $pyArgs = @()
   $c = Get-Command py -ErrorAction SilentlyContinue
   if ($c) { return @{ Exe = $c.Source; Args = @('-3') } }
   $c = Get-Command python3 -ErrorAction SilentlyContinue
@@ -107,12 +101,7 @@ function Install-PythonIfMissing {
       }
       $temp = Join-Path $env:TEMP 'python-installer.exe'
       Write-Host ('Downloading Python installer from: {0}' -f $url)
-      try {
-        Invoke-WebRequest -Uri $url -OutFile $temp -UseBasicParsing
-      } catch {
-        # fallback if Invoke-WebRequest is restricted
-        Start-BitsTransfer -Source $url -Destination $temp
-      }
+      try { Invoke-WebRequest -Uri $url -OutFile $temp -UseBasicParsing } catch { Start-BitsTransfer -Source $url -Destination $temp }
       Write-Host 'Running Python installer (quiet).'
       Start-Process -FilePath $temp -ArgumentList '/quiet','InstallAllUsers=1','PrependPath=1','Include_test=0','SimpleInstall=1' -Wait -PassThru | Out-Null
       Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
@@ -136,12 +125,10 @@ function Install-PythonIfMissing {
 # Acquire Python
 $py = Get-PythonCandidate
 if (-not $py) { $py = Install-PythonIfMissing }
-
 $pyExe  = $py['Exe']
 $pyArgs = $py['Args']
 
 # ----- Build phase: ONLY non-interactive steps here -----
-# Mark PS-driven progress as active so Python progress stays quiet during these tiny phases.
 $env:PANOPTES_PROGRESS_ACTIVE = '1'
 Start-ProgressPhase 'Build ARGOS' -Total 3
 try {
@@ -153,23 +140,26 @@ try {
     $tmpLog  = Join-Path $logDir ('argos-bootstrap-' + [guid]::NewGuid().ToString() + '.log')
 
     Write-Host 'Bootstrapping virtual environment (details are logged to Desktop\Argos\Logs)...'
-    # Capture both stdout/stderr to a log so failures are debuggable; keep console minimal during progress
-    & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall *>&1 | Tee-Object -FilePath $tmpLog | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    # IMPORTANT: send BOTH stdout and stderr directly to the log file.
+    # This prevents PS 5.1 from turning pip warnings into NativeCommandError.
+    & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall 1>> $tmpLog 2>> $tmpLog
+    $ec = $LASTEXITCODE
+    if ($ec -ne 0) {
       Write-Host ''
       Write-Host '==== BOOTSTRAP FAILED - detailed log ====================================='
       Get-Content -LiteralPath $tmpLog | Write-Host
       Write-Host '==== end log =============================================================='
-      throw ('bootstrap failed ({0})' -f $LASTEXITCODE)
+      throw ('bootstrap failed ({0})' -f $ec)
     }
   }
 
-  # Resolve venv Python for subsequent steps
-  $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
+  # Resolve venv Python for subsequent steps (suppress stderr so PS doesn't raise NativeCommandError)
+  $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv 2>$null
+  $vpy = $vpy.Trim()
 
   Invoke-Step -Name 'Sanity check' -Weight 1 -Body {
-    # Soft-check: print problems but don't fail the whole build (bootstrap already ran soft pip check)
-    & $vpy -m pip check
+    # 'pip check' returns non-zero when there are dependency issues; keep going anyway.
+    & $vpy -m pip check 2>$null
     if ($LASTEXITCODE -ne 0) {
       Write-Host "WARNING: 'pip check' reported issues; continuing."
     }
@@ -180,22 +170,25 @@ try {
   }
 }
 finally {
-  # Always clear the progress record, even on error, to avoid "ghost" lines
   Complete-Progress
-  # PS progress is done; allow Python progress UI to run.
   $env:PANOPTES_PROGRESS_ACTIVE = '0'
 }
 
 # ----- Interactive model builder runs AFTER progress is cleared -----
-# IMPORTANT: Do NOT auto-feed "1" unless the user explicitly opts in.
-$auto = ($env:ARGOS_AUTOBUILD -eq '1')   # CI no longer forces auto
-if ($auto) {
-  '1' | & $vpy -m panoptes.tools.build_models @BuildArgs
-} else {
-  & $vpy -m panoptes.tools.build_models @BuildArgs
+# Do NOT auto-feed "1" unless the user explicitly opts in.
+$auto = ($env:ARGOS_AUTOBUILD -eq '1')
+# Avoid terminating on harmless stderr during the interactive phase
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  if ($auto) {
+    '1' | & $vpy -m panoptes.tools.build_models @BuildArgs
+  } else {
+    & $vpy -m panoptes.tools.build_models @BuildArgs
+  }
+} finally {
+  $ErrorActionPreference = $prevEAP
 }
 
 if ($LASTEXITCODE -ne 0) { throw ('build_models failed ({0})' -f $LASTEXITCODE) }
-
-# Propagate status without exiting the host
 return
