@@ -84,7 +84,7 @@ def live_percent(engine: ProgressEngine, *, prefix: str = "PROGRESS") -> Generat
     stream = getattr(sys, "__stderr__", sys.stderr)
 
     # Try to create the HALO spinner
-    sp = percent_spinner(prefix=prefix, stream=stream)  # type: ignore[call-arg]
+    sp = percent_spinner(prefix=prefix, stream=stream, final_newline=False)  # type: ignore[call-arg]
     sp_typed = cast(_SpinnerLike, sp)
     try:
         setattr(sp_typed, "engine", engine)  # optional introspection

@@ -167,6 +167,14 @@ set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
 rem ---- module switch ----
 if "%MODE_LIVE%"=="1" ( set "PYMOD=panoptes.live.cli" ) else ( set "PYMOD=panoptes.cli" )
 
+rem Live-specific progress behavior
+if "%MODE_LIVE%"=="1" (
+  set "PANOPTES_LIVE=1"
+  set "PANOPTES_PROGRESS_TAIL=none"
+  set "PANOPTES_PROGRESS_FINAL_NEWLINE=0"
+  set "PANOPTES_NESTED_PROGRESS=0"
+)
+
 rem Front-load op if we detected one
 set "TOKENS_FINAL=%TOKENS%"
 if defined OPNORM set "TOKENS_FINAL=""%OPNORM%""%TOKENS%"

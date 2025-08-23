@@ -122,6 +122,14 @@ if [[ "$proj" == "argos" ]]; then
   VPY="$("$PY" "$ROOT/projects/argos/bootstrap.py" --print-venv)"
   export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
 
+  # Live-specific progress behavior
+  if [[ $live_mode -eq 1 ]]; then
+    export PANOPTES_LIVE=1
+    export PANOPTES_PROGRESS_TAIL=none
+    export PANOPTES_PROGRESS_FINAL_NEWLINE=0
+    export PANOPTES_NESTED_PROGRESS=0
+  fi
+
   PY_MOD="panoptes.cli"
   [[ $live_mode -eq 1 ]] && PY_MOD="panoptes.live.cli"
   exec "$VPY" -m "$PY_MOD" "${tokens[@]}"

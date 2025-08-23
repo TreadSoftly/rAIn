@@ -1,4 +1,4 @@
-# progress_ux.py — terminal UX helpers (HALO/Rich spinner, status, OSC-8 links)
+# progress_ux.py — terminal UX helpers (HALO spinner, status, OSC-8 links)
 from __future__ import annotations
 
 import itertools
@@ -10,20 +10,44 @@ import time
 import urllib.parse
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol, Sequence, Type, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Type,
+    cast,
+)
+
+# --- Optional deps bootstrap: Halo + Colorama (installed quietly on first import) ---
 
 try:
     from halo import Halo  # type: ignore[import]
-except Exception:
+except ImportError:
+    # Best-effort, one-time bootstrap so a fresh clone "just works".
+    try:
+        import subprocess
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "halo>=0.0.31"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        from halo import Halo  # type: ignore[import]
+    except Exception:
+        Halo = None
+except Exception:  # pragma: no cover
     Halo = None
 
-try:
-    from colorama import Fore, Style
-    from colorama import init as colorama_init
-    colorama_init(autoreset=True)
-except Exception:  # pragma: no cover
-    CSI = "\x1b["
-    class _F:
+CSI = "\x1b["  # define once (avoid reassignment warnings)
+
+
+def _fallback_colors():
+    class _Fore:
         BLACK = CSI + "30m"
         RED = CSI + "31m"
         GREEN = CSI + "32m"
@@ -40,10 +64,38 @@ except Exception:  # pragma: no cover
         LIGHTMAGENTA_EX = CSI + "95m"
         LIGHTCYAN_EX = CSI + "96m"
         LIGHTWHITE_EX = CSI + "97m"
-    class _S:
+
+    class _Style:
         BRIGHT = CSI + "1m"
         RESET_ALL = CSI + "0m"
-    Fore, Style = _F(), _S()
+
+    return _Fore(), _Style()
+
+
+try:
+    from colorama import Fore, Style
+    from colorama import init as colorama_init
+    colorama_init(autoreset=True)
+except ImportError:
+    try:
+        import subprocess
+        import sys
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "colorama>=0.4.6"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        from colorama import (
+            Fore,  # type: ignore
+            Style,
+        )
+        from colorama import init as colorama_init  # type: ignore
+        colorama_init(autoreset=True)
+    except Exception:
+        Fore, Style = _fallback_colors()
+except Exception:
+    Fore, Style = _fallback_colors()
 
 DEFAULT_COLORS: List[str] = [
     Fore.RED, Fore.GREEN, Fore.BLUE, Fore.YELLOW, Fore.CYAN, Fore.MAGENTA, Fore.WHITE,
@@ -57,24 +109,32 @@ DEFAULT_COLORS: List[str] = [
     getattr(Fore, "LIGHTYELLOW_EX", Fore.YELLOW),
 ]
 
+
 class Spinner(Protocol):
     def __enter__(self) -> "Spinner": ...
     def __exit__(self, exc_type: Optional[Type[BaseException]], exc: Optional[BaseException], tb: Optional[TracebackType]) -> None: ...
     def start(self) -> "Spinner": ...
     def stop(self) -> None: ...
     def update(self, **kwargs: Any) -> "Spinner": ...
+
     @property
     def text(self) -> str: ...
     @text.setter
     def text(self, value: str) -> None: ...
 
+
 def _should_enable_spinners(enabled: bool, stream: Any | None = None) -> bool:
     if not enabled or Halo is None:
         return False
-    # Suppress nested spinners unless forced.
-    if (os.environ.get("PANOPTES_PROGRESS_ACTIVE") == "1" and
-        os.environ.get("PANOPTES_PROGRESS_FORCE", "").lower() not in {"1", "true", "yes"}):
-        return False
+    # Suppress nested spinners unless forced (accept both env var names).
+    if os.environ.get("PANOPTES_PROGRESS_ACTIVE") == "1":
+        force_flag = (
+            os.environ.get("PANOPTES_PROGRESS_FORCE")
+            or os.environ.get("PANOPTES_NESTED_PROGRESS")
+            or ""
+        ).lower()
+        if force_flag not in {"1", "true", "yes"}:
+            return False
     try:
         target = stream or sys.stderr
         if not getattr(target, "isatty", lambda: False)():
@@ -87,45 +147,69 @@ def _should_enable_spinners(enabled: bool, stream: Any | None = None) -> bool:
         return False
     return True
 
+
 def should_enable_spinners(stream: Any | None = None) -> bool:
     try:
         return _should_enable_spinners(True, stream)
     except Exception:
         return False
 
+
 class NullSpinner:
     def __init__(self, *_: Any, **__: Any) -> None:
         pass
+
     def __enter__(self) -> "Spinner":
         return self
+
     def __exit__(self, exc_type: Optional[Type[BaseException]], exc: Optional[BaseException], tb: Optional[TracebackType]) -> None:
         self.stop()
+
     def start(self) -> "Spinner":
         return self
+
     def stop(self) -> None:
         return None
+
     def update(self, **_: Any) -> "Spinner":
         return self
+
     @property
     def text(self) -> str:
         return ""
+
     @text.setter
     def text(self, value: str) -> None:
         pass
 
+
 if TYPE_CHECKING:
     class HaloType(Protocol):
         text: str
+
         def start(self, text: Optional[str] = ...) -> Any: ...
         def stop(self) -> Any: ...
         stream: Any
 else:
     HaloType = Any  # at runtime, treat as Any
 
+
 def _make_const_text(value: str) -> Callable[[Dict[str, Any], str], str]:
     def _fn(_s: Dict[str, Any], _c: str) -> str:
         return value
     return _fn
+
+
+def _env_final_newline(default: bool) -> bool:
+    """Honor PANOPTES_PROGRESS_FINAL_NEWLINE, else keep provided default."""
+    try:
+        if "PANOPTES_PROGRESS_FINAL_NEWLINE" in os.environ:
+            return (os.environ.get("PANOPTES_PROGRESS_FINAL_NEWLINE", "0").lower()
+                    in {"1", "true", "yes"})
+    except Exception:
+        pass
+    return default
+
 
 class DynamicSpinner:
     """
@@ -220,8 +304,6 @@ class DynamicSpinner:
 
     def update(self, **kwargs: Any) -> "Spinner":
         # Accepts keys: total, count, item/current, job, model
-        # Map legacy 'current' to [File: …] (item) — callers who want to update
-        # the [Job: …] slot should pass job=... explicitly or use JobAwareProxy.
         if "current" in kwargs and "item" not in kwargs:
             kwargs["item"] = kwargs.pop("current")
         self._state.update(kwargs)
@@ -230,6 +312,7 @@ class DynamicSpinner:
     @property
     def text(self) -> str:
         return self._text_fn(self._state, "")
+
     @text.setter
     def text(self, value: str) -> None:
         self._text_fn = _make_const_text(value)
@@ -274,9 +357,14 @@ def running_task(
     stream: Any | None = None,
     final_newline: bool = True,
 ) -> Spinner:
-    ctor = enabled_spinner(enabled, stream=stream, final_newline=final_newline)
+    # Disable transient status in live mode, and honor global final_newline override
+    live = (os.environ.get("PANOPTES_LIVE", "").lower() in {"1", "true", "yes"})
+    ctor = enabled_spinner(enabled and not live, stream=stream,
+                           final_newline=_env_final_newline(final_newline))
+
     def text_fn(_state: Dict[str, Any], color: str) -> str:
         return f"{color}{Style.BRIGHT}Running {task} on {subject}{Style.RESET_ALL}"
+
     return ctor(text_fn, spinner_type=spinner_type)
 
 
@@ -288,16 +376,24 @@ def simple_status(
     stream: Any | None = None,
     final_newline: bool = True,
 ) -> Spinner:
-    ctor = enabled_spinner(enabled, stream=stream, final_newline=final_newline)
+    live = (os.environ.get("PANOPTES_LIVE", "").lower() in {"1", "true", "yes"})
+    ctor = enabled_spinner(enabled and not live, stream=stream,
+                           final_newline=_env_final_newline(final_newline))
+
     def text_fn(_s: Dict[str, Any], color: str) -> str:
         return f"{color}{Style.BRIGHT}{label}{Style.RESET_ALL}"
+
     return ctor(text_fn, spinner_type=spinner_type)
 
 
 # helpers for percent spinner text
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _visible_len(s: str) -> int:
     return len(_ANSI_RE.sub("", s))
+
+
 def _ellipsize_plain(s: str, n: int) -> str:
     s = str(s or "")
     if n <= 0:
@@ -349,12 +445,13 @@ def percent_spinner(
     ITEM_MIN_W = 1
 
     def text_fn(state: Dict[str, Any], color: str) -> str:
-        from colorama import Fore as F, Style as S
+        # Use the already-resolved global Fore/Style (no re-imports here).
+        F, S = Fore, Style
 
         count = max(0, int(state.get("count", 0)))
         total = max(1, int(state.get("total", 1)))
-        item  = str(state.get("item") or state.get("current") or "")
-        job   = str(state.get("job") or "")
+        item = str(state.get("item") or state.get("current") or "")
+        job = str(state.get("job") or "")
         model = str(state.get("model") or "")
         pct = min(100.0, max(0.0, (100.0 * count) / max(1, total)))
         w = len(str(total))
@@ -363,22 +460,28 @@ def percent_spinner(
 
         seg_head_item = f"{F.GREEN}{S.BRIGHT}[File:{S.RESET_ALL}{F.RED}{S.BRIGHT}"
         seg_tail_item = f"{S.RESET_ALL}{F.GREEN}{S.BRIGHT}]"
-        seg_head_job  = f"{F.CYAN}{S.BRIGHT}[Job:{S.RESET_ALL}{F.RED}{S.BRIGHT}"
-        seg_tail_job  = f"{S.RESET_ALL}{F.CYAN}{S.BRIGHT}]"
-        seg_head_mod  = f"{F.WHITE}{S.BRIGHT}[Model:{S.RESET_ALL}{F.RED}{S.BRIGHT}"
-        seg_tail_mod  = f"{S.RESET_ALL}{F.WHITE}{S.BRIGHT}]"
+        seg_head_job = f"{F.CYAN}{S.BRIGHT}[Job:{S.RESET_ALL}{F.RED}{S.BRIGHT}"
+        seg_tail_job = f"{S.RESET_ALL}{F.CYAN}{S.BRIGHT}]"
+        seg_head_mod = f"{F.WHITE}{S.BRIGHT}[Model:{S.RESET_ALL}{F.RED}{S.BRIGHT}"
+        seg_tail_mod = f"{S.RESET_ALL}{F.WHITE}{S.BRIGHT}]"
 
-        tail_full  = f"{F.MAGENTA}{S.BRIGHT} [{count:>{w}}/{total:{w}}] [{pct:6.2f}%]{S.RESET_ALL}"
+        tail_full = f"{F.MAGENTA}{S.BRIGHT} [{count:>{w}}/{total:{w}}] [{pct:6.2f}%]{S.RESET_ALL}"
         tail_short = f"{F.MAGENTA}{S.BRIGHT} [{count}/{total}] [{pct:5.1f}%]{S.RESET_ALL}"
-        tail_min   = f"{F.MAGENTA}{S.BRIGHT} [{count}/{total}] [{int(round(pct))}%]{S.RESET_ALL}"
+        tail_min = f"{F.MAGENTA}{S.BRIGHT} [{count}/{total}] [{int(round(pct))}%]{S.RESET_ALL}"
 
-        preferred  = tail_full if tail_mode == "full" else (tail_short if tail_mode == "short" else tail_min)
-
-        tail = preferred
-        for t in (preferred, tail_full, tail_short, tail_min):
-            if _visible_len(head) + _visible_len(t) + 3 <= latched_cols:
-                tail = t
-                break
+        # Support hiding the tail entirely (used by live video)
+        if tail_mode == "none":
+            tail = ""
+        else:
+            preferred = (
+                tail_full if tail_mode == "full"
+                else (tail_short if tail_mode == "short" else tail_min)
+            )
+            tail = preferred
+            for t in (preferred, tail_full, tail_short, tail_min):
+                if _visible_len(head) + _visible_len(t) + 3 <= latched_cols:
+                    tail = t
+                    break
 
         mid_budget = max(3, latched_cols - _visible_len(head) - _visible_len(tail))
 
@@ -450,12 +553,14 @@ class AnimatedBanner:
 
     def start(self) -> "AnimatedBanner":
         self._stop.clear()
+
         def _loop() -> None:
             while not self._stop.is_set():
                 frame = self._mutator(self._step, list(self._base))
                 self._render(frame)
                 self._step += 1
                 time.sleep(self._interval)
+
         self._thread = threading.Thread(target=_loop, daemon=True)
         self._thread.start()
         return self

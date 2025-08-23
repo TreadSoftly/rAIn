@@ -1,12 +1,19 @@
 # panoptes.live.cli — dedicated live/webcam entrypoint ("lv" / "live" / "livevideo")
 from __future__ import annotations
 
+import os
 import sys
 from typing import List, Optional, Tuple, Union
 
 import typer
 
 from .pipeline import LivePipeline
+
+# Ensure live-friendly progress behavior even when invoked via the console script.
+os.environ.setdefault("PANOPTES_LIVE", "1")
+os.environ.setdefault("PANOPTES_PROGRESS_TAIL", "none")          # hide [DONE] [PERCENT] tail
+os.environ.setdefault("PANOPTES_PROGRESS_FINAL_NEWLINE", "0")    # keep line anchored
+os.environ.setdefault("PANOPTES_NESTED_PROGRESS", "0")           # avoid nested spinners under live
 
 # Progress helpers for short-lived CLI phases (non-nested, single line)
 try:
@@ -140,7 +147,7 @@ def run(
 
     size: Optional[Tuple[int, int]] = (width, height) if (width and height) else None
 
-    # Short, non-nested progress note during pipeline construction
+    # Short, non-nested progress note during pipeline construction (auto-disabled in live by progress_ux)
     pipe: Optional[LivePipeline] = None
     with _progress_running_task("LIVE", f"{t} on {src}") as _:
         pipe = LivePipeline(

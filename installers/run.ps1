@@ -130,5 +130,14 @@ $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
 $pyMod = if ($liveMode) { 'panoptes.live.cli' } else { 'panoptes.cli' }
+
+# Live-specific progress behavior
+if ($liveMode) {
+  $env:PANOPTES_LIVE = '1'
+  $env:PANOPTES_PROGRESS_TAIL = 'none'
+  $env:PANOPTES_PROGRESS_FINAL_NEWLINE = '0'
+  $env:PANOPTES_NESTED_PROGRESS = '0'
+}
+
 & $vpy -m $pyMod @tokens
 exit $LASTEXITCODE
