@@ -41,7 +41,7 @@ cd rAIn
 > Powershell
 
 ```
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force PS .\build
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
 
 .\build
 
