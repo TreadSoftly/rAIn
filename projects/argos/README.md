@@ -41,6 +41,8 @@ cd rAIn
 > Powershell
 
 ```
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force PS .\build
+
 .\build
 
 ```
@@ -84,7 +86,7 @@ argos ?
 </div>
 
 <div align="center">
-  
+
 > Please Note You Can Put Your Own Media In The Tests/Raw Folder For Processing!
 
 </div>
@@ -129,7 +131,7 @@ classify robodog
 
 ```
 
-<br> 
+<br>
 
 <div align="center">
 
@@ -181,7 +183,7 @@ classify robodog
 <br>
 
 <div align="center">
-  
+
 # Live Video Webcam Feature
 
 </div>
