@@ -23,12 +23,7 @@ try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 
 # Accept optional leading token from subproject launchers (e.g., "argos")
 if ($BuildArgs.Length -gt 0 -and $BuildArgs[0] -eq 'argos') {
-  if ($BuildArgs.Length -gt 1) {
-    $BuildArgs = $BuildArgs[1..($BuildArgs.Length - 1)]
-  }
-  else {
-    $BuildArgs = @()
-  }
+  if ($BuildArgs.Length -gt 1) { $BuildArgs = $BuildArgs[1..($BuildArgs.Length - 1)] } else { $BuildArgs = @() }
 }
 
 # Resolve script location robustly
@@ -40,7 +35,7 @@ function Resolve-Here {
 $HERE = Resolve-Here
 $ROOT = Split-Path -Parent $HERE
 
-# Optional progress helpers (never fail build if missing)
+# --- Progress helpers (optional; never fail build if missing) ---
 $progMod = Join-Path $HERE 'lib\progress.psm1'
 if (Test-Path -LiteralPath $progMod) {
   try { Import-Module $progMod -Force -DisableNameChecking -ErrorAction Stop }
@@ -54,8 +49,49 @@ if (-not (Get-Command Start-ProgressPhase -ErrorAction SilentlyContinue)) {
   function Invoke-Step { param([string]$Name, [scriptblock]$Body, [int]$Weight = 1) & $Body }
 }
 
-# Optional local hooks
+# Project-local hooks (optional)
 if (Test-Path (Join-Path $HERE 'build-hooks.ps1')) { . (Join-Path $HERE 'build-hooks.ps1') }
+
+# --- Helpers to run native exes without triggering PowerShell NativeCommandError ---
+
+function Invoke-StartProcessQuiet {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$ArgumentList
+  )
+  $p = Start-Process -FilePath $FilePath `
+    -ArgumentList $ArgumentList `
+    -NoNewWindow -Wait -PassThru `
+    -RedirectStandardOutput "NUL" `
+    -RedirectStandardError  "NUL"
+  return $p.ExitCode
+}
+
+function Invoke-StartProcessCapture {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$ArgumentList
+  )
+  # In-memory capture with .NET (no files written)
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FilePath
+  # Join/quote args safely for PS 5.1 (no ArgumentList property on PSI here)
+  $quoted = foreach ($a in $ArgumentList) {
+    if ($a -match '[\s"]') { '"' + ($a -replace '"', '\"') + '"' } else { $a }
+  }
+  $psi.Arguments = [string]::Join(' ', $quoted)
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.CreateNoWindow = $true
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  [void]$proc.Start()
+  $stdout = $proc.StandardOutput.ReadToEnd()
+  $stderr = $proc.StandardError.ReadToEnd()
+  $proc.WaitForExit()
+  return @{ Code = $proc.ExitCode; StdOut = $stdout; StdErr = $stderr }
+}
 
 # ----- Python detection and optional auto-install -----
 function Get-PythonCandidate {
@@ -109,12 +145,7 @@ function Install-PythonIfMissing {
       }
       $temp = Join-Path $env:TEMP 'python-installer.exe'
       Write-Host ('Downloading Python installer from: {0}' -f $url)
-      try {
-        Invoke-WebRequest -Uri $url -OutFile $temp -UseBasicParsing
-      }
-      catch {
-        Start-BitsTransfer -Source $url -Destination $temp
-      }
+      try { Invoke-WebRequest -Uri $url -OutFile $temp -UseBasicParsing } catch { Start-BitsTransfer -Source $url -Destination $temp }
       Write-Host 'Running Python installer (quiet).'
       Start-Process -FilePath $temp -ArgumentList '/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0', 'SimpleInstall=1' -Wait -PassThru | Out-Null
       Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
@@ -148,28 +179,33 @@ Start-ProgressPhase 'Build ARGOS' -Total 3
 try {
   Invoke-Step -Name 'Bootstrap venv' -Weight 1 -Body {
     Write-Host 'Bootstrapping virtual environment (quiet; no log files)...'
-    # Suppress both stdout/stderr to avoid NativeCommandError on harmless warnings.
-    & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall 1>$null 2>$null
-    $ec = $LASTEXITCODE
+    $argsEnsure = $pyArgs + @("$ROOT\projects\argos\bootstrap.py", '--ensure', '--yes', '--reinstall')
+
+    # Run quietly to avoid NativeCommandError from harmless warnings
+    $ec = Invoke-StartProcessQuiet -FilePath $pyExe -ArgumentList $argsEnsure
     if ($ec -ne 0) {
       Write-Host ''
       Write-Host '==== BOOTSTRAP FAILED - re-running with visible output (no files written) ===='
-      $prevEAP = $ErrorActionPreference
-      $ErrorActionPreference = 'Continue'
-      # Merge stderr into stdout and print to console only
-      & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --ensure --yes --reinstall 2>&1 | Out-Host
-      $ErrorActionPreference = $prevEAP
+      $r = Invoke-StartProcessCapture -FilePath $pyExe -ArgumentList $argsEnsure
+      if ($r.StdOut) { $r.StdOut | Out-Host }
+      if ($r.StdErr) { $r.StdErr | Out-Host }
       throw ('bootstrap failed ({0})' -f $ec)
     }
   }
 
-  # Resolve venv Python for subsequent steps (suppress stderr so PS doesn't raise NativeCommandError)
-  $vpy = & $pyExe @pyArgs "$ROOT\projects\argos\bootstrap.py" --print-venv 2>$null
-  $vpy = $vpy.Trim()
+  # Resolve venv Python for subsequent steps (capture in-memory; no files)
+  $rV = Invoke-StartProcessCapture -FilePath $pyExe -ArgumentList ($pyArgs + @("$ROOT\projects\argos\bootstrap.py", '--print-venv'))
+  if ($rV.Code -ne 0) {
+    if ($rV.StdOut) { $rV.StdOut | Out-Host }
+    if ($rV.StdErr) { $rV.StdErr | Out-Host }
+    throw ('bootstrap --print-venv failed ({0})' -f $rV.Code)
+  }
+  $vpy = $rV.StdOut.Trim()
 
   Invoke-Step -Name 'Sanity check' -Weight 1 -Body {
-    & $vpy -m pip check 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    # 'pip check' returns non-zero on dependency issues; continue anyway
+    $ec = Invoke-StartProcessQuiet -FilePath $vpy -ArgumentList @('-m', 'pip', 'check')
+    if ($ec -ne 0) {
       Write-Host "WARNING: 'pip check' reported issues; continuing."
     }
   }
@@ -187,7 +223,7 @@ finally {
 # IMPORTANT: Do NOT auto-feed "1" unless the user explicitly opts in.
 $auto = ($env:ARGOS_AUTOBUILD -eq '1')
 
-# Avoid terminating on harmless stderr during the interactive phase
+# Allow harmless stderr during interactive run without terminating the script
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
