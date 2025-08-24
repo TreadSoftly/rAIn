@@ -21,6 +21,7 @@ from typing import Any, ContextManager, Generator, List, Optional, Tuple, cast
 _onnx_preflight_done: bool = False
 _onnx_usable: Optional[bool] = None
 _DIAG_LOG_NAME = "_onnx_diagnostics.txt"
+_ECHO_ONNX_DIAG = os.environ.get("ARGOS_ECHO_ONNX_DIAG", "1") not in ("0", "false", "False")
 
 os.environ.setdefault("PIP_ONLY_BINARY", ":all:")
 os.environ.setdefault("PIP_NO_BUILD_ISOLATION", "1")
@@ -243,12 +244,26 @@ def _ensure_export_toolchain() -> None:
 
 
 def _try_import_onnx() -> Tuple[bool, str]:
+    import traceback
+    details: List[str] = []
+    ok = True
     try:
         import onnx  # type: ignore
-        _ = getattr(onnx, "version", None)
-        return True, "ok"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+        details.append(f"onnx.version: {getattr(onnx, 'version', 'unknown')}")
+    except Exception:
+        ok = False
+        details.append("onnx import failed:\n" + traceback.format_exc())
+    try:
+        import onnxruntime as ort  # type: ignore
+        details.append(f"onnxruntime: {getattr(ort, '__version__', 'unknown')}")
+        try:
+            details.append(f"providers: {ort.get_available_providers()}") # type: ignore[attr-defined]
+        except Exception:
+            details.append("providers query failed:\n" + traceback.format_exc())
+    except Exception:
+        ok = False
+        details.append("onnxruntime import failed:\n" + traceback.format_exc())
+    return ok, (" \n".join(details) if not ok else "ok")
 
 
 def _repair_onnx_stack() -> None:
@@ -290,6 +305,17 @@ def _preflight_and_repair_onnx_once() -> bool:
         print("ONNX environment: OK (validated)")
     else:
         print(f"ONNX environment not usable after auto-repair. See log: {osc8_link(_DIAG_LOG_NAME, _diag_log_path())}")
+        # Echo tail of the diagnostics to the terminal for immediate visibility
+        try:
+            if _ECHO_ONNX_DIAG:
+                log = _diag_log_path()
+                if log.exists():
+                    tail = log.read_text(encoding="utf-8", errors="ignore").splitlines()[-200:]
+                    print("\n--- _onnx_diagnostics.txt (tail) ---")
+                    print("\n".join(tail))
+                    print("--- end diagnostics ---\n")
+        except Exception:
+            pass
     return ok
 
 
