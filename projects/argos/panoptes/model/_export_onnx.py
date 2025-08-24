@@ -99,7 +99,17 @@ def _parse_ver_tuple(s: str) -> Tuple[int, int, int]:
 
 
 def _ensure_export_toolchain() -> None:
-    # Ultralytics pinned to range that works for this project
+    """
+    Ensure a working ONNX export toolchain across clean machines.
+
+    - ultralytics pinned to a known-good range for this project
+    - numpy pinned to <2 to avoid ABI/DLL issues with older compiled wheels
+    - onnx pinned to a safe range
+    - onnxruntime pinned by Python version (Py3.9 needs 1.19.2), and by OS
+    - onnxsim pinned to a safe range for simplify=True
+    - onnxslim pinned to <0.1.60 (avoid newer changes)
+    """
+    # Ultralytics (range that matches this project’s assumptions)
     need_ultra = False
     if not _have("ultralytics"):
         need_ultra = True
@@ -111,7 +121,6 @@ def _ensure_export_toolchain() -> None:
                 from importlib_metadata import version as _ver  # type: ignore
             except Exception:
                 _ver = None  # type: ignore
-
         try:
             v: Optional[str] = cast(Optional[str], _ver("ultralytics") if _ver else None)
             if v is not None:
@@ -122,23 +131,36 @@ def _ensure_export_toolchain() -> None:
                 need_ultra = True
         except Exception:
             need_ultra = True
-
     if need_ultra:
         _pip_quiet("ultralytics>=8.3,<8.6")
 
-    # ONNX dependencies – ensure correct versions
+    # NumPy (avoid 2.x ABI issues with many wheels on Windows/clean machines)
+    try:
+        import numpy as _np  # type: ignore
+        nvt = _parse_ver_tuple(getattr(_np, "__version__", "0.0.0"))
+        if nvt >= (2, 0, 0):
+            _pip_quiet("numpy<2")
+    except Exception:
+        # if numpy missing, let onnx bring one; enforce cap anyway
+        _pip_quiet("numpy<2")
+
+    # ONNX core
     if not _have("onnx"):
         _pip_quiet("onnx>=1.14,<1.18")
 
+    # ONNX Runtime (per Python + OS)
     if not _have("onnxruntime"):
         if sys.version_info < (3, 10):
-            _pip_quiet("onnxruntime==1.19.2")        # use older ORT on Py3.9
+            _pip_quiet("onnxruntime==1.19.2")
         elif os.name == "nt":
-            _pip_quiet("onnxruntime>=1.22,<1.23")    # Windows Py3.10+ (avoid 1.23+ on Win)
+            _pip_quiet("onnxruntime>=1.22,<1.23")
         else:
-            _pip_quiet("onnxruntime>=1.22,<1.24")    # Linux/macOS Py3.10+
+            _pip_quiet("onnxruntime>=1.22,<1.24")
 
-    # Pin ONNX-Slim to safe version range (avoid newer incompatible builds)
+    # Simplification helpers
+    if not _have("onnxsim"):
+        _pip_quiet("onnxsim>=0.4.17,<0.5")
+    # Keep onnxslim capped (avoid newer)
     _pip_quiet("onnxslim>=0.1.59,<0.1.60")
 
 
@@ -239,6 +261,43 @@ def _status_cm(label: str) -> ContextManager[Any]:
         return _NoopSpinner()
 
 
+def _local_onnx_shadowing() -> Optional[Path]:
+    """
+    Detect a local onnx.py that would shadow the real 'onnx' package.
+    """
+    try:
+        here = Path.cwd()
+        cand = here / "onnx.py"
+        return cand if cand.exists() else None
+    except Exception:
+        return None
+
+
+def _preflight_onnx_stack() -> None:
+    """
+    Try importing onnx and report actionable hints for common failure modes.
+    """
+    shadow = _local_onnx_shadowing()
+    if shadow is not None:
+        # Best-effort console hint; do not raise
+        print(f"⚠️  Found local file that shadows 'onnx': {shadow}. Rename it to avoid import errors.")
+    try:
+        import onnx  # type: ignore
+        _ = getattr(onnx, "version", None)
+    except Exception as e:
+        msg = str(e)
+        if "onnx_cpp2py_export" in msg or "DLL load failed" in msg:
+            print("⚠️  ONNX import failed (likely missing Microsoft Visual C++ Redistributable or NumPy ABI mismatch).")
+            print("    • Install 'Microsoft Visual C++ Redistributable for VS 2015–2022 (x64)' and ensure NumPy < 2.")
+        else:
+            print(f"⚠️  ONNX import problem detected: {msg}")
+
+
+def _candidate_opsets() -> List[int]:
+    # Try newer first, then back off to older opsets that YOLO8 graphs accept.
+    return [19, 17, 12]
+
+
 def _export_one(arg: str) -> Tuple[Path, str]:
     """
     Export ONNX for *arg*.
@@ -275,6 +334,8 @@ def _export_one(arg: str) -> Tuple[Path, str]:
     if not has_yolo or YOLO is None:
         return (target, "failed")
 
+    _preflight_onnx_stack()
+
     with _cd(dst):
         src_pt_path: Optional[Path] = None
         if (p.suffix.lower() == ".pt") and p.exists():
@@ -293,28 +354,41 @@ def _export_one(arg: str) -> Tuple[Path, str]:
                         shutil.copy2(ck, canon_pt)
 
                 with _status_cm("export onnx"), _silence_stdio():
-                    try:
-                        YOLO(str(canon_pt)).export(  # type: ignore[call-arg]
-                            format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu"
-                        )
-                    except Exception:
-                        try:
-                            YOLO(str(canon_pt)).export(  # type: ignore[call-arg]
-                                format="onnx", dynamic=True, simplify=False, imgsz=640, opset=12, device="cpu"
-                            )
-                        except Exception:
-                            YOLO(str(canon_pt)).export(  # type: ignore[call-arg]
-                                format="onnx", dynamic=False, simplify=False, imgsz=640, opset=12, device="cpu"
-                            )
+                    exported = False
+                    # Try a small matrix of robust options: opset 19→17→12; dynamic/simplify fallbacks.
+                    for ops in _candidate_opsets():
+                        for (dyn, simp) in ((True, True), (True, False), (False, False)):
+                            try:
+                                YOLO(str(canon_pt)).export(  # type: ignore[call-arg]
+                                    format="onnx",
+                                    dynamic=dyn,
+                                    simplify=simp,
+                                    imgsz=640,
+                                    opset=ops,
+                                    device="cpu",
+                                )
+                                # Success if target exists (or Ultralytics wrote under runs/)
+                                if target.exists() and _validate_weight(target):
+                                    exported = True
+                                    break
+                                cand = _latest_exported_onnx()
+                                if cand and cand.exists():
+                                    shutil.copy2(cand, target)
+                                if target.exists() and _validate_weight(target):
+                                    exported = True
+                                    break
+                            except Exception:
+                                continue
+                        if exported:
+                            break
 
+                # Validate
                 if target.exists() and _validate_weight(target):
                     action = "exported"
                 else:
-                    cand = _latest_exported_onnx()
-                    if cand and cand.exists():
-                        shutil.copy2(cand, target)
-                    action = "exported" if (target.exists() and _validate_weight(target)) else "failed"
+                    action = "failed"
 
+                # Tidy transient outputs
                 try:
                     shutil.rmtree(dst / "runs", ignore_errors=True)
                 except Exception:
