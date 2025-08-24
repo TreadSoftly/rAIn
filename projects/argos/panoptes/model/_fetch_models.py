@@ -1,7 +1,8 @@
-# \rAIn\projects\argos\panoptes\model\_fetch_models.py
+# projects/argos/panoptes/model/_fetch_models.py
 from __future__ import annotations
 
 import glob
+import importlib.util
 import json
 import os
 import shutil
@@ -29,6 +30,7 @@ from typing import (
 
 import typer
 
+
 # ---------------------------------------------------------------------
 # Minimal no-op spinner (works with "with ... as sp: sp.update(...)")
 # ---------------------------------------------------------------------
@@ -49,10 +51,7 @@ class _NoopSpinner:
 
 
 # ---------------------------------------------------------------------
-# Halo-based progress (Panoptes)
-# - Use a local Protocol to avoid "unknown type" warnings on Spinner
-# - Provide a Path-safe osc8 wrapper
-# - Provide no-op fallbacks if the package isn't available
+# Halo-based progress (Panoptes) fallbacks + Path-safe osc8 wrapper
 # ---------------------------------------------------------------------
 class _ProgressLike(Protocol):
     def update(self, **kwargs: Any) -> Any: ...
@@ -66,11 +65,10 @@ class _ProgressLike(Protocol):
 
 
 try:
-    from panoptes.progress import (  # type: ignore[reportMissingTypeStubs]
-        percent_spinner as _percent_spinner,
-        simple_status as _simple_status,
-        osc8 as _osc8_raw,
-    )
+    # Panoptes progress helpers may not have type stubs
+    from panoptes.progress import osc8 as _osc8_raw  # type: ignore[reportMissingTypeStubs]
+    from panoptes.progress import percent_spinner as _percent_spinner  # type: ignore[reportMissingTypeStubs]
+    from panoptes.progress import simple_status as _simple_status  # type: ignore[reportMissingTypeStubs]
 
     def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _percent_spinner(*args, **kwargs)  # type: ignore[misc]
@@ -91,40 +89,87 @@ except Exception:  # pragma: no cover
 
 
 def osc8_link(label: str, target: str | Path) -> str:
-    """
-    Safe wrapper so callers can pass either str or Path for 'target',
-    while deferring to Panoptes' osc8() implementation.
-    """
     try:
         return _osc8_raw(label, str(target))
     except Exception:
         return str(target)
 
 
-# Our byte-accurate downloader (works with a .update(total=..., count=..., current=...))
+# Our byte-accurate downloader (works with .update(total=..., count=..., current=...))
 try:
-    from panoptes.progress.integrations.download_progress import download_url  # type: ignore
+    from panoptes.progress.integrations.download_progress import download_url  # type: ignore[reportMissingTypeStubs]
 except Exception:
     download_url = None  # type: ignore[assignment]
+
 
 # ---------------------------------------------------------------------
 # Resolve model directory from registry (fallback to repo path)
 # ---------------------------------------------------------------------
 try:
-    from panoptes.model_registry import MODEL_DIR as _REG_MODEL_DIR  # type: ignore
+    from panoptes.model_registry import MODEL_DIR as _REG_MODEL_DIR  # type: ignore[reportMissingTypeStubs]
     _registry_model_dir: Optional[Path] = Path(_REG_MODEL_DIR)  # type: ignore[arg-type]
 except Exception:
     _registry_model_dir = None
 
 MODEL_DIR: Path = _registry_model_dir or (Path(__file__).resolve().parents[2] / "panoptes" / "model")
 
+
+# ---------------------------------------------------------------------
+# Auto-install export deps (avoid importing libs that lack type stubs)
+# ---------------------------------------------------------------------
+def _have(mod: str) -> bool:
+    try:
+        return importlib.util.find_spec(mod) is not None
+    except Exception:
+        return False
+
+
+def _pip_quiet(*pkgs: str) -> None:
+    if not pkgs:
+        return
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--no-input", "--quiet", *pkgs],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        # best-effort; runtime will still try fallbacks
+        pass
+
+
+def _ensure_export_toolchain() -> None:
+    """
+    Idempotently ensure ultralytics + onnx toolchain without importing
+    untyped libs (prevents Pyright 'missing stub' and 'unused import' noise).
+    """
+    # Keep versions conservative & Py3.12-friendly
+    if not _have("ultralytics"):
+        _pip_quiet("ultralytics>=8.3.0")
+    if not _have("onnx"):
+        _pip_quiet("onnx>=1.14,<1.18")
+    if not _have("onnxruntime"):
+        # 1.22+ generally fine; pick ranges that work across platforms
+        if os.name == "nt":
+            _pip_quiet("onnxruntime>=1.22,<1.24")
+        else:
+            _pip_quiet("onnxruntime>=1.22,<1.24")
+    if not _have("onnxslim"):
+        _pip_quiet("onnxslim<0.1.59")
+
+
+# Ensure deps before we try to import YOLO (import once; no reassignment)
+_ensure_export_toolchain()
+
 # Ultralytics (used to export ONNX and as last-resort fetcher)
 has_yolo: bool
 try:
     from ultralytics import YOLO as _YOLO  # type: ignore[reportMissingTypeStubs]
+
+    # silence Ultralytics logger; we print succinct logs ourselves
     try:
-        # Keep Ultralytics quiet; we print our own succinct logs.
-        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
+        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore[reportMissingTypeStubs]
         _rem = getattr(_ULTRA_LOGGER, "remove", None)
         if callable(_rem):
             _rem()
@@ -141,12 +186,14 @@ except Exception:
     _YOLO = None  # type: ignore[assignment]
     has_yolo = False
 
-YOLO = _YOLO
+YOLO = _YOLO  # IMPORTANT: assign once; never reassign an ALL-CAPS name
+
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 
 # Where the official assets live (override with ULTRA_ASSETS_BASE if needed)
 ASSETS_BASE = os.getenv("ULTRA_ASSETS_BASE", "https://github.com/ultralytics/assets/releases/download/v8.3.0").rstrip("/")
+
 
 # ---------------------------------------------------------------------
 # Packs / naming
@@ -207,6 +254,7 @@ DEFAULT_PACK: List[str] = [
     "yolo11n-obb.onnx",
     "yolo11s-obb.onnx",
 ]
+
 
 # ---------------------------------------------------------------------
 # Small helpers (naming, UX, links)
@@ -344,17 +392,13 @@ def _latest_exported_onnx() -> Optional[Path]:
 
 
 # ---------------------------------------------------------------------
-# Spinner adapters (byte progress -> single-line UX without touching item totals)
+# Spinner adapter (byte progress → single-line UX)
 # ---------------------------------------------------------------------
 class _DownloadSpinnerAdapter:
     """
-    Adapter so download_progress can emit byte-accurate updates without
-    breaking the global item-based percent displayed by percent_spinner.
-
-    It translates update(total=<bytes>, count=<bytes_done>, current=<file>)
-    into spinner.update(current=<file>, job="dl X/Y", model=<file>) while preserving
-    spinner's [DONE x/y] summary of *items*.
+    Adapts byte-accurate updates into spinner.update(...) without disturbing item totals.
     """
+
     def __init__(self, spinner: _ProgressLike, *, items_total: int, items_done: int, label: Optional[str] = None) -> None:
         self.spinner = spinner
         self.items_total = int(max(1, items_total))
@@ -397,18 +441,13 @@ class _DownloadSpinnerAdapter:
 
 
 # ---------------------------------------------------------------------
-# Fetch logic (uses percent_spinner for global item progress)
+# Fetch logic
 # ---------------------------------------------------------------------
 def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_total: int, items_done: int) -> Tuple[str, str]:
     """
     Obtain *name* into *dst* and return (basename, action).
 
-    Possible actions:
-    • "present"   - already existed in dst
-    • "download"  - fetched via direct URL (Argos progress)
-    • "copied"    - YOLO fetched elsewhere; we copied into dst
-    • "exported"  - exported ONNX from a matching .pt
-    • "failed"    - nothing worked
+    Actions: "present" | "download" | "copied" | "exported" | "failed"
     """
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
@@ -435,15 +474,11 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         try:
             ctx: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
             with ctx:
-                if spinner is not None:
-                    adapter = _DownloadSpinnerAdapter(
-                        spinner,
-                        items_total=items_total,
-                        items_done=items_done,
-                        label=base,
-                    )
-                else:
-                    adapter = None
+                adapter = (
+                    _DownloadSpinnerAdapter(spinner, items_total=items_total, items_done=items_done, label=base)
+                    if spinner
+                    else None
+                )
                 download_url(_asset_url_for(base), str(target), adapter)  # type: ignore[arg-type]
             if _validate_weight(target):
                 return (target.name, "download")
@@ -452,7 +487,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         except Exception:
             pass
 
-    # 2) YOLO as a last-resort fetcher for .pt (silenced)
+    # 2) YOLO as last-resort fetcher for .pt (silenced)
     if base.lower().endswith(".pt") and has_yolo and YOLO is not None:
         try:
             if spinner is not None:
@@ -481,20 +516,15 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
 
         # Ensure the .pt exists (prefer our downloader)
         if not pt_path.exists() or not _validate_weight(pt_path):
-            # try direct
             if download_url is not None:
                 try:
                     ctx2: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
                     with ctx2:
-                        if spinner is not None:
-                            adapter2 = _DownloadSpinnerAdapter(
-                                spinner,
-                                items_total=items_total,
-                                items_done=items_done,
-                                label=pt_name,
-                            )
-                        else:
-                            adapter2 = None
+                        adapter2 = (
+                            _DownloadSpinnerAdapter(spinner, items_total=items_total, items_done=items_done, label=pt_name)
+                            if spinner
+                            else None
+                        )
                         download_url(_asset_url_for(pt_name), str(pt_path), adapter2)  # type: ignore[arg-type]
                 except Exception:
                     pass
@@ -520,13 +550,15 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                 if spinner is not None:
                     spinner.update(current=base, job="export onnx", model=pt_name)
                 with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
+                    # Robust 3-step fallback:
+                    # (1) dynamic + simplify   → (2) dynamic + no-simplify   → (3) static + no-simplify
                     try:
-                        YOLO(str(pt_path)).export(format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu")  # type: ignore
+                        YOLO(str(pt_path)).export(format="onnx", dynamic=True,  simplify=True,  imgsz=640, opset=12, device="cpu")  # type: ignore
                     except Exception:
                         try:
-                            YOLO(str(pt_path)).export(format="onnx", dynamic=False, simplify=True, imgsz=640, opset=12, device="cpu")  # type: ignore
+                            YOLO(str(pt_path)).export(format="onnx", dynamic=True,  simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
                         except Exception:
-                            YOLO(str(pt_path)).export(format="onnx", simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
+                            YOLO(str(pt_path)).export(format="onnx", dynamic=False, simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
 
                 # success path (a)
                 if target.exists() and _validate_weight(target):
@@ -554,22 +586,14 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
 def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
     """
     Fetch all *names* into MODEL_DIR with an aggregated progress view.
-
-    The single-line spinner shows:
-    • [File:<current>] [Job:<phase>] [Model:<weight>]  [DONE: i/N] [PROGRESS: %]
-    Where i/N represents *items*, while download bytes appear in Job.
     """
     results: List[Tuple[str, str]] = []
     failed: List[str] = []
-
-    # No fancy environment probing here; percent_spinner already handles TTY/CI.
     with percent_spinner(prefix="FETCH MODELS") as sp:
         total = len(names)
         sp.update(total=max(1, total), count=0)
-
         done = 0
         for nm in names:
-            # Per-item
             try:
                 sp.update(current=nm, job="start", model=nm)
             except Exception:
@@ -593,7 +617,7 @@ def _write_manifest(selected: List[str], installed: List[str]) -> Path:
     """
     Write a user-agnostic manifest:
       • model_dir is stored *relative* to projects/argos to avoid absolute user paths
-    • paths use forward slashes for cross-platform consistency
+      • paths use forward slashes for cross-platform consistency
     """
     repo_root = Path(__file__).resolve().parents[2]  # .../projects/argos
     rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
@@ -698,7 +722,6 @@ def _menu() -> int:
         pick = typer.prompt("Pick [0-4, ? for help]", default="1 or ?").strip().lower()
         if pick in {"?", "h", "help"}:
             typer.echo("Typing numbers or names are fine in the builder.")
-            typer.echo("What you are chosing to download are model weights for types of visual detection that Argos can perform.")
             typer.echo("YOLO models are named by version (v8, v11, v12), size (n/s/m/l/x), task (det/seg/pose/cls/obb), and format (.pt/.onnx).")
             typer.echo("Choosing the default pack (1) is a good starting point for most users.")
             continue
@@ -796,7 +819,7 @@ def _ask_custom() -> List[str]:
 
 
 # ---------------------------------------------------------------------
-# Quick smoke (progress-enabled) — now clears results in place (no backups)
+# Quick smoke (progress-enabled) — clears results in place (no backups)
 # ---------------------------------------------------------------------
 def _quick_check() -> None:
     if not typer.confirm("Run a quick smoke check now?", default=False):
@@ -840,19 +863,17 @@ def _quick_check() -> None:
                 else:
                     shutil.rmtree(p, ignore_errors=True)
             except Exception:
-                # best-effort cleanup; continue even if some files are locked
                 pass
 
     # Expected items = number of raw inputs (bounded to ≥1)
-    # Match CLI’s notion of supported inputs for a better initial estimate
     try:
-        from panoptes import cli as _cli  # type: ignore
+        from panoptes import cli as _cli  # type: ignore[reportMissingTypeStubs]
         _img: Set[str] = set(cast(Iterable[str], getattr(_cli, "_IMAGE_EXTS", ())))  # type: ignore[misc]
         _vid: Set[str] = set(cast(Iterable[str], getattr(_cli, "_VIDEO_EXTS", ())))  # type: ignore[misc]
         exts: Set[str] = _img | _vid
     except Exception:
-        exts: Set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif",
-                          ".mp4", ".mov", ".avi", ".mkv", ".webm"}
+        exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif",
+                ".mp4", ".mov", ".avi", ".mkv", ".webm"}
     expected = 1
     if inp.lower() == "all":
         expected = sum(1 for p in raw_dir.glob("*") if p.suffix.lower() in exts)
