@@ -85,18 +85,20 @@ function Install-VcRedistIfMissing {
     if ($p.ExitCode -ne 0) { throw "vc_redist failed with code $($p.ExitCode)" }
   }
   catch {
-    throw "Could not install the VC++ Redistributable automatically. Please run this script as an Administrator or install the 'Microsoft Visual C++ 2015–2022 Redistributable (x64)' manually, then try again. (Error: $($_.Exception.Message))"
+    throw "Could not install the VC++ Redistributable automatically. Please run this script as an Administrator or install the 'Microsoft Visual C++ 2015-2022 Redistributable (x64)' manually, then try again. (Error: $($_.Exception.Message))"
   }
   finally {
     Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue | Out-Null
   }
 }
 
-# Auto-elevate ONLY if we need VC++ and we're not admin yet
+# Auto-elevate ONLY if we need VC++ and we are not admin yet
 if ($env:OS -eq 'Windows_NT' -and -not (Test-VcRuntimePresent) -and -not (Test-IsAdmin)) {
   if (-not $env:RAIN_ELEVATED) {
     Write-Host "Elevation needed to install VC++ runtime. Requesting Administrator privileges..." -ForegroundColor Yellow
-    $quotedScript = '"' + $PSCommandPath + '"'
+    $scriptPathToRun = $PSCommandPath
+    if (-not $scriptPathToRun) { $scriptPathToRun = $MyInvocation.MyCommand.Path }
+    $quotedScript = '"' + $scriptPathToRun + '"'
     $argList = @("-ExecutionPolicy", "Bypass", "-NoProfile", "-File", $quotedScript)
     if ($BuildArgs -and $BuildArgs.Count -gt 0) { $argList += $BuildArgs }
     $env:RAIN_ELEVATED = "1"
@@ -171,7 +173,7 @@ function Install-Python {
     }
     Start-Sleep -Seconds 2
     if (-not (Find-Python) -or -not (Test-PythonOk)) {
-      throw "Python 3.9–3.12 required but not located after installation."
+      throw "Python 3.9-3.12 required but not located after installation."
     }
     return
   }
@@ -181,22 +183,22 @@ function Install-Python {
     if ($brew) {
       & brew install python@3.12
       if ($LASTEXITCODE -ne 0) { & brew install python@3.11 }
-      if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9–3.12 not found after Homebrew install." }
+      if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9-3.12 not found after Homebrew install." }
       return
     }
-    else { throw "Homebrew not found. Install Homebrew or Python 3.9–3.12 and re-run." }
+    else { throw "Homebrew not found. Install Homebrew or Python 3.9-3.12 and re-run." }
   }
 
   if ($env:OS -ne 'Windows_NT' -and $(Get-Command uname -ErrorAction SilentlyContinue)) {
     if (Get-Command apt-get -ErrorAction SilentlyContinue) { & apt-get update; & apt-get install -y python3 }
     elseif (Get-Command dnf -ErrorAction SilentlyContinue) { & dnf install -y python3 }
     elseif (Get-Command yum -ErrorAction SilentlyContinue) { & yum install -y python3 }
-    else { throw "No supported package manager found. Please install Python 3.9–3.12 and re-run." }
-    if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9–3.12 not found after package install." }
+    else { throw "No supported package manager found. Please install Python 3.9-3.12 and re-run." }
+    if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9-3.12 not found after package install." }
     return
   }
 
-  throw "Unsupported OS. Please install Python 3.9–3.12 and re-run."
+  throw "Unsupported OS. Please install Python 3.9-3.12 and re-run."
 }
 
 # ---------------- Main bootstrap ----------------
@@ -207,12 +209,12 @@ if (-not (Find-Python) -or -not (Test-PythonOk)) {
 # Enforce 64-bit Python for ONNX/DLL compatibility
 $pyArch = Get-PythonArch
 if ($pyArch -ne '64bit') {
-  Write-Host "Detected $pyArch Python. Installing/using 64‑bit Python for ONNX compatibility..." -ForegroundColor Yellow
+  Write-Host "Detected $pyArch Python. Installing/using 64-bit Python for ONNX compatibility..." -ForegroundColor Yellow
   Install-Python
   if (-not (Find-Python)) { throw "Unable to resolve Python after installation." }
 }
 
-# Ensure VC++ runtime only if missing (elevation has already been handled above if needed)
+# Ensure VC++ runtime only if missing (elevation handled above if needed)
 if ($env:OS -eq 'Windows_NT') { Install-VcRedistIfMissing }
 
 # --- Bootstrap the virtual environment ---
