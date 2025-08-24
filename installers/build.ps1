@@ -174,6 +174,3 @@ $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 # --- Launch the *model selector* (user picks pack, fetches, exports, THEN smoke check prompts once) ---
 & $vpy -m panoptes.model._fetch_models @BuildArgs
 if ($LASTEXITCODE -ne 0) { throw "model selector failed ($LASTEXITCODE)" }
-
-# (No cleanup required; leaving $env:PIP_CONFIG_FILE in place for this session keeps
-# subsequent invocations quiet as well. It lives in %TEMP% and is safe to ignore.)
