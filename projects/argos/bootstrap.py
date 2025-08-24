@@ -544,6 +544,20 @@ out_path.write_text(json.dumps({'ok': ok}), encoding='utf-8')
         if got < len(pt_missing):
             _print("⚠️  Some *.pt weights could not be fetched (network/rate-limit?).")
 
+    # **Ensure ONNX export toolchain is available** (onnx, onnxruntime, onnxslim)
+    if onnx_missing:
+        _print("→ ensuring ONNX export toolchain …")
+        if not _module_present("onnx"):
+            _run([str(VPY), "-m", "pip", "install", "onnx>=1.14,<1.18"], check=True, capture=False)
+        if not _module_present("onnxruntime"):
+            if sys.version_info < (3, 10):
+                _run([str(VPY), "-m", "pip", "install", "onnxruntime==1.19.2"], check=True, capture=False)
+            elif os.name == "nt":
+                _run([str(VPY), "-m", "pip", "install", "onnxruntime>=1.22,<1.23"], check=True, capture=False)
+            else:
+                _run([str(VPY), "-m", "pip", "install", "onnxruntime>=1.22,<1.24"], check=True, capture=False)
+        _run([str(VPY), "-m", "pip", "install", "onnxslim>=0.1.59,<0.1.60"], check=True, capture=False)
+
     # export *.onnx from matching *.pt (work inside model_dir; avoid repo-root 'runs/')
     if onnx_missing:
         _print(f"→ exporting {len(onnx_missing)} *.onnx from matching *.pt …")
@@ -584,7 +598,11 @@ for onnx_name in sys.argv[1:-2]:
                 outp = Path(m.export(format='onnx', dynamic=True, simplify=False, imgsz=640, opset=12, device='cpu'))
                 outp_path = outp
             except Exception:
-                outp_path = None
+                try:
+                    outp = Path(m.export(format='onnx', dynamic=False, simplify=False, imgsz=640, opset=12, device='cpu'))
+                    outp_path = outp
+                except Exception:
+                    outp_path = None
         target = dst / onnx_name
         if outp_path and outp_path.exists() and outp_path.resolve() != target.resolve():
             shutil.copy2(outp_path, target)

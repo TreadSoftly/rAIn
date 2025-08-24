@@ -126,11 +126,20 @@ def _ensure_export_toolchain() -> None:
     if need_ultra:
         _pip_quiet("ultralytics>=8.3,<8.6")
 
+    # ONNX dependencies – ensure correct versions
     if not _have("onnx"):
         _pip_quiet("onnx>=1.14,<1.18")
+
     if not _have("onnxruntime"):
-        _pip_quiet("onnxruntime>=1.22,<1.24")
-    _pip_quiet("onnxslim>=0.1.59")
+        if sys.version_info < (3, 10):
+            _pip_quiet("onnxruntime==1.19.2")        # use older ORT on Py3.9
+        elif os.name == "nt":
+            _pip_quiet("onnxruntime>=1.22,<1.23")    # Windows Py3.10+ (avoid 1.23+ on Win)
+        else:
+            _pip_quiet("onnxruntime>=1.22,<1.24")    # Linux/macOS Py3.10+
+
+    # Pin ONNX-Slim to safe version range (avoid newer incompatible builds)
+    _pip_quiet("onnxslim>=0.1.59,<0.1.60")
 
 
 # Ensure deps before we try to import YOLO
