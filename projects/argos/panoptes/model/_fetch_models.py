@@ -147,14 +147,104 @@ def _parse_ver_tuple(s: str) -> Tuple[int, int, int]:
     return nums[0], nums[1], nums[2]
 
 
+def _decide_opset(torch_version_str: Optional[str]) -> int:
+    """
+    Heuristic to pick a safe default opset for a given torch version:
+    - torch >= 2.4 → opset 19
+    - torch >= 2.2 → opset 17
+    - else         → opset 12
+    """
+    tv = _parse_ver_tuple(torch_version_str or "0.0.0")
+    if tv >= (2, 4, 0):
+        return 19
+    if tv >= (2, 2, 0):
+        return 17
+    return 12
+
+
+def _candidate_opsets(preferred: int) -> List[int]:
+    """
+    Try the preferred opset first, then back off to other commonly supported ones.
+    """
+    order = [preferred, 19, 17, 12]
+    seen: Set[int] = set()
+    out: List[int] = []
+    for o in order:
+        if o not in seen:
+            seen.add(o)
+            out.append(o)
+    return out
+
+
+def _local_onnx_shadowing() -> List[Path]:
+    """
+    Detect local files that would shadow the real 'onnx' package.
+    """
+    bad: List[Path] = []
+    try:
+        cwd = Path.cwd()
+        if (cwd / "onnx.py").exists():
+            bad.append(cwd / "onnx.py")
+        if (cwd / "onnx").is_dir():
+            bad.append(cwd / "onnx")
+        if sys.path:
+            p0 = Path(sys.path[0])
+            if (p0 / "onnx.py").exists():
+                bad.append(p0 / "onnx.py")
+            if (p0 / "onnx").is_dir():
+                bad.append(p0 / "onnx")
+    except Exception:
+        pass
+    return bad
+
+
+def _preflight_onnx_stack() -> None:
+    """
+    Try importing onnx and report actionable hints for common failure modes.
+    """
+    bad = _local_onnx_shadowing()
+    if bad:
+        try:
+            typer.secho("\n⚠️  Local files shadow 'onnx' and can break imports:", fg="yellow")
+            for b in bad:
+                typer.echo(f"   - {b}")
+            typer.secho("   Rename/remove those and retry.\n", fg="yellow")
+        except Exception:
+            pass
+    try:
+        import onnx  # type: ignore
+        _ = getattr(onnx, "version", None)
+    except Exception as e:
+        msg = str(e)
+        try:
+            typer.secho(f"⚠️  ONNX import problem detected: {msg}", fg="yellow")
+        except Exception:
+            pass
+
+
 def _ensure_export_toolchain() -> None:
     """
     Idempotently ensure a working export toolchain:
-      - ultralytics pinned to the range that works on your dev box:  >=8.3,<8.6
-      - onnx >=1.14,<1.18
-      - onnxruntime >=1.22,<1.24
-      - onnxslim >=0.1.59  (important for simplify=True to succeed)
+    - numpy < 2 (avoid ABI/DLL issues with older compiled wheels)
+    - ultralytics pinned to the range that works on your dev box:  >=8.3,<8.6
+    - onnx >=1.14,<1.18
+    - onnxruntime:
+          * Python <3.10 → 1.19.2
+          * Windows (Py>=3.10) → >=1.22,<1.23
+          * Linux/macOS (Py>=3.10) → >=1.22,<1.24
+    - onnxslim >=0.1.59,<0.1.60  (keep simplifier stable)
     """
+    # NumPy first, so later wheels resolve against 1.x ABI
+    need_numpy_cap = True
+    try:
+        import numpy as _np  # type: ignore
+        nvt = _parse_ver_tuple(getattr(_np, "__version__", "0.0.0"))
+        need_numpy_cap = nvt >= (2, 0, 0)
+    except Exception:
+        pass
+    if need_numpy_cap:
+        _pip_quiet("numpy<2")
+
     # Ultralytics
     need_ultra = False
     if not _have("ultralytics"):
@@ -167,7 +257,6 @@ def _ensure_export_toolchain() -> None:
                 from importlib_metadata import version as _ver  # type: ignore
             except Exception:
                 _ver = None  # type: ignore
-
         try:
             raw_v = _ver("ultralytics") if _ver else None  # type: ignore[call-arg]
             v: Optional[str] = raw_v if isinstance(raw_v, str) else None
@@ -186,10 +275,18 @@ def _ensure_export_toolchain() -> None:
     # ONNX bits (install/upgrade if missing)
     if not _have("onnx"):
         _pip_quiet("onnx>=1.14,<1.18")
+
+    # ONNX Runtime (per Python + OS)
     if not _have("onnxruntime"):
-        _pip_quiet("onnxruntime>=1.22,<1.24")
-    # Make sure simplifier is recent enough
-    _pip_quiet("onnxslim>=0.1.59")
+        if sys.version_info < (3, 10):
+            _pip_quiet("onnxruntime==1.19.2")
+        elif os.name == "nt":
+            _pip_quiet("onnxruntime>=1.22,<1.23")
+        else:
+            _pip_quiet("onnxruntime>=1.22,<1.24")
+
+    # Keep simplifier stable
+    _pip_quiet("onnxslim>=0.1.59,<0.1.60")
 
 
 # Ensure deps before import; keep Ultralytics quiet afterwards
@@ -522,7 +619,8 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
             pass
 
     # 2) YOLO last-resort fetcher for .pt (silenced)
-    if base.lower().endswith(".pt") and has_yolo and YOLO is not None:
+    has_yolo_local = has_yolo and (YOLO is not None)
+    if base.lower().endswith(".pt") and has_yolo_local:
         try:
             if spinner is not None:
                 spinner.update(current=base, job="ultralytics", model=base)
@@ -561,7 +659,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                 except Exception:
                     pass
 
-            if (not pt_path.exists() or not _validate_weight(pt_path)) and has_yolo and YOLO is not None:
+            if (not pt_path.exists() or not _validate_weight(pt_path)) and has_yolo_local:
                 try:
                     if spinner is not None:
                         spinner.update(current=pt_name, job="ultralytics", model=pt_name)
@@ -575,42 +673,61 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                 except Exception:
                     pass
 
-        # Export ONNX (three-level fallback)
-        if has_yolo and YOLO is not None and pt_path.exists() and _validate_weight(pt_path):
+        # Export ONNX (matrix with opset fallback + dynamic/simplify fallbacks)
+        if has_yolo_local and pt_path.exists() and _validate_weight(pt_path):
             try:
-                if spinner is not None:
-                    spinner.update(current=base, job="export onnx", model=pt_name)
+                _preflight_onnx_stack()
+
+                # Determine preferred opset from torch if available
+                try:
+                    import torch  # type: ignore
+                    preferred = _decide_opset(getattr(torch, "__version__", "0.0.0"))
+                except Exception:
+                    preferred = 12
+
                 with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
+                    exported = False
+                    for ops in _candidate_opsets(preferred):
+                        for (dyn, simp) in ((True, True), (True, False), (False, False)):
+                            try:
+                                YOLO(str(pt_path)).export(  # type: ignore
+                                    format="onnx",
+                                    dynamic=dyn,
+                                    simplify=simp,
+                                    imgsz=640,
+                                    opset=ops,
+                                    device="cpu",
+                                )
+                                # success path (a)
+                                if target.exists() and _validate_weight(target):
+                                    exported = True
+                                    break
+                                # success path (b): look under runs/
+                                cand = _latest_exported_onnx()
+                                if cand and cand.exists():
+                                    shutil.copy2(cand, target)
+                                if target.exists() and _validate_weight(target):
+                                    exported = True
+                                    break
+                            except Exception:
+                                # Try next combination
+                                continue
+                        if exported:
+                            break
+
+                # Validate and tidy up
+                if target.exists() and _validate_weight(target):
                     try:
-                        YOLO(str(pt_path)).export(  # type: ignore
-                            format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu"
-                        )
+                        shutil.rmtree(dst / "runs", ignore_errors=True)
                     except Exception:
-                        try:
-                            YOLO(str(pt_path)).export(  # type: ignore
-                                format="onnx", dynamic=True, simplify=False, imgsz=640, opset=12, device="cpu"
-                            )
-                        except Exception:
-                            YOLO(str(pt_path)).export(  # type: ignore
-                                format="onnx", dynamic=False, simplify=False, imgsz=640, opset=12, device="cpu"
-                            )
-
-                # success path (a)
-                if target.exists() and _validate_weight(target):
+                        pass
                     return (target.name, "exported")
-
-                # success path (b): look under runs/
-                cand = _latest_exported_onnx()
-                if cand and cand.exists():
+                else:
                     try:
-                        shutil.copy2(cand, target)
-                    finally:
-                        try:
-                            shutil.rmtree(dst / "runs", ignore_errors=True)
-                        except Exception:
-                            pass
-                if target.exists() and _validate_weight(target):
-                    return (target.name, "exported")
+                        shutil.rmtree(dst / "runs", ignore_errors=True)
+                    except Exception:
+                        pass
+
             except Exception:
                 pass
 
@@ -652,7 +769,7 @@ def _write_manifest(selected: List[str], installed: List[str]) -> Path:
     """
     Write a user-agnostic manifest:
       • model_dir is stored *relative* to projects/argos to avoid absolute user paths
-      • paths use forward slashes for cross-platform consistency
+    • paths use forward slashes for cross-platform consistency
     """
     repo_root = Path(__file__).resolve().parents[2]  # .../projects/argos
     rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
@@ -919,7 +1036,7 @@ def _quick_check() -> None:
     def _list_created() -> List[Path]:
         # Flat results dir; include files only
         return sorted([p for p in results_dir.glob("*") if p.is_file()],
-                      key=lambda p: p.name.lower())
+                    key=lambda p: p.name.lower())
 
     # Progress spinner bound to expected items
     with percent_spinner(prefix=f"ARGOS TESTING {task.upper()}") as sp:
@@ -954,9 +1071,9 @@ def _quick_check() -> None:
                     if delta > 0:
                         try:
                             sp.update(count=done_reported + delta,
-                                      current=(created[-1].name if created else "working"),
-                                      job="write",
-                                      model=task)
+                                    current=(created[-1].name if created else "working"),
+                                    job="write",
+                                    model=task)
                         except Exception:
                             pass
                         done_reported = n
@@ -977,9 +1094,9 @@ def _quick_check() -> None:
             if delta > 0:
                 try:
                     sp.update(count=done_reported + delta,
-                              current=(created[-1].name if created else "done"),
-                              job="finalize",
-                              model=task)
+                            current=(created[-1].name if created else "done"),
+                            job="finalize",
+                            model=task)
                 except Exception:
                     pass
                 done_reported = n

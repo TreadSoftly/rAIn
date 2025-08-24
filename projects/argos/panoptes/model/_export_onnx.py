@@ -98,6 +98,33 @@ def _parse_ver_tuple(s: str) -> Tuple[int, int, int]:
     return nums[0], nums[1], nums[2]
 
 
+def _decide_opset(torch_version_str: Optional[str]) -> int:
+    tv = _parse_ver_tuple(torch_version_str or "0.0.0")
+    if tv >= (2, 4, 0):
+        return 19
+    if tv >= (2, 2, 0):
+        return 17
+    return 12
+
+
+def _candidate_opsets() -> List[int]:
+    """
+    Determine the candidate opset order from installed torch if available.
+    Prefer the torch-based recommendation, then fall back to 19/17/12.
+    """
+    preferred = 12
+    try:
+        import torch  # type: ignore
+        preferred = _decide_opset(getattr(torch, "__version__", "0.0.0"))
+    except Exception:
+        pass
+    out: List[int] = []
+    for o in (preferred, 19, 17, 12):
+        if o not in out:
+            out.append(o)
+    return out
+
+
 def _ensure_export_toolchain() -> None:
     """
     Ensure a working ONNX export toolchain across clean machines.
@@ -109,6 +136,16 @@ def _ensure_export_toolchain() -> None:
     - onnxsim pinned to a safe range for simplify=True
     - onnxslim pinned to <0.1.60 (avoid newer changes)
     """
+    # NumPy (avoid 2.x ABI issues with many wheels on Windows/clean machines)
+    try:
+        import numpy as _np  # type: ignore
+        nvt = _parse_ver_tuple(getattr(_np, "__version__", "0.0.0"))
+        if nvt >= (2, 0, 0):
+            _pip_quiet("numpy<2")
+    except Exception:
+        # if numpy missing, let onnx bring one; enforce cap anyway
+        _pip_quiet("numpy<2")
+
     # Ultralytics (range that matches this project’s assumptions)
     need_ultra = False
     if not _have("ultralytics"):
@@ -133,16 +170,6 @@ def _ensure_export_toolchain() -> None:
             need_ultra = True
     if need_ultra:
         _pip_quiet("ultralytics>=8.3,<8.6")
-
-    # NumPy (avoid 2.x ABI issues with many wheels on Windows/clean machines)
-    try:
-        import numpy as _np  # type: ignore
-        nvt = _parse_ver_tuple(getattr(_np, "__version__", "0.0.0"))
-        if nvt >= (2, 0, 0):
-            _pip_quiet("numpy<2")
-    except Exception:
-        # if numpy missing, let onnx bring one; enforce cap anyway
-        _pip_quiet("numpy<2")
 
     # ONNX core
     if not _have("onnx"):
@@ -293,11 +320,6 @@ def _preflight_onnx_stack() -> None:
             print(f"⚠️  ONNX import problem detected: {msg}")
 
 
-def _candidate_opsets() -> List[int]:
-    # Try newer first, then back off to older opsets that YOLO8 graphs accept.
-    return [19, 17, 12]
-
-
 def _export_one(arg: str) -> Tuple[Path, str]:
     """
     Export ONNX for *arg*.
@@ -355,7 +377,7 @@ def _export_one(arg: str) -> Tuple[Path, str]:
 
                 with _status_cm("export onnx"), _silence_stdio():
                     exported = False
-                    # Try a small matrix of robust options: opset 19→17→12; dynamic/simplify fallbacks.
+                    # Try a small matrix of robust options: opset (torch‑guided), dynamic/simplify fallbacks.
                     for ops in _candidate_opsets():
                         for (dyn, simp) in ((True, True), (True, False), (False, False)):
                             try:
