@@ -9,27 +9,27 @@ $ErrorActionPreference = "Stop"
 
 # ---------- Progress-friendly environment for CLI runs ----------
 if (-not $env:TERM) { $env:TERM = 'xterm-256color' }
-$env:PYTHONUTF8        = '1'
-$env:PYTHONUNBUFFERED  = '1'
-$env:FORCE_COLOR       = '1'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONUNBUFFERED = '1'
+$env:FORCE_COLOR = '1'
 $env:PANOPTES_NESTED_PROGRESS = '1'
 $env:PANOPTES_PROGRESS_ACTIVE = '0'
 
 # Argos/Panoptes single-line progress (keep Python spinners tidy)
-$env:ARGOS_PROGRESS_STREAM        = 'stdout'
-$env:ARGOS_FORCE_PLAIN_PROGRESS   = '1'
-$env:ARGOS_PROGRESS_TAIL          = 'erase'
+$env:ARGOS_PROGRESS_STREAM = 'stdout'
+$env:ARGOS_FORCE_PLAIN_PROGRESS = '1'
+$env:ARGOS_PROGRESS_TAIL = 'erase'
 $env:ARGOS_PROGRESS_FINAL_NEWLINE = '0'
 
 # ---- Prefer DSHOW on Windows; keep MSMF disabled (works best on Win 10/11) ----
 if ($env:OS -eq 'Windows_NT') {
   if (-not $env:OPENCV_VIDEOIO_PRIORITY_DSHOW) { $env:OPENCV_VIDEOIO_PRIORITY_DSHOW = '1000' }
-  if (-not $env:OPENCV_VIDEOIO_PRIORITY_MSMF)  { $env:OPENCV_VIDEOIO_PRIORITY_MSMF  = '0' }
+  if (-not $env:OPENCV_VIDEOIO_PRIORITY_MSMF) { $env:OPENCV_VIDEOIO_PRIORITY_MSMF = '0' }
 }
 
 # Silence pip (prevents progress lines being interleaved)
 $env:PIP_PROGRESS_BAR = 'off'
-$env:PIP_NO_COLOR     = '1'
+$env:PIP_NO_COLOR = '1'
 try {
   $pipCfg = Join-Path $env:TEMP 'pip-singleline.ini'
   @"
@@ -40,14 +40,41 @@ disable-pip-version-check = true
 no-color = true
 "@ | Set-Content -LiteralPath $pipCfg -Encoding ASCII
   $env:PIP_CONFIG_FILE = $pipCfg
-} catch { }
+}
+catch { }
 
 # ANSI + UTF-8 out, where available
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 
+function Install-VcRedistIfMissing {
+  if ($env:OS -ne 'Windows_NT') { return }
+  try {
+    $sys = Join-Path $env:WINDIR 'System32'
+    $has1 = Test-Path -LiteralPath (Join-Path $sys 'vcruntime140.dll')
+    $has2 = Test-Path -LiteralPath (Join-Path $sys 'vcruntime140_1.dll')
+    $has3 = Test-Path -LiteralPath (Join-Path $sys 'msvcp140.dll')
+    if ($has1 -and $has2 -and $has3) { return }
+  }
+  catch { }
+  Write-Host "Installing Microsoft Visual C++ Redistributable (x64)..." -ForegroundColor Yellow
+  $tmp = Join-Path $env:TEMP 'vc_redist.x64.exe'
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $tmp
+    $args = '/quiet', '/norestart'
+    $p = Start-Process -FilePath $tmp -ArgumentList $args -PassThru -Wait
+    if ($p.ExitCode -ne 0) { throw "vc_redist failed with code $($p.ExitCode)" }
+  }
+  catch {
+    throw "Could not install VC++ Redistributable automatically: $($_.Exception.Message)"
+  }
+  finally {
+    Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue | Out-Null
+  }
+}
+
 function _Here {
-  if ($PSCommandPath)            { return (Split-Path -Parent $PSCommandPath) }
+  if ($PSCommandPath) { return (Split-Path -Parent $PSCommandPath) }
   if ($MyInvocation.MyCommand.Path) { return (Split-Path -Parent $MyInvocation.MyCommand.Path) }
   return (Get-Location).Path
 }
@@ -62,7 +89,8 @@ function Enable-GitLfs {
       & git -C $ROOT lfs install --local > $null 2>&1
       $env:GIT_LFS_SKIP_SMUDGE = '0'
       & git -C $ROOT lfs pull > $null 2>&1
-    } else {
+    }
+    else {
       Write-Host "⚠️  Git LFS not installed. Large files (models) may be missing."
       Write-Host "   Install Git LFS and re-run this command."
     }
@@ -77,7 +105,7 @@ function Install-OpenCvPackage {
     [Parameter(Mandatory)][string]$Vpy,
     [Parameter(Mandatory)][bool]$NeedsGui
   )
-  $want  = if ($NeedsGui) { 'opencv-python' } else { 'opencv-python-headless' }
+  $want = if ($NeedsGui) { 'opencv-python' } else { 'opencv-python-headless' }
   $avoid = if ($NeedsGui) { 'opencv-python-headless' } else { 'opencv-python' }
 
   & $Vpy -m pip show $want *>&1 | Out-Null
@@ -93,19 +121,19 @@ function Install-OpenCvPackage {
 }
 
 # ---------- Parse args ----------
-$proj      = $null
-$tokens    = New-Object System.Collections.Generic.List[string]
-$sawBuild  = $false
-$liveMode  = $false
-$foundL    = $false
-$foundV    = $false
+$proj = $null
+$tokens = New-Object System.Collections.Generic.List[string]
+$sawBuild = $false
+$liveMode = $false
+$foundL = $false
+$foundV = $false
 
 foreach ($a in ($ArgList | ForEach-Object { $_ })) {
   $la = $a.ToLowerInvariant()
-  if     ($la -in @('run','me')) { continue }
-  elseif ($la -in @('build','package','pack')) { $sawBuild = $true }
-  elseif ($la -in @('argos','argos:run','run:argos','argos:build','build:argos')) { $proj = 'argos' }
-  elseif ($la -in @('lv','livevideo','live','video','ldv','lvd')) { $liveMode = $true }
+  if ($la -in @('run', 'me')) { continue }
+  elseif ($la -in @('build', 'package', 'pack')) { $sawBuild = $true }
+  elseif ($la -in @('argos', 'argos:run', 'run:argos', 'argos:build', 'build:argos')) { $proj = 'argos' }
+  elseif ($la -in @('lv', 'livevideo', 'live', 'video', 'ldv', 'lvd')) { $liveMode = $true }
   else {
     if ($la -eq 'l') { $foundL = $true }
     if ($la -eq 'v') { $foundV = $true }
@@ -132,7 +160,7 @@ if ($tokens.Count -gt 0) {
   $filtered = New-Object System.Collections.Generic.List[string]
   foreach ($t in $tokens) {
     $k = $t.ToLowerInvariant()
-    if ($k -in @('--no-headless','-no-headless')) { continue }  # default is windowed already
+    if ($k -in @('--no-headless', '-no-headless')) { continue }  # default is windowed already
     $filtered.Add($t) | Out-Null
   }
   $tokens = $filtered
@@ -150,30 +178,6 @@ if (-not $proj) {
 
 Enable-GitLfs
 
-# ---- Normalize operation position: INPUT op  ->  op INPUT -------------------
-# Supported ops: d/detect, hm/heatmap, gj/geojson, classify/clf, pose/pse, obb/object
-$opsMap = @{
-  'd'='d'; 'detect'='d'; '-d'='d'; '--detect'='d';
-  'hm'='hm'; 'heatmap'='hm'; '-hm'='hm'; '--hm'='hm'; '-heatmap'='hm'; '--heatmap'='hm';
-  'gj'='gj'; 'geojson'='gj'; '-gj'='gj'; '--gj'='gj'; '-geojson'='gj'; '--geojson'='gj';
-  'classify'='classify'; 'clf'='classify';
-  'pose'='pose'; 'pse'='pose';
-  'obb'='obb'; 'object'='obb';
-}
-$opIdx = -1; $opNorm = $null
-for ($i=0; $i -lt $tokens.Count; $i++) {
-  $key = $tokens[$i].ToLowerInvariant()
-  if ($opsMap.ContainsKey($key)) { $opIdx = $i; $opNorm = $opsMap[$key]; break }
-}
-if ($opIdx -gt 0) {
-  $new = New-Object System.Collections.Generic.List[string]
-  $new.Add($opNorm) | Out-Null
-  for ($j=0; $j -lt $tokens.Count; $j++) {
-    if ($j -ne $opIdx) { $new.Add($tokens[$j]) | Out-Null }
-  }
-  $tokens = $new
-}
-
 # ---------- If user asked to (re)build, chain to build.ps1 ----------
 if ($sawBuild) {
   & (Join-Path $ROOT 'installers\build.ps1') $proj @([string[]]$tokens)
@@ -182,7 +186,7 @@ if ($sawBuild) {
 
 # ---------- Python / venv ----------
 # PS 5.1-safe Python detection
-$pyExe  = $null
+$pyExe = $null
 $pyArgs = @()
 $cmd = Get-Command py -ErrorAction SilentlyContinue
 if ($cmd) { $pyExe = $cmd.Source; $pyArgs = @('-3') }
@@ -200,6 +204,9 @@ if (-not $vpy) { throw "could not resolve venv python" }
 
 # Keep pycache out of tree
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
+
+# Ensure VC++ runtime before any potential ONNX use on Windows
+Install-VcRedistIfMissing
 
 # ---------- Ensure OpenCV in the venv (GUI vs headless) ----------
 Install-OpenCvPackage -Vpy $vpy -NeedsGui:$liveMode

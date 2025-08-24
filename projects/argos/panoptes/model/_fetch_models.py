@@ -232,7 +232,8 @@ def _ensure_export_toolchain() -> None:
           * Python <3.10 → 1.19.2
           * Windows (Py>=3.10) → >=1.22,<1.23
           * Linux/macOS (Py>=3.10) → >=1.22,<1.24
-    - onnxslim >=0.1.59,<0.1.60  (keep simplifier stable)
+    - onnxsim >=0.4.17,<0.5 (simplifier compatibility)
+    - onnxslim >=0.1.59,<0.1.60 (keep simplifier stable)
     """
     # NumPy first, so later wheels resolve against 1.x ABI
     need_numpy_cap = True
@@ -285,7 +286,9 @@ def _ensure_export_toolchain() -> None:
         else:
             _pip_quiet("onnxruntime>=1.22,<1.24")
 
-    # Keep simplifier stable
+    # Simplification helpers
+    if not _have("onnxsim"):
+        _pip_quiet("onnxsim>=0.4.17,<0.5")
     _pip_quiet("onnxslim>=0.1.59,<0.1.60")
 
 
@@ -618,6 +621,25 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         except Exception:
             pass
 
+    # 1a) Direct download (.onnx) — avoid local export unless strictly required
+    if base.lower().endswith(".onnx") and download_url is not None:
+        try:
+            ctx2: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
+            with ctx2:
+                adapter2 = (
+                    _DownloadSpinnerAdapter(spinner, items_total=items_total, items_done=items_done, label=base)
+                    if spinner
+                    else None
+                )
+                download_url(_asset_url_for(base), str(target), adapter2)  # type: ignore[arg-type]
+            if _validate_weight(target):
+                return (target.name, "download")
+            else:
+                target.unlink(missing_ok=True)
+        except Exception:
+            # If the asset isn't hosted, we’ll fall back to export below.
+            pass
+
     # 2) YOLO last-resort fetcher for .pt (silenced)
     has_yolo_local = has_yolo and (YOLO is not None)
     if base.lower().endswith(".pt") and has_yolo_local:
@@ -639,7 +661,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         if _validate_weight(target):
             return (target.name, "download" if (dst / base).exists() else "copied")
 
-    # 3) If ONNX requested, export from the matching .pt (ensure it exists)
+    # 3) If ONNX requested (and direct download failed), export from the matching .pt
     if base.lower().endswith(".onnx"):
         pt_name = Path(base).with_suffix(".pt").name
         pt_path = dst / pt_name
@@ -676,6 +698,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         # Export ONNX (matrix with opset fallback + dynamic/simplify fallbacks)
         if has_yolo_local and pt_path.exists() and _validate_weight(pt_path):
             try:
+                # Only preflight if we actually need to export (prevents noisy warnings)
                 _preflight_onnx_stack()
 
                 # Determine preferred opset from torch if available

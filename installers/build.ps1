@@ -50,6 +50,33 @@ catch {
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 
+function Install-VcRedistIfMissing {
+  # Windows only; harmless no-op elsewhere
+  if ($env:OS -ne 'Windows_NT') { return }
+  try {
+    $sys = Join-Path $env:WINDIR 'System32'
+    $has1 = Test-Path -LiteralPath (Join-Path $sys 'vcruntime140.dll')
+    $has2 = Test-Path -LiteralPath (Join-Path $sys 'vcruntime140_1.dll')
+    $has3 = Test-Path -LiteralPath (Join-Path $sys 'msvcp140.dll')
+    if ($has1 -and $has2 -and $has3) { return }
+  }
+  catch { }
+  Write-Host "Installing Microsoft Visual C++ Redistributable (x64)..." -ForegroundColor Yellow
+  $tmp = Join-Path $env:TEMP 'vc_redist.x64.exe'
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $tmp
+    $args = '/quiet', '/norestart'
+    $p = Start-Process -FilePath $tmp -ArgumentList $args -PassThru -Wait
+    if ($p.ExitCode -ne 0) { throw "vc_redist failed with code $($p.ExitCode)" }
+  }
+  catch {
+    throw "Could not install VC++ Redistributable automatically: $($_.Exception.Message)"
+  }
+  finally {
+    Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue | Out-Null
+  }
+}
+
 function _Here {
   if ($PSCommandPath) { return (Split-Path -Parent $PSCommandPath) }
   if ($MyInvocation.MyCommand.Path) { return (Split-Path -Parent $MyInvocation.MyCommand.Path) }
@@ -147,6 +174,9 @@ function Install-Python {
   throw "Unsupported OS. Please install Python 3.9 - 3.12 and re-run."
 }
 if (-not (Find-Python) -or -not (Test-PythonOk)) { Install-Python }
+
+# Ensure VC++ runtime before anything may trigger local ONNX export (Windows only)
+Install-VcRedistIfMissing
 
 # --- Git LFS best-effort (non-fatal) ---
 if (Get-Command git -ErrorAction SilentlyContinue) {
