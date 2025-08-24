@@ -1,8 +1,6 @@
-# rAIn - Windows bootstrap (no file logging; PS 5.1+ compatible)
-[CmdletBinding()] param(
-  [Parameter(ValueFromRemainingArguments = $true)]
-  [string[]]$BuildArgs
-)
+# installers\build.ps1  — zero-touch bootstrap + model selector (smoke check asked ONCE after selection)
+[CmdletBinding()]
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$BuildArgs)
 $ErrorActionPreference = 'Stop'
 
 # --- Progress-friendly environment ---
@@ -13,196 +11,138 @@ $env:FORCE_COLOR = '1'
 $env:PANOPTES_NESTED_PROGRESS = '1'
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
 
-# Skip weight downloads during non-interactive bootstrap (interactive builder runs later)
+# Force the CLI to use a single-line progress on a proper TTY stream
+$env:ARGOS_PROGRESS_STREAM = 'stdout'
+$env:ARGOS_FORCE_PLAIN_PROGRESS = '1'
+
+# During bootstrap, skip weights (the selector will handle them)
 $env:ARGOS_SKIP_WEIGHTS = '1'
-# Ensure final confirm is interactive (do NOT auto-accept)
 Remove-Item Env:ARGOS_ASSUME_YES -ErrorAction SilentlyContinue
 
-# Prefer ANSI when available (safe no-op on PS 5.1)
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 
-# Accept optional leading token from subproject launchers (e.g., "argos")
-if ($BuildArgs.Length -gt 0 -and $BuildArgs[0] -eq 'argos') {
-  if ($BuildArgs.Length -gt 1) { $BuildArgs = $BuildArgs[1..($BuildArgs.Length - 1)] } else { $BuildArgs = @() }
-}
-
-# Resolve script location robustly
-function Resolve-Here {
+function _Here {
   if ($PSCommandPath) { return (Split-Path -Parent $PSCommandPath) }
   if ($MyInvocation.MyCommand.Path) { return (Split-Path -Parent $MyInvocation.MyCommand.Path) }
   return (Get-Location).Path
 }
-$HERE = Resolve-Here
+$HERE = _Here
 $ROOT = Split-Path -Parent $HERE
 
-# --- Progress helpers (optional; never fail build if missing) ---
-$progMod = Join-Path $HERE 'lib\progress.psm1'
-if (Test-Path -LiteralPath $progMod) {
-  try { Import-Module $progMod -Force -DisableNameChecking -ErrorAction Stop }
-  catch { . $progMod }
-}
-if (-not (Get-Command Start-ProgressPhase -ErrorAction SilentlyContinue)) {
-  function Start-ProgressPhase { param([string]$Activity, [int]$Total = 100) }
-  function Set-Progress { param([int]$Done, [string]$Status = "") }
-  function Step-Progress { param([int]$Delta = 1, [string]$Status = "") }
-  function Complete-Progress { }
-  function Invoke-Step { param([string]$Name, [scriptblock]$Body, [int]$Weight = 1) & $Body }
+# --- OS flags (avoid PS 6+ automatic variables) ---
+$OsIsWindows = ($env:OS -eq 'Windows_NT')
+$OsIsMac = $false
+$OsIsLinux = $false
+if (-not $OsIsWindows) {
+  try {
+    $OsIsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+    $OsIsLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
+    $OsIsMac = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)
+  }
+  catch {
+    $OsIsLinux = ($env:OSTYPE -like '*linux*')
+    $OsIsMac = ($env:OSTYPE -like '*darwin*')
+  }
 }
 
-# Project-local hooks (optional)
-if (Test-Path (Join-Path $HERE 'build-hooks.ps1')) { . (Join-Path $HERE 'build-hooks.ps1') }
+# --- Python ensure (auto-install if needed) ---
+$script:pyExe = $null
+$script:pyArgs = @()
 
-# ----- Python detection and optional auto-install -----
-function Get-PythonCandidate {
+function Find-Python {
+  $script:pyExe = $null; $script:pyArgs = @()
   $c = Get-Command py -ErrorAction SilentlyContinue
-  if ($c) { return @{ Exe = $c.Source; Args = @('-3') } }
-  $c = Get-Command python3 -ErrorAction SilentlyContinue
-  if ($c) { return @{ Exe = $c.Source; Args = @() } }
-  $c = Get-Command python -ErrorAction SilentlyContinue
-  if ($c) { return @{ Exe = $c.Source; Args = @() } }
-  return $null
+  if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @('-3') }
+  if (-not $script:pyExe) { $c = Get-Command python3 -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source } }
+  if (-not $script:pyExe) { $c = Get-Command python  -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source } }
+  return [bool]$script:pyExe
 }
-
-function Install-PythonIfMissing {
-  $candidate = Get-PythonCandidate
-  if ($candidate) { return $candidate }
-
-  Write-Host 'Python 3 was not found. Attempting automatic installation...'
-  $installed = $false
-
-  # 1) winget
-  $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-  if ($wingetCmd -and -not $installed) {
-    try {
-      Write-Host 'Installing Python via winget (silent).'
-      & $wingetCmd.Source install --id Python.Python.3.12 --source winget --accept-source-agreements --accept-package-agreements --silent 1>$null 2>$null
-      if ($LASTEXITCODE -eq 0) { $installed = $true }
-    }
-    catch { }
+function Test-PythonOk {
+  if (-not $script:pyExe) { return $false }
+  try { $v = & $script:pyExe @script:pyArgs --version 2>&1 } catch { return $false }
+  if ($v -match 'Python ([0-9]+)\.([0-9]+)\.([0-9]+)') {
+    $maj = [int]$Matches[1]; $min = [int]$Matches[2]
+    return ($maj -eq 3 -and $min -ge 9 -and $min -le 12)
   }
-
-  # 2) Chocolatey
-  $chocoCmd = Get-Command choco -ErrorAction SilentlyContinue
-  if ($chocoCmd -and -not $installed) {
-    try {
-      Write-Host 'Installing Python via Chocolatey (silent).'
-      & $chocoCmd install python -y --no-progress 1>$null 2>$null
-      if ($LASTEXITCODE -eq 0) { $installed = $true }
-    }
-    catch { }
+  return $false
+}
+function Test-IsAdmin {
+  try {
+    $wi = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $wp = New-Object Security.Principal.WindowsPrincipal($wi)
+    return $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   }
-
-  # 3) Official installer download (silent)
-  if (-not $installed) {
-    try {
+  catch { return $false }
+}
+function Install-Python {
+  Write-Host "Python 3.9 - 3.12 not found or unsupported. Attempting to install Python..."
+  if ($OsIsWindows) {
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+      & winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
+      if ($LASTEXITCODE -ne 0) { & winget install --id Python.Python.3.11 -e --accept-package-agreements --accept-source-agreements }
+    }
+    else {
       $arch = if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { 'win32' }
-      $url = if ($arch -eq 'amd64') {
-        'https://www.python.org/ftp/python/3.12.4/python-3.12.4-amd64.exe'
-      }
-      else {
-        'https://www.python.org/ftp/python/3.12.4/python-3.12.4.exe'
-      }
-      $temp = Join-Path $env:TEMP 'python-installer.exe'
-      Write-Host ('Downloading Python installer from: {0}' -f $url)
-      try { Invoke-WebRequest -Uri $url -OutFile $temp -UseBasicParsing } catch { Start-BitsTransfer -Source $url -Destination $temp }
-      Write-Host 'Running Python installer (quiet).'
-      & $temp '/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0', 'SimpleInstall=1' 1>$null 2>$null
-      Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
-      $installed = $true
+      $ver = '3.12.10'
+      $url = "https://www.python.org/ftp/python/$ver/python-$ver-$arch.exe"
+      $tmp = Join-Path $env:TEMP "python-$ver-$arch.exe"
+      Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+      $pyInstallArgs = "/quiet InstallAllUsers=0 PrependPath=1 Include_test=0"
+      if (Test-IsAdmin) { $pyInstallArgs = "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" }
+      $p = Start-Process -FilePath $tmp -ArgumentList $pyInstallArgs -Wait -PassThru
+      if ($p.ExitCode -ne 0) { throw "Python installer exited with code $($p.ExitCode)." }
     }
-    catch {
-      Write-Host 'Automatic Python installation failed.'
-    }
-  }
-
-  if ($installed) {
-    # Refresh PATH in this session
-    $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('PATH', 'User')
     Start-Sleep -Seconds 2
-    $candidate = Get-PythonCandidate
-    if ($candidate) { return $candidate }
+    if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9 - 3.12 required but not located after installation." }
+    return
   }
-
-  throw 'Python 3 not found and automatic installation was unsuccessful.'
-}
-
-# Acquire Python
-$py = Get-PythonCandidate
-if (-not $py) { $py = Install-PythonIfMissing }
-$pyExe = $py['Exe']
-$pyArgs = $py['Args']
-
-# ----- Build phase: ONLY non-interactive steps here -----
-$env:PANOPTES_PROGRESS_ACTIVE = '1'
-Start-ProgressPhase 'Build ARGOS' -Total 3
-try {
-  Invoke-Step -Name 'Bootstrap venv' -Weight 1 -Body {
-    Write-Host 'Bootstrapping virtual environment (quiet; no log files)...'
-    $argsEnsure = $pyArgs + @("$ROOT\projects\argos\bootstrap.py", '--ensure', '--yes', '--reinstall')
-
-    # Run quietly to avoid NativeCommandError from harmless warnings
-    & $pyExe @argsEnsure 1>$null 2>$null
-    $ec = $LASTEXITCODE
-    if ($ec -ne 0) {
-      Write-Host ''
-      Write-Host '==== BOOTSTRAP FAILED - re-running with visible output (no files written) ===='
-      $prevEAP = $ErrorActionPreference
-      $ErrorActionPreference = 'Continue'
-      $output = & $pyExe @argsEnsure 2>&1
-      $ErrorActionPreference = $prevEAP
-      if ($output) { $output | Out-Host }
-      throw ('bootstrap failed ({0})' -f $ec)
+  if ($OsIsMac) {
+    $brew = Get-Command brew -ErrorAction SilentlyContinue
+    if ($brew) {
+      & brew install python@3.12
+      if ($LASTEXITCODE -ne 0) { & brew install python@3.11 }
+      if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9 - 3.12 required but not found after Homebrew install." }
+      return
     }
+    else { throw "Homebrew not found. Please install Homebrew or Python 3.9 - 3.12 and re-run." }
   }
-
-  # Resolve venv Python for subsequent steps (capture in-memory; no files)
-  $prevEAP = $ErrorActionPreference
-  $ErrorActionPreference = 'Continue'
-  $outputV = & $pyExe @($pyArgs + @("$ROOT\projects\argos\bootstrap.py", '--print-venv')) 2>&1
-  $ErrorActionPreference = $prevEAP
-  $code = $LASTEXITCODE
-  if ($code -ne 0) {
-    if ($outputV) { $outputV | Out-Host }
-    throw ('bootstrap --print-venv failed ({0})' -f $code)
+  if ($OsIsLinux) {
+    if (Get-Command apt-get -ErrorAction SilentlyContinue) { & apt-get update; & apt-get install -y python3 }
+    elseif (Get-Command dnf -ErrorAction SilentlyContinue) { & dnf install -y python3 }
+    elseif (Get-Command yum -ErrorAction SilentlyContinue) { & yum install -y python3 }
+    else { throw "No supported package manager found. Please install Python 3.9 - 3.12 and re-run." }
+    if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9 - 3.12 required but not found after package install." }
+    return
   }
-  $vpy = $outputV.Trim()
-
-  Invoke-Step -Name 'Sanity check' -Weight 1 -Body {
-    # 'pip check' returns non-zero on dependency issues; continue anyway
-    & $vpy -m pip check 1>$null 2>$null
-    $ec = $LASTEXITCODE
-    if ($ec -ne 0) {
-      Write-Host "WARNING: 'pip check' reported issues; continuing."
-    }
-  }
-
-  Invoke-Step -Name 'Setup PATH' -Weight 1 -Body {
-    & (Join-Path $HERE 'setup-path.ps1') -Quiet
-  }
+  throw "Unsupported OS. Please install Python 3.9 - 3.12 and re-run."
 }
-finally {
-  Complete-Progress
-  $env:PANOPTES_PROGRESS_ACTIVE = '0'
-}
+if (-not (Find-Python) -or -not (Test-PythonOk)) { Install-Python }
 
-# ----- Interactive model builder runs AFTER progress is cleared -----
-# IMPORTANT: Do NOT auto-feed "1" unless the user explicitly opts in.
-$auto = ($env:ARGOS_AUTOBUILD -eq '1')
-
-# Allow harmless stderr during interactive run without terminating the script
-$prevEAP = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-try {
-  if ($auto) {
-    '1' | & $vpy -m panoptes.tools.build_models @BuildArgs
+# --- Git LFS best-effort (non-fatal) ---
+if (Get-Command git -ErrorAction SilentlyContinue) {
+  & git lfs version > $null 2>&1
+  if ($LASTEXITCODE -eq 0) {
+    & git -C $ROOT lfs install --local > $null 2>&1
+    $env:GIT_LFS_SKIP_SMUDGE = '0'
+    & git -C $ROOT lfs pull > $null 2>&1
   }
   else {
-    & $vpy -m panoptes.tools.build_models @BuildArgs
+    Write-Host "Warning: Git LFS not installed. Large files (models) may be missing."
   }
 }
-finally {
-  $ErrorActionPreference = $prevEAP
-}
 
-if ($LASTEXITCODE -ne 0) { throw ('build_models failed ({0})' -f $LASTEXITCODE) }
-return
+# --- Bootstrap venv (ensure) ---
+$scriptPath = Join-Path $ROOT 'projects\argos\bootstrap.py'
+& $script:pyExe @script:pyArgs $scriptPath --ensure --yes
+if ($LASTEXITCODE -ne 0) { throw "bootstrap failed ($LASTEXITCODE)" }
+
+# --- Resolve venv Python ---
+$vpy = & $script:pyExe @script:pyArgs "$scriptPath" --print-venv
+if (-not $vpy) { throw "could not resolve venv python" }
+$env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
+
+# --- Launch the *model selector* (user picks pack, fetches, exports, THEN smoke check prompts once) ---
+& $vpy -m panoptes.model._fetch_models @BuildArgs
+if ($LASTEXITCODE -ne 0) { throw "model selector failed ($LASTEXITCODE)" }
