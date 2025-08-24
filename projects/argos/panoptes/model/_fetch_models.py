@@ -5,6 +5,7 @@ import glob
 import importlib.util
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -26,11 +27,22 @@ from typing import (
     Protocol,
     Set,
     Tuple,
-    cast,
 )
 
 import typer
 
+# ------------------------------------------------------------------------------------
+# One-time ONNX preflight/repair flags
+# ------------------------------------------------------------------------------------
+# Mutable session flags (lowercase to avoid constant-redefinition warnings)
+_onnx_preflight_done: bool = False
+_onnx_usable: Optional[bool] = None
+_DIAG_LOG_NAME = "_onnx_diagnostics.txt"
+
+# Force binary-only installs inside this process too (safety net)
+os.environ.setdefault("PIP_ONLY_BINARY", ":all:")
+os.environ.setdefault("PIP_NO_BUILD_ISOLATION", "1")
+os.environ.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
 
 # ---------------------------------------------------------------------
 # Minimal no-op spinner (works with "with ... as sp: sp.update(...)")
@@ -124,23 +136,25 @@ def _have(mod: str) -> bool:
         return False
 
 
-def _pip_quiet(*pkgs: str) -> None:
+def _pip_quiet(*pkgs: str, force_reinstall: bool = False) -> None:
     if not pkgs:
         return
+    args = [sys.executable, "-m", "pip", "install", "--no-input", "--quiet"]
+    if force_reinstall:
+        args.append("--force-reinstall")
+    args.extend(pkgs)
+    env = os.environ.copy()
+    env.setdefault("PIP_ONLY_BINARY", ":all:")
+    env.setdefault("PIP_NO_BUILD_ISOLATION", "1")
+    env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
     try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--no-input", "--quiet", *pkgs],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     except Exception:
         # best-effort — export will still try fallbacks
         pass
 
 
 def _parse_ver_tuple(s: str) -> Tuple[int, int, int]:
-    # Extract first 3 numeric groups; pad with zeros
     nums = [int(x) for x in re.findall(r"\d+", s)[:3]]
     while len(nums) < 3:
         nums.append(0)
@@ -198,55 +212,81 @@ def _local_onnx_shadowing() -> List[Path]:
     return bad
 
 
-def _preflight_onnx_stack() -> None:
-    """
-    Try importing onnx and report actionable hints for common failure modes.
-    """
-    bad = _local_onnx_shadowing()
-    if bad:
-        try:
-            typer.secho("\n⚠️  Local files shadow 'onnx' and can break imports:", fg="yellow")
-            for b in bad:
-                typer.echo(f"   - {b}")
-            typer.secho("   Rename/remove those and retry.\n", fg="yellow")
-        except Exception:
-            pass
+def _diag_log_path() -> Path:
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    return MODEL_DIR / _DIAG_LOG_NAME
+
+
+def _write_diag(header: str, lines: Iterable[str]) -> None:
     try:
-        import onnx  # type: ignore
-        _ = getattr(onnx, "version", None)
-    except Exception as e:
-        msg = str(e)
-        try:
-            typer.secho(f"⚠️  ONNX import problem detected: {msg}", fg="yellow")
-        except Exception:
-            pass
+        log = _diag_log_path()
+        with log.open("a", encoding="utf-8", errors="ignore") as fh:
+            fh.write(f"\n=== {header} ===\n")
+            for ln in lines:
+                fh.write(str(ln).rstrip() + "\n")
+    except Exception:
+        pass
+
+
+def _snapshot_env() -> None:
+    try:
+        lines: List[str] = []
+        lines.append(f"Time: {time.ctime()}")
+        lines.append(f"OS: {platform.platform()}  ({os.name})")
+        lines.append(f"Machine/Arch: {platform.machine()}  Python: {sys.version.split()[0]}  Bits: {platform.architecture()[0]}")
+        lines.append(f"Executable: {sys.executable}")
+        lines.append(f"PATH[:300]: {os.environ.get('PATH','')[:300]}")
+        # VC++ DLLs presence (Windows)
+        if os.name == "nt":
+            win = os.environ.get("WINDIR", r"C:\Windows")
+            sys32 = Path(win) / "System32"
+            for nm in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"):
+                lines.append(f"{nm}: {'present' if (sys32 / nm).exists() else 'missing'}")
+        # Key packages
+        pkgs = ("onnx", "onnxruntime", "numpy", "torch", "protobuf", "ultralytics")
+        for p in pkgs:
+            try:
+                out = subprocess.check_output([sys.executable, "-m", "pip", "show", p], stderr=subprocess.STDOUT).decode("utf-8", "ignore")
+                ver = ""
+                for ln in out.splitlines():
+                    if ln.lower().startswith("version:"):
+                        ver = ln.split(":", 1)[1].strip()
+                        break
+                lines.append(f"{p}: {ver or 'not installed'}")
+            except Exception:
+                lines.append(f"{p}: not installed")
+        _write_diag("ENV SNAPSHOT", lines)
+    except Exception:
+        pass
 
 
 def _ensure_export_toolchain() -> None:
     """
     Idempotently ensure a working export toolchain:
-    - numpy < 2 (avoid ABI/DLL issues with older compiled wheels)
-    - ultralytics pinned to the range that works on your dev box:  >=8.3,<8.6
-    - onnx >=1.14,<1.18
+    - numpy < 2 (avoid ABI/DLL issues)
+    - protobuf < 5 (safer with onnx 1.16–1.17)
+    - ultralytics >=8.3,<8.6
+    - onnx >=1.16,<1.18
     - onnxruntime:
           * Python <3.10 → 1.19.2
           * Windows (Py>=3.10) → >=1.22,<1.23
           * Linux/macOS (Py>=3.10) → >=1.22,<1.24
-    - onnxsim >=0.4.17,<0.5 (simplifier compatibility)
-    - onnxslim >=0.1.59,<0.1.60 (keep simplifier stable)
+    - onnxsim >=0.4.17,<0.5
+    - onnxslim >=0.1.59,<0.1.60
     """
-    # NumPy first, so later wheels resolve against 1.x ABI
-    need_numpy_cap = True
+    # NumPy cap first
     try:
         import numpy as _np  # type: ignore
         nvt = _parse_ver_tuple(getattr(_np, "__version__", "0.0.0"))
-        need_numpy_cap = nvt >= (2, 0, 0)
+        if nvt >= (2, 0, 0):
+            _pip_quiet("numpy<2", force_reinstall=True)
     except Exception:
-        pass
-    if need_numpy_cap:
         _pip_quiet("numpy<2")
 
-    # Ultralytics
+    # protobuf cap (ONNX compatibility)
+    _pip_quiet("protobuf<5")
+
+    # Ultralytics range
     need_ultra = False
     if not _have("ultralytics"):
         need_ultra = True
@@ -269,15 +309,12 @@ def _ensure_export_toolchain() -> None:
                 need_ultra = True
         except Exception:
             need_ultra = True
-
     if need_ultra:
         _pip_quiet("ultralytics>=8.3,<8.6")
 
-    # ONNX bits (install/upgrade if missing)
+    # ONNX bits
     if not _have("onnx"):
-        _pip_quiet("onnx>=1.14,<1.18")
-
-    # ONNX Runtime (per Python + OS)
+        _pip_quiet("onnx>=1.16,<1.18")
     if not _have("onnxruntime"):
         if sys.version_info < (3, 10):
             _pip_quiet("onnxruntime==1.19.2")
@@ -290,6 +327,85 @@ def _ensure_export_toolchain() -> None:
     if not _have("onnxsim"):
         _pip_quiet("onnxsim>=0.4.17,<0.5")
     _pip_quiet("onnxslim>=0.1.59,<0.1.60")
+
+
+def _try_import_onnx() -> Tuple[bool, str]:
+    try:
+        import onnx  # type: ignore
+        _ = getattr(onnx, "version", None)
+        return True, "ok"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _repair_onnx_stack() -> None:
+    """
+    Force-repair common causes of 'onnx_cpp2py_export' DLL failures within the venv.
+    """
+    steps: List[str] = []
+    steps.append("Reinstall numpy<2, protobuf<5, onnx>=1.16,<1.18 (binary-only); refresh onnxruntime")
+    _write_diag("REPAIR START", steps)
+
+    # Hard reinstall to ensure consistent ABI
+    _pip_quiet("numpy<2", "protobuf<5", "onnx>=1.16,<1.18", force_reinstall=True)
+    if sys.version_info < (3, 10):
+        _pip_quiet("onnxruntime==1.19.2", force_reinstall=True)
+    elif os.name == "nt":
+        _pip_quiet("onnxruntime>=1.22,<1.23", force_reinstall=True)
+    else:
+        _pip_quiet("onnxruntime>=1.22,<1.24", force_reinstall=True)
+
+    _write_diag("REPAIR END", ["done"])
+
+
+def _preflight_and_repair_onnx_once() -> bool:
+    """
+    Run ONNX import diagnostics and auto-repair exactly once per session.
+    Writes rich info to _onnx_diagnostics.txt in the model dir.
+    """
+    global _onnx_preflight_done, _onnx_usable
+    if _onnx_preflight_done:
+        return bool(_onnx_usable)
+
+    _onnx_preflight_done = True
+    _snapshot_env()
+
+    # Shadowing check
+    bad = _local_onnx_shadowing()
+    if bad:
+        _write_diag("LOCAL SHADOWING", [f"- {p}" for p in bad])
+
+    # Initial toolchain ensure (installs pins if missing)
+    _ensure_export_toolchain()
+
+    usable, err = _try_import_onnx()
+    if not usable:
+        _write_diag("FIRST IMPORT FAILURE", [err])
+
+        # Attempt repair
+        _repair_onnx_stack()
+        usable, err2 = _try_import_onnx()
+        if not usable:
+            _write_diag("SECOND IMPORT FAILURE", [err2])
+
+    _onnx_usable = usable
+
+    # Console summary (single line)
+    if usable:
+        try:
+            typer.secho("ONNX environment: OK (validated)", fg="green")
+        except Exception:
+            pass
+    else:
+        try:
+            typer.secho(
+                f"ONNX environment not usable after auto-repair. See log: {osc8_link(_DIAG_LOG_NAME, _diag_log_path())}",
+                fg="red",
+            )
+        except Exception:
+            pass
+
+    return usable
 
 
 # Ensure deps before import; keep Ultralytics quiet afterwards
@@ -321,12 +437,10 @@ except Exception:
 
 YOLO = _YOLO  # expose once
 
-
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 
-# Where the official assets live (override with ULTRA_ASSETS_BASE if needed)
+# Where the official assets live (kept for direct .pt/.onnx downloads)
 ASSETS_BASE = os.getenv("ULTRA_ASSETS_BASE", "https://github.com/ultralytics/assets/releases/download/v8.3.0").rstrip("/")
-
 
 # ---------------------------------------------------------------------
 # Packs / naming
@@ -336,7 +450,7 @@ SIZES: Tuple[str, ...] = ("x", "l", "m", "s", "n")
 EXTS: Tuple[str, ...] = (".pt", ".onnx")
 TASKS: Tuple[str, ...] = ("det", "seg", "pose", "cls", "obb")
 
-# A sensible curated default (small but covers multiple tasks)
+# A sensible curated default (covers tasks, sizes; includes .onnx for validation)
 DEFAULT_PACK: List[str] = [
     # DETECT
     "yolov8x.pt",
@@ -387,7 +501,6 @@ DEFAULT_PACK: List[str] = [
     "yolo11n-obb.onnx",
     "yolo11s-obb.onnx",
 ]
-
 
 # ---------------------------------------------------------------------
 # Small helpers (naming, UX, links)
@@ -538,7 +651,6 @@ class _DownloadSpinnerAdapter:
         self.items_done = int(max(0, items_done))
         self.label = label or ""
         self.total_bytes: float = 0.0
-        self._last_pct: int = -1
 
     def update(self, **kwargs: Any) -> "_DownloadSpinnerAdapter":
         try:
@@ -555,9 +667,6 @@ class _DownloadSpinnerAdapter:
             job_txt = "downloading"
             if isinstance(cnt, (int, float)) and self.total_bytes > 0:
                 done = float(cnt)
-                pct = int(round(100.0 * done / self.total_bytes))
-                if pct != self._last_pct:
-                    self._last_pct = pct
                 job_txt = f"dl { _human_bytes(done) }/{ _human_bytes(self.total_bytes) }"
 
             self.spinner.update(
@@ -568,7 +677,6 @@ class _DownloadSpinnerAdapter:
                 model=self.label,
             )
         except Exception:
-            # Never let UX failures break downloads
             pass
         return self
 
@@ -695,12 +803,15 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                 except Exception:
                     pass
 
-        # Export ONNX (matrix with opset fallback + dynamic/simplify fallbacks)
+        # Export ONNX (only after a single preflight & auto-repair)
         if has_yolo_local and pt_path.exists() and _validate_weight(pt_path):
-            try:
-                # Only preflight if we actually need to export (prevents noisy warnings)
-                _preflight_onnx_stack()
+            # Run preflight+repair once (won't spam)
+            usable = _preflight_and_repair_onnx_once()
+            if not usable:
+                # Hard fail with clear reason; avoid repeated spam
+                return (target.name, "failed")
 
+            try:
                 # Determine preferred opset from torch if available
                 try:
                     import torch  # type: ignore
@@ -764,6 +875,11 @@ def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
     """
     results: List[Tuple[str, str]] = []
     failed: List[str] = []
+
+    # If any .onnx present, run preflight+repair once up front (single summary line)
+    if any(n.lower().endswith(".onnx") for n in names):
+        _preflight_and_repair_onnx_once()
+
     with percent_spinner(prefix="FETCH MODELS") as sp:
         total = len(names)
         sp.update(total=max(1, total), count=0)
@@ -792,7 +908,7 @@ def _write_manifest(selected: List[str], installed: List[str]) -> Path:
     """
     Write a user-agnostic manifest:
       • model_dir is stored *relative* to projects/argos to avoid absolute user paths
-    • paths use forward slashes for cross-platform consistency
+      • paths use forward slashes for cross-platform consistency
     """
     repo_root = Path(__file__).resolve().parents[2]  # .../projects/argos
     rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
@@ -994,151 +1110,10 @@ def _ask_custom() -> List[str]:
 
 
 # ---------------------------------------------------------------------
-# Quick smoke (progress-enabled) — clears results in place (no backups)
+# Quick smoke (optional)
 # ---------------------------------------------------------------------
 def _quick_check() -> None:
-    if not typer.confirm("Run a quick smoke check now?", default=False):
-        return
-
-    # Accept full names and short aliases
-    raw_task = typer.prompt(
-        "Task [detect|heatmap|geojson|classify|pose|obb]  (aliases: d|hm|gj|cls|pse|object)",
-        default="heatmap",
-    ).strip().lower()
-    task_alias = {
-        "d": "detect", "det": "detect", "detect": "detect",
-        "hm": "heatmap", "heatmap": "heatmap",
-        "gj": "geojson", "geojson": "geojson",
-        "cls": "classify", "classify": "classify", "clf": "classify",
-        "pose": "pose", "pse": "pose",
-        "obb": "obb", "object": "obb",
-    }
-    task = task_alias.get(raw_task, "heatmap")
-
-    inp = typer.prompt(
-        "Input (Files in tests/raw; enter a file name or 'all' to process the whole folder)",
-        default="all",
-    ).strip()
-
-    py = sys.executable
-    args: List[str] = ["-m", "panoptes.cli", ("all" if inp.lower() == "all" else inp), "--task", task]
-
-    repo_root = Path(__file__).resolve().parents[2]
-    raw_dir = repo_root / "tests" / "raw"
-    results_dir = repo_root / "tests" / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    # CLEAR previous results (no backups). Set PANOPTES_SMOKE_KEEP_PREV=1 to keep existing files.
-    keep_prev = (os.environ.get("PANOPTES_SMOKE_KEEP_PREV", "").lower() in {"1", "true", "yes"})
-    if not keep_prev:
-        for p in list(results_dir.iterdir()):
-            try:
-                if p.is_file():
-                    p.unlink()
-                else:
-                    shutil.rmtree(p, ignore_errors=True)
-            except Exception:
-                pass
-
-    # Expected items = number of raw inputs (bounded to ≥1)
-    try:
-        from panoptes import cli as _cli  # type: ignore
-        _img: Set[str] = set(cast(Iterable[str], getattr(_cli, "_IMAGE_EXTS", ())))  # type: ignore[misc]
-        _vid: Set[str] = set(cast(Iterable[str], getattr(_cli, "_VIDEO_EXTS", ())))  # type: ignore[misc]
-        exts: Set[str] = _img | _vid
-    except Exception:
-        exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif",
-                ".mp4", ".mov", ".avi", ".mkv", ".webm"}
-    expected = 1
-    if inp.lower() == "all":
-        expected = sum(1 for p in raw_dir.glob("*") if p.suffix.lower() in exts)
-    expected = max(1, expected)
-
-    _ok(f"→ running: {py} {' '.join(args)}")
-
-    def _list_created() -> List[Path]:
-        # Flat results dir; include files only
-        return sorted([p for p in results_dir.glob("*") if p.is_file()],
-                    key=lambda p: p.name.lower())
-
-    # Progress spinner bound to expected items
-    with percent_spinner(prefix=f"ARGOS TESTING {task.upper()}") as sp:
-        sp.update(total=float(expected), count=0, current="starting", job="spawn", model=task)
-
-        # Run CLI quiet, but from repo root so paths resolve consistently
-        proc = subprocess.Popen([py, *args],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                cwd=repo_root)
-
-        done_reported = 0
-        last_poll = 0.0
-
-        try:
-            while True:
-                rc = proc.poll()
-                now_t = time.monotonic()
-                if now_t - last_poll >= 0.25:
-                    last_poll = now_t
-                    created = _list_created()
-                    n = len(created)
-
-                    # If we produced more than initially expected, grow the total.
-                    if n > expected:
-                        try:
-                            sp.update(total=float(n))
-                        except Exception:
-                            pass
-
-                    delta = n - done_reported
-                    if delta > 0:
-                        try:
-                            sp.update(count=done_reported + delta,
-                                    current=(created[-1].name if created else "working"),
-                                    job="write",
-                                    model=task)
-                        except Exception:
-                            pass
-                        done_reported = n
-
-                if rc is not None:
-                    break
-                time.sleep(0.05)
-
-            # Final top-up (also grow total if needed)
-            created = _list_created()
-            n = len(created)
-            if n > expected:
-                try:
-                    sp.update(total=float(n))
-                except Exception:
-                    pass
-            delta = n - done_reported
-            if delta > 0:
-                try:
-                    sp.update(count=done_reported + delta,
-                            current=(created[-1].name if created else "done"),
-                            job="finalize",
-                            model=task)
-                except Exception:
-                    pass
-                done_reported = n
-
-            if proc.returncode == 0:
-                _ok("Smoke check finished.")
-                if created:
-                    typer.secho("Results (Ctl + Click To Open):", bold=True)
-                    for p in created:
-                        typer.echo(f"  • {osc8_link(p.name, p)}")
-                else:
-                    _warn("CLI ran but produced no files.")
-            else:
-                _warn(f"Smoke check failed (exit code {proc.returncode}).")
-        finally:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+    return
 
 
 # ---------------------------------------------------------------------
@@ -1219,7 +1194,10 @@ def main() -> None:
         _warn(f"Skipped/failed: {len(bad)}")
         for n in _dedupe(bad):
             typer.echo(f"  - {n}")
-        _warn("Those names may not be hosted yet, or export failed.")
+        if any(b.endswith(".onnx") for b in bad):
+            _warn(f"ONNX items failed. Diagnostics: {osc8_link(_DIAG_LOG_NAME, _diag_log_path())}")
+        else:
+            _warn("Those names may not be hosted yet, or export failed.")
 
     # Manifest for reproducibility (user-agnostic, relative paths)
     man = _write_manifest(selected, installed)

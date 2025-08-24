@@ -4,8 +4,10 @@ from __future__ import annotations
 import glob
 import importlib.util
 import os
+import platform
 import re
 import shutil
+import subprocess
 import sys
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
@@ -13,6 +15,16 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, ContextManager, Generator, List, Optional, Tuple, cast
 
+# ---------------------------------------------------------------------
+# One-time ONNX preflight/repair flags & log
+# ---------------------------------------------------------------------
+_onnx_preflight_done: bool = False
+_onnx_usable: Optional[bool] = None
+_DIAG_LOG_NAME = "_onnx_diagnostics.txt"
+
+os.environ.setdefault("PIP_ONLY_BINARY", ":all:")
+os.environ.setdefault("PIP_NO_BUILD_ISOLATION", "1")
+os.environ.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
 
 # ---------------------------------------------------------------------
 # Minimal no-op spinner (works with "with ... as sp: sp.update(...)")
@@ -76,17 +88,19 @@ def _have(mod: str) -> bool:
         return False
 
 
-def _pip_quiet(*pkgs: str) -> None:
+def _pip_quiet(*pkgs: str, force_reinstall: bool = False) -> None:
     if not pkgs:
         return
+    args = [sys.executable, "-m", "pip", "install", "--no-input", "--quiet"]
+    if force_reinstall:
+        args.append("--force-reinstall")
+    args.extend(pkgs)
+    env = os.environ.copy()
+    env.setdefault("PIP_ONLY_BINARY", ":all:")
+    env.setdefault("PIP_NO_BUILD_ISOLATION", "1")
+    env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
     try:
-        import subprocess
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--no-input", "--quiet", *pkgs],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     except Exception:
         pass
 
@@ -125,28 +139,71 @@ def _candidate_opsets() -> List[int]:
     return out
 
 
+def _diag_log_path() -> Path:
+    return Path(__file__).resolve().parent / _DIAG_LOG_NAME
+
+
+def _write_diag(header: str, lines: List[str]) -> None:
+    try:
+        log = _diag_log_path()
+        with log.open("a", encoding="utf-8", errors="ignore") as fh:
+            fh.write(f"\n=== {header} ===\n")
+            for ln in lines:
+                fh.write(ln.rstrip() + "\n")
+    except Exception:
+        pass
+
+
+def _snapshot_env() -> None:
+    try:
+        lines: List[str] = []
+        lines.append(f"Time: {__import__('time').ctime()}")
+        lines.append(f"OS: {platform.platform()}  ({os.name})")
+        lines.append(f"Machine/Arch: {platform.machine()}  Python: {sys.version.split()[0]}  Bits: {platform.architecture()[0]}")
+        lines.append(f"Executable: {sys.executable}")
+        if os.name == "nt":
+            win = os.environ.get("WINDIR", r"C:\Windows")
+            sys32 = Path(win) / "System32"
+            for nm in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"):
+                lines.append(f"{nm}: {'present' if (sys32 / nm).exists() else 'missing'}")
+        for p in ("onnx", "onnxruntime", "numpy", "torch", "protobuf", "ultralytics"):
+            try:
+                out = subprocess.check_output([sys.executable, "-m", "pip", "show", p], stderr=subprocess.STDOUT).decode("utf-8", "ignore")
+                ver = ""
+                for ln in out.splitlines():
+                    if ln.lower().startswith("version:"):
+                        ver = ln.split(":", 1)[1].strip()
+                        break
+                lines.append(f"{p}: {ver or 'not installed'}")
+            except Exception:
+                lines.append(f"{p}: not installed")
+        _write_diag("ENV SNAPSHOT", lines)
+    except Exception:
+        pass
+
+
 def _ensure_export_toolchain() -> None:
     """
     Ensure a working ONNX export toolchain across clean machines.
 
-    - ultralytics pinned to a known-good range for this project
-    - numpy pinned to <2 to avoid ABI/DLL issues with older compiled wheels
-    - onnx pinned to a safe range
-    - onnxruntime pinned by Python version (Py3.9 needs 1.19.2), and by OS
-    - onnxsim pinned to a safe range for simplify=True
-    - onnxslim pinned to <0.1.60 (avoid newer changes)
+    - numpy < 2
+    - protobuf < 5
+    - ultralytics >=8.3,<8.6
+    - onnx >=1.16,<1.18
+    - onnxruntime pinned by Python version and OS
+    - onnxsim >=0.4.17,<0.5
+    - onnxslim >=0.1.59,<0.1.60
     """
-    # NumPy (avoid 2.x ABI issues with many wheels on Windows/clean machines)
     try:
         import numpy as _np  # type: ignore
         nvt = _parse_ver_tuple(getattr(_np, "__version__", "0.0.0"))
         if nvt >= (2, 0, 0):
-            _pip_quiet("numpy<2")
+            _pip_quiet("numpy<2", force_reinstall=True)
     except Exception:
-        # if numpy missing, let onnx bring one; enforce cap anyway
         _pip_quiet("numpy<2")
 
-    # Ultralytics (range that matches this project’s assumptions)
+    _pip_quiet("protobuf<5")
+
     need_ultra = False
     if not _have("ultralytics"):
         need_ultra = True
@@ -171,11 +228,8 @@ def _ensure_export_toolchain() -> None:
     if need_ultra:
         _pip_quiet("ultralytics>=8.3,<8.6")
 
-    # ONNX core
     if not _have("onnx"):
-        _pip_quiet("onnx>=1.14,<1.18")
-
-    # ONNX Runtime (per Python + OS)
+        _pip_quiet("onnx>=1.16,<1.18")
     if not _have("onnxruntime"):
         if sys.version_info < (3, 10):
             _pip_quiet("onnxruntime==1.19.2")
@@ -183,15 +237,62 @@ def _ensure_export_toolchain() -> None:
             _pip_quiet("onnxruntime>=1.22,<1.23")
         else:
             _pip_quiet("onnxruntime>=1.22,<1.24")
-
-    # Simplification helpers
     if not _have("onnxsim"):
         _pip_quiet("onnxsim>=0.4.17,<0.5")
-    # Keep onnxslim capped (avoid newer)
     _pip_quiet("onnxslim>=0.1.59,<0.1.60")
 
 
-# Ensure deps before we try to import YOLO
+def _try_import_onnx() -> Tuple[bool, str]:
+    try:
+        import onnx  # type: ignore
+        _ = getattr(onnx, "version", None)
+        return True, "ok"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _repair_onnx_stack() -> None:
+    _write_diag("REPAIR START", ["Reinstall numpy<2, protobuf<5, onnx>=1.16,<1.18; refresh onnxruntime"])
+    _pip_quiet("numpy<2", "protobuf<5", "onnx>=1.16,<1.18", force_reinstall=True)
+    if sys.version_info < (3, 10):
+        _pip_quiet("onnxruntime==1.19.2", force_reinstall=True)
+    elif os.name == "nt":
+        _pip_quiet("onnxruntime>=1.22,<1.23", force_reinstall=True)
+    else:
+        _pip_quiet("onnxruntime>=1.22,<1.24", force_reinstall=True)
+    _write_diag("REPAIR END", ["done"])
+
+
+def _preflight_and_repair_onnx_once() -> bool:
+    global _onnx_preflight_done, _onnx_usable
+    if _onnx_preflight_done:
+        return bool(_onnx_usable)
+    _onnx_preflight_done = True
+    _snapshot_env()
+    # Shadowing
+    here = Path.cwd()
+    bad: List[str] = []
+    for p in (here / "onnx.py", here / "onnx"):
+        if p.exists():
+            bad.append(str(p))
+    if bad:
+        _write_diag("LOCAL SHADOWING", bad)
+    _ensure_export_toolchain()
+    ok, err = _try_import_onnx()
+    if not ok:
+        _write_diag("FIRST IMPORT FAILURE", [err])
+        _repair_onnx_stack()
+        ok, err2 = _try_import_onnx()
+        if not ok:
+            _write_diag("SECOND IMPORT FAILURE", [err2])
+    _onnx_usable = ok
+    if ok:
+        print("ONNX environment: OK (validated)")
+    else:
+        print(f"ONNX environment not usable after auto-repair. See log: {osc8_link(_DIAG_LOG_NAME, _diag_log_path())}")
+    return ok
+
+
 _ensure_export_toolchain()
 
 # --- Ultralytics (quiet logging, version-agnostic) ---
@@ -264,7 +365,7 @@ def _validate_weight(p: Path) -> bool:
 
 
 def _synonyms(name: str) -> List[str]:
-    """Try YOLO’s common spelling variants (yolo8/11/12 ↔ yolov8/11/12; suffixes preserved)."""
+    """Try YOLO spelling variants (yolo8/11/12 ↔ yolov8/11/12; suffixes preserved)."""
     base = Path(name).name
     alts = {base}
     for ver in ("8", "11", "12"):
@@ -286,38 +387,6 @@ def _status_cm(label: str) -> ContextManager[Any]:
         return cast(ContextManager[Any], simple_status(label, enabled=enabled))  # type: ignore[misc]
     except Exception:
         return _NoopSpinner()
-
-
-def _local_onnx_shadowing() -> Optional[Path]:
-    """
-    Detect a local onnx.py that would shadow the real 'onnx' package.
-    """
-    try:
-        here = Path.cwd()
-        cand = here / "onnx.py"
-        return cand if cand.exists() else None
-    except Exception:
-        return None
-
-
-def _preflight_onnx_stack() -> None:
-    """
-    Try importing onnx and report actionable hints for common failure modes.
-    """
-    shadow = _local_onnx_shadowing()
-    if shadow is not None:
-        # Best-effort console hint; do not raise
-        print(f"⚠️  Found local file that shadows 'onnx': {shadow}. Rename it to avoid import errors.")
-    try:
-        import onnx  # type: ignore
-        _ = getattr(onnx, "version", None)
-    except Exception as e:
-        msg = str(e)
-        if "onnx_cpp2py_export" in msg or "DLL load failed" in msg:
-            print("⚠️  ONNX import failed (likely missing Microsoft Visual C++ Redistributable or NumPy ABI mismatch).")
-            print("    • Install 'Microsoft Visual C++ Redistributable for VS 2015–2022 (x64)' and ensure NumPy < 2.")
-        else:
-            print(f"⚠️  ONNX import problem detected: {msg}")
 
 
 def _export_one(arg: str) -> Tuple[Path, str]:
@@ -356,7 +425,9 @@ def _export_one(arg: str) -> Tuple[Path, str]:
     if not has_yolo or YOLO is None:
         return (target, "failed")
 
-    _preflight_onnx_stack()
+    # One-time preflight + auto-repair
+    if not _preflight_and_repair_onnx_once():
+        return (target, "failed")
 
     with _cd(dst):
         src_pt_path: Optional[Path] = None
@@ -377,7 +448,7 @@ def _export_one(arg: str) -> Tuple[Path, str]:
 
                 with _status_cm("export onnx"), _silence_stdio():
                     exported = False
-                    # Try a small matrix of robust options: opset (torch‑guided), dynamic/simplify fallbacks.
+                    # Try robust matrix: opset (torch‑guided), dynamic/simplify fallbacks.
                     for ops in _candidate_opsets():
                         for (dyn, simp) in ((True, True), (True, False), (False, False)):
                             try:
@@ -389,7 +460,6 @@ def _export_one(arg: str) -> Tuple[Path, str]:
                                     opset=ops,
                                     device="cpu",
                                 )
-                                # Success if target exists (or Ultralytics wrote under runs/)
                                 if target.exists() and _validate_weight(target):
                                     exported = True
                                     break
@@ -404,7 +474,6 @@ def _export_one(arg: str) -> Tuple[Path, str]:
                         if exported:
                             break
 
-                # Validate
                 if target.exists() and _validate_weight(target):
                     action = "exported"
                 else:
@@ -426,6 +495,9 @@ def main(argv: List[str]) -> int:
     if not argv:
         print("usage: _export_onnx.py <weight.pt|weight.onnx|name> [...]")
         return 2
+
+    # One-time doctor/repair (summary line only)
+    _preflight_and_repair_onnx_once()
 
     results: List[Tuple[Path, str]] = []
 
