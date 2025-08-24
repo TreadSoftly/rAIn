@@ -28,7 +28,7 @@ os.environ.setdefault("PIP_NO_BUILD_ISOLATION", "1")
 os.environ.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
 
 # ---------------------------------------------------------------------
-# Minimal no-op spinner (works with "with ... as sp: sp.update(...)")
+# Minimal no-op spinner (works with "with ... as sp: sp.update(... )")
 # ---------------------------------------------------------------------
 class _NoopSpinner:
     def __enter__(self) -> "_NoopSpinner":
@@ -257,7 +257,9 @@ def _try_import_onnx() -> Tuple[bool, str]:
         import onnxruntime as ort  # type: ignore
         details.append(f"onnxruntime: {getattr(ort, '__version__', 'unknown')}")
         try:
-            details.append(f"providers: {ort.get_available_providers()}") # type: ignore[attr-defined]
+            # NOTE: cast to Any so static type checkers don't flag unknown member type
+            providers = cast(Any, ort).get_available_providers()
+            details.append(f"providers: {providers}")
         except Exception:
             details.append("providers query failed:\n" + traceback.format_exc())
     except Exception:

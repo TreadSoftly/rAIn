@@ -27,6 +27,7 @@ from typing import (
     Protocol,
     Set,
     Tuple,
+    cast,
 )
 
 import typer
@@ -145,7 +146,7 @@ def _pip_quiet(*pkgs: str, force_reinstall: bool = False) -> None:
         args.append("--force-reinstall")
     args.extend(pkgs)
     env = os.environ.copy()
-    env.setdefault("PIP_ONLY_BINARY", ":all")
+    env.setdefault("PIP_ONLY_BINARY", ":all:")
     env.setdefault("PIP_NO_BUILD_ISOLATION", "1")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
     try:
@@ -346,7 +347,9 @@ def _try_import_onnx() -> Tuple[bool, str]:
         import onnxruntime as ort  # type: ignore
         details.append(f"onnxruntime: {getattr(ort, '__version__', 'unknown')}")
         try:
-            details.append(f"providers: {ort.get_available_providers()}")  # type: ignore[attr-defined]
+            # NOTE: cast to Any so static type checkers don't flag unknown member type
+            providers = cast(Any, ort).get_available_providers()
+            details.append(f"providers: {providers}")
         except Exception:
             details.append("providers query failed:\n" + traceback.format_exc())
     except Exception:
