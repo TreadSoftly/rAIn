@@ -12,12 +12,40 @@ $env:PANOPTES_NESTED_PROGRESS = '1'
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
 
 # Force the CLI to use a single-line progress on a proper TTY stream
+# (Argos/panoptes progress uses this and will render on one line)
 $env:ARGOS_PROGRESS_STREAM = 'stdout'
 $env:ARGOS_FORCE_PLAIN_PROGRESS = '1'
 
 # During bootstrap, skip weights (the selector will handle them)
 $env:ARGOS_SKIP_WEIGHTS = '1'
 Remove-Item Env:ARGOS_ASSUME_YES -ErrorAction SilentlyContinue
+
+# ---- Keep progress to ONE line: silence pip's noisy progress/log output ----
+# pip can still emit a lot of lines (downloads, wheels, etc.) which pushes the progress
+# line up. We disable pip's progress bar and enable quiet mode. We do this both via
+# environment variables and a temporary pip config so that calls issued by child
+# processes (e.g. bootstrap) inherit it reliably.
+$env:PIP_PROGRESS_BAR = 'off'
+$env:PIP_NO_COLOR = '1'
+
+# Create a minimal, ephemeral pip config that enforces single-line friendliness
+try {
+  $pipCfg = Join-Path $env:TEMP 'pip-singleline.ini'
+  @"
+[global]
+progress-bar = off
+quiet = 1
+disable-pip-version-check = true
+no-color = true
+"@ | Set-Content -LiteralPath $pipCfg -Encoding ASCII
+  $env:PIP_CONFIG_FILE = $pipCfg
+}
+catch {
+  Write-Host "Warning: could not create pip single-line config. Continuing with env-based settings."
+}
+
+# (Optional) If your terminal still wraps the progress line, you can try:
+# $env:ARGOS_PROGRESS_STREAM = 'stderr'
 
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
@@ -110,8 +138,8 @@ function Install-Python {
   }
   if ($OsIsLinux) {
     if (Get-Command apt-get -ErrorAction SilentlyContinue) { & apt-get update; & apt-get install -y python3 }
-    elseif (Get-Command dnf -ErrorAction SilentlyContinue) { & dnf install -y python3 }
-    elseif (Get-Command yum -ErrorAction SilentlyContinue) { & yum install -y python3 }
+    elseif (Get-Command dnf   -ErrorAction SilentlyContinue) { & dnf install -y python3 }
+    elseif (Get-Command yum   -ErrorAction SilentlyContinue) { & yum install -y python3 }
     else { throw "No supported package manager found. Please install Python 3.9 - 3.12 and re-run." }
     if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9 - 3.12 required but not found after package install." }
     return

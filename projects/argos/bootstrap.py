@@ -1,4 +1,3 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\bootstrap.py
 #!/usr/bin/env python3
 """
 Argos bootstrap - zero-touch, idempotent, fast.

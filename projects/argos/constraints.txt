@@ -1,4 +1,3 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\constraints.txt
 # Resolver anchors used by CI across Linux/macOS/Windows.
 
 # Torch/TorchVision pairs (lets pip land on a single, known-good combo)
