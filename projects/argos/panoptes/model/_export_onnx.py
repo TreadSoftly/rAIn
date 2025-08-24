@@ -1,8 +1,10 @@
-# \rAIn\projects\argos\panoptes\model\_export_onnx.py
+# projects/argos/panoptes/model/_export_onnx.py
 from __future__ import annotations
 
 import glob
+import importlib.util
 import os
+import re
 import shutil
 import sys
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
@@ -32,16 +34,12 @@ class _NoopSpinner:
 
 
 # ---------------------------------------------------------------------
-# Panoptes progress (Halo-based, single-line)
-# - Provide a wrapper for osc8 so we can pass Path safely
-# - Provide no-op fallbacks if the package isn't available
+# Panoptes progress (Halo-based, single-line) + Path-safe osc8 wrapper
 # ---------------------------------------------------------------------
 try:
-    from panoptes.progress import osc8 as _osc8_raw  # type: ignore[reportMissingTypeStubs]
-    from panoptes.progress import (  # type: ignore[reportMissingTypeStubs]
-        percent_spinner as _percent_spinner,
-    )
-    from panoptes.progress import simple_status as _simple_status  # type: ignore[reportMissingTypeStubs]
+    from panoptes.progress import osc8 as _osc8_raw  # type: ignore
+    from panoptes.progress import percent_spinner as _percent_spinner  # type: ignore
+    from panoptes.progress import simple_status as _simple_status  # type: ignore
 
     def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _percent_spinner(*args, **kwargs)  # type: ignore[misc]
@@ -62,20 +60,86 @@ except Exception:  # pragma: no cover
 
 
 def osc8_link(label: str, target: str | Path) -> str:
-    """
-    Safe wrapper so callers can pass either str or Path for 'target',
-    while deferring to Panoptes' osc8() implementation.
-    """
     try:
         return _osc8_raw(label, str(target))
     except Exception:
         return str(target)
 
 
+# ---------------------------------------------------------------------
+# Auto-install export deps (quiet)
+# ---------------------------------------------------------------------
+def _have(mod: str) -> bool:
+    try:
+        return importlib.util.find_spec(mod) is not None
+    except Exception:
+        return False
+
+
+def _pip_quiet(*pkgs: str) -> None:
+    if not pkgs:
+        return
+    try:
+        import subprocess
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--no-input", "--quiet", *pkgs],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def _parse_ver_tuple(s: str) -> Tuple[int, int, int]:
+    nums = [int(x) for x in re.findall(r"\d+", s)[:3]]
+    while len(nums) < 3:
+        nums.append(0)
+    return nums[0], nums[1], nums[2]
+
+
+def _ensure_export_toolchain() -> None:
+    # Ultralytics pinned to range that works for this project
+    need_ultra = False
+    if not _have("ultralytics"):
+        need_ultra = True
+    else:
+        try:
+            from importlib.metadata import version as _ver  # type: ignore
+        except Exception:  # pragma: no cover
+            try:
+                from importlib_metadata import version as _ver  # type: ignore
+            except Exception:
+                _ver = None  # type: ignore
+
+        try:
+            v: Optional[str] = cast(Optional[str], _ver("ultralytics") if _ver else None)
+            if v is not None:
+                vt = _parse_ver_tuple(v)
+                if not ((8, 3, 0) <= vt < (8, 6, 0)):
+                    need_ultra = True
+            else:
+                need_ultra = True
+        except Exception:
+            need_ultra = True
+
+    if need_ultra:
+        _pip_quiet("ultralytics>=8.3,<8.6")
+
+    if not _have("onnx"):
+        _pip_quiet("onnx>=1.14,<1.18")
+    if not _have("onnxruntime"):
+        _pip_quiet("onnxruntime>=1.22,<1.24")
+    _pip_quiet("onnxslim>=0.1.59")
+
+
+# Ensure deps before we try to import YOLO
+_ensure_export_toolchain()
+
 # --- Ultralytics (quiet logging, version-agnostic) ---
 has_yolo: bool = False
 try:
-    from ultralytics import YOLO  # type: ignore[reportMissingTypeStubs]
+    from ultralytics import YOLO  # type: ignore
     try:
         from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
         _rem = getattr(_ULTRA_LOGGER, "remove", None)
@@ -159,9 +223,6 @@ def _silence_stdio() -> Generator[None, None, None]:
 
 
 def _status_cm(label: str) -> ContextManager[Any]:
-    """
-    Typed wrapper over progress.simple_status; auto-disables if nested.
-    """
     enabled = (os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1")
     try:
         return cast(ContextManager[Any], simple_status(label, enabled=enabled))  # type: ignore[misc]
@@ -174,7 +235,6 @@ def _export_one(arg: str) -> Tuple[Path, str]:
     Export ONNX for *arg*.
     Returns (final_path, action) where action ∈ {"present" | "exported" | "failed"}.
     """
-    # Decide canonical target path first (works even if YOLO missing)
     p = Path(arg)
     if p.suffix.lower() == ".pt":
         dst = (p.parent if p.parent != Path() else MODEL_DIR)
@@ -195,7 +255,6 @@ def _export_one(arg: str) -> Tuple[Path, str]:
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / onnx_name
 
-    # Already present (only if valid)
     if target.exists():
         if _validate_weight(target):
             return (target, "present")
@@ -207,28 +266,23 @@ def _export_one(arg: str) -> Tuple[Path, str]:
     if not has_yolo or YOLO is None:
         return (target, "failed")
 
-    # Work inside *dst* so Ultralytics writes runs/ here (not repo root)
     with _cd(dst):
-        # Ensure we have the .pt inside dst if a real file path was provided
         src_pt_path: Optional[Path] = None
         if (p.suffix.lower() == ".pt") and p.exists():
             src_pt_path = p.resolve()
 
-        # Try the provided spelling + synonyms for hub fetch
         tried_names: List[str] = [pt_name, *{nm for nm in _synonyms(pt_name) if nm != pt_name}]
         for nm in tried_names:
             try:
-                # Load/Fetch the .pt
                 with _status_cm("fetch weights"), _silence_stdio():
                     m = YOLO(str(src_pt_path or nm))  # may download into CWD=dst
                     ck = Path(getattr(m, "ckpt_path", nm)).expanduser()
                     if not ck.exists():
                         ck = Path(nm).expanduser()
-                    canon_pt = dst / pt_name  # canonical local filename
+                    canon_pt = dst / pt_name
                     if ck.exists() and ck.resolve() != canon_pt.resolve():
                         shutil.copy2(ck, canon_pt)
 
-                # Export ONNX (with safe fallbacks)
                 with _status_cm("export onnx"), _silence_stdio():
                     try:
                         YOLO(str(canon_pt)).export(  # type: ignore[call-arg]
@@ -240,21 +294,18 @@ def _export_one(arg: str) -> Tuple[Path, str]:
                                 format="onnx", dynamic=True, simplify=False, imgsz=640, opset=12, device="cpu"
                             )
                         except Exception:
-                            YOLO(str(canon_pt)).export(  # last ditch: drop dynamic
-                                format="onnx", simplify=False, imgsz=640, opset=12, device="cpu"  # type: ignore[call-arg]
+                            YOLO(str(canon_pt)).export(  # type: ignore[call-arg]
+                                format="onnx", dynamic=False, simplify=False, imgsz=640, opset=12, device="cpu"
                             )
 
-                # (a) direct save as target
                 if target.exists() and _validate_weight(target):
                     action = "exported"
                 else:
-                    # (b) under runs/ → copy to target (then validate)
                     cand = _latest_exported_onnx()
                     if cand and cand.exists():
                         shutil.copy2(cand, target)
                     action = "exported" if (target.exists() and _validate_weight(target)) else "failed"
 
-                # Tidy transient folder; ignore errors
                 try:
                     shutil.rmtree(dst / "runs", ignore_errors=True)
                 except Exception:
@@ -273,12 +324,10 @@ def main(argv: List[str]) -> int:
 
     results: List[Tuple[Path, str]] = []
 
-    # Halo spinner progress (single-line, fixed width)
     with percent_spinner(prefix="ONNX") as sp:
         sp.update(total=len(argv), count=0)
         for i, a in enumerate(argv, start=1):
             try:
-                # show model (weight base) while exporting
                 model_name = Path(a).name
                 sp.update(current=a, job="export", model=model_name)
             except Exception:

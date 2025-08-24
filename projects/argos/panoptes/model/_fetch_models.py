@@ -5,6 +5,7 @@ import glob
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,10 +66,9 @@ class _ProgressLike(Protocol):
 
 
 try:
-    # Panoptes progress helpers may not have type stubs
-    from panoptes.progress import osc8 as _osc8_raw  # type: ignore[reportMissingTypeStubs]
-    from panoptes.progress import percent_spinner as _percent_spinner  # type: ignore[reportMissingTypeStubs]
-    from panoptes.progress import simple_status as _simple_status  # type: ignore[reportMissingTypeStubs]
+    from panoptes.progress import osc8 as _osc8_raw  # type: ignore
+    from panoptes.progress import percent_spinner as _percent_spinner  # type: ignore
+    from panoptes.progress import simple_status as _simple_status  # type: ignore
 
     def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _percent_spinner(*args, **kwargs)  # type: ignore[misc]
@@ -97,7 +97,7 @@ def osc8_link(label: str, target: str | Path) -> str:
 
 # Our byte-accurate downloader (works with .update(total=..., count=..., current=...))
 try:
-    from panoptes.progress.integrations.download_progress import download_url  # type: ignore[reportMissingTypeStubs]
+    from panoptes.progress.integrations.download_progress import download_url  # type: ignore
 except Exception:
     download_url = None  # type: ignore[assignment]
 
@@ -106,7 +106,7 @@ except Exception:
 # Resolve model directory from registry (fallback to repo path)
 # ---------------------------------------------------------------------
 try:
-    from panoptes.model_registry import MODEL_DIR as _REG_MODEL_DIR  # type: ignore[reportMissingTypeStubs]
+    from panoptes.model_registry import MODEL_DIR as _REG_MODEL_DIR  # type: ignore
     _registry_model_dir: Optional[Path] = Path(_REG_MODEL_DIR)  # type: ignore[arg-type]
 except Exception:
     _registry_model_dir = None
@@ -115,7 +115,7 @@ MODEL_DIR: Path = _registry_model_dir or (Path(__file__).resolve().parents[2] / 
 
 
 # ---------------------------------------------------------------------
-# Auto-install export deps (avoid importing libs that lack type stubs)
+# Auto-install export deps (keep quiet; avoid importing libs that lack stubs)
 # ---------------------------------------------------------------------
 def _have(mod: str) -> bool:
     try:
@@ -135,41 +135,74 @@ def _pip_quiet(*pkgs: str) -> None:
             stderr=subprocess.DEVNULL,
         )
     except Exception:
-        # best-effort; runtime will still try fallbacks
+        # best-effort — export will still try fallbacks
         pass
+
+
+def _parse_ver_tuple(s: str) -> Tuple[int, int, int]:
+    # Extract first 3 numeric groups; pad with zeros
+    nums = [int(x) for x in re.findall(r"\d+", s)[:3]]
+    while len(nums) < 3:
+        nums.append(0)
+    return nums[0], nums[1], nums[2]
 
 
 def _ensure_export_toolchain() -> None:
     """
-    Idempotently ensure ultralytics + onnx toolchain without importing
-    untyped libs (prevents Pyright 'missing stub' and 'unused import' noise).
+    Idempotently ensure a working export toolchain:
+      - ultralytics pinned to the range that works on your dev box:  >=8.3,<8.6
+      - onnx >=1.14,<1.18
+      - onnxruntime >=1.22,<1.24
+      - onnxslim >=0.1.59  (important for simplify=True to succeed)
     """
-    # Keep versions conservative & Py3.12-friendly
+    # Ultralytics
+    need_ultra = False
     if not _have("ultralytics"):
-        _pip_quiet("ultralytics>=8.3.0")
+        need_ultra = True
+    else:
+        try:
+            from importlib.metadata import version as _ver  # type: ignore
+        except Exception:  # pragma: no cover
+            try:
+                from importlib_metadata import version as _ver  # type: ignore
+            except Exception:
+                _ver = None  # type: ignore
+
+        try:
+            raw_v = _ver("ultralytics") if _ver else None  # type: ignore[call-arg]
+            v: Optional[str] = raw_v if isinstance(raw_v, str) else None
+            if v is not None:
+                vt = _parse_ver_tuple(v)
+                if not ((8, 3, 0) <= vt < (8, 6, 0)):
+                    need_ultra = True
+            else:
+                need_ultra = True
+        except Exception:
+            need_ultra = True
+
+    if need_ultra:
+        _pip_quiet("ultralytics>=8.3,<8.6")
+
+    # ONNX bits (install/upgrade if missing)
     if not _have("onnx"):
         _pip_quiet("onnx>=1.14,<1.18")
     if not _have("onnxruntime"):
-        # 1.22+ generally fine; pick ranges that work across platforms
-        if os.name == "nt":
-            _pip_quiet("onnxruntime>=1.22,<1.24")
-        else:
-            _pip_quiet("onnxruntime>=1.22,<1.24")
-    if not _have("onnxslim"):
-        _pip_quiet("onnxslim<0.1.59")
+        _pip_quiet("onnxruntime>=1.22,<1.24")
+    # Make sure simplifier is recent enough
+    _pip_quiet("onnxslim>=0.1.59")
 
 
-# Ensure deps before we try to import YOLO (import once; no reassignment)
+# Ensure deps before import; keep Ultralytics quiet afterwards
 _ensure_export_toolchain()
 
 # Ultralytics (used to export ONNX and as last-resort fetcher)
 has_yolo: bool
 try:
-    from ultralytics import YOLO as _YOLO  # type: ignore[reportMissingTypeStubs]
+    from ultralytics import YOLO as _YOLO  # type: ignore
 
-    # silence Ultralytics logger; we print succinct logs ourselves
     try:
-        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore[reportMissingTypeStubs]
+        # silence Ultralytics logger; we print succinct logs ourselves
+        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
         _rem = getattr(_ULTRA_LOGGER, "remove", None)
         if callable(_rem):
             _rem()
@@ -186,7 +219,7 @@ except Exception:
     _YOLO = None  # type: ignore[assignment]
     has_yolo = False
 
-YOLO = _YOLO  # IMPORTANT: assign once; never reassign an ALL-CAPS name
+YOLO = _YOLO  # expose once
 
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
@@ -452,7 +485,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
 
-    # Always show what we're checking
+    # Announce
     if spinner is not None:
         try:
             spinner.update(total=items_total, count=items_done, current=target.name, job="check", model=target.name)
@@ -468,8 +501,9 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         except Exception:
             pass
 
-    # 1) Direct download (.pt only) with byte progress
     base = target.name
+
+    # 1) Direct download (.pt only)
     if base.lower().endswith(".pt") and download_url is not None:
         try:
             ctx: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
@@ -487,7 +521,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         except Exception:
             pass
 
-    # 2) YOLO as last-resort fetcher for .pt (silenced)
+    # 2) YOLO last-resort fetcher for .pt (silenced)
     if base.lower().endswith(".pt") and has_yolo and YOLO is not None:
         try:
             if spinner is not None:
@@ -499,14 +533,12 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                     p = Path(base).expanduser()
                 if p.exists():
                     if p.resolve() == target.resolve():
-                        # downloaded straight to target
                         pass
                     else:
                         shutil.copy2(p, target)
         except Exception:
             pass
         if _validate_weight(target):
-            # If YOLO wrote into cwd directly, treat as "download"
             return (target.name, "download" if (dst / base).exists() else "copied")
 
     # 3) If ONNX requested, export from the matching .pt (ensure it exists)
@@ -514,7 +546,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         pt_name = Path(base).with_suffix(".pt").name
         pt_path = dst / pt_name
 
-        # Ensure the .pt exists (prefer our downloader)
+        # Ensure the .pt exists (prefer direct download; fallback to YOLO)
         if not pt_path.exists() or not _validate_weight(pt_path):
             if download_url is not None:
                 try:
@@ -529,7 +561,6 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                 except Exception:
                     pass
 
-            # YOLO fallback for fetching the .pt
             if (not pt_path.exists() or not _validate_weight(pt_path)) and has_yolo and YOLO is not None:
                 try:
                     if spinner is not None:
@@ -544,21 +575,25 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                 except Exception:
                     pass
 
-        # Export ONNX
+        # Export ONNX (three-level fallback)
         if has_yolo and YOLO is not None and pt_path.exists() and _validate_weight(pt_path):
             try:
                 if spinner is not None:
                     spinner.update(current=base, job="export onnx", model=pt_name)
                 with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
-                    # Robust 3-step fallback:
-                    # (1) dynamic + simplify   → (2) dynamic + no-simplify   → (3) static + no-simplify
                     try:
-                        YOLO(str(pt_path)).export(format="onnx", dynamic=True,  simplify=True,  imgsz=640, opset=12, device="cpu")  # type: ignore
+                        YOLO(str(pt_path)).export(  # type: ignore
+                            format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu"
+                        )
                     except Exception:
                         try:
-                            YOLO(str(pt_path)).export(format="onnx", dynamic=True,  simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
+                            YOLO(str(pt_path)).export(  # type: ignore
+                                format="onnx", dynamic=True, simplify=False, imgsz=640, opset=12, device="cpu"
+                            )
                         except Exception:
-                            YOLO(str(pt_path)).export(format="onnx", dynamic=False, simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
+                            YOLO(str(pt_path)).export(  # type: ignore
+                                format="onnx", dynamic=False, simplify=False, imgsz=640, opset=12, device="cpu"
+                            )
 
                 # success path (a)
                 if target.exists() and _validate_weight(target):
@@ -867,7 +902,7 @@ def _quick_check() -> None:
 
     # Expected items = number of raw inputs (bounded to ≥1)
     try:
-        from panoptes import cli as _cli  # type: ignore[reportMissingTypeStubs]
+        from panoptes import cli as _cli  # type: ignore
         _img: Set[str] = set(cast(Iterable[str], getattr(_cli, "_IMAGE_EXTS", ())))  # type: ignore[misc]
         _vid: Set[str] = set(cast(Iterable[str], getattr(_cli, "_VIDEO_EXTS", ())))  # type: ignore[misc]
         exts: Set[str] = _img | _vid
