@@ -1,11 +1,6 @@
+# projects/argos/panoptes/cli.py
 from __future__ import annotations
 
-# ────────────────────────────────────────────────────────────────────────────
-#  Py<3.11 compatibility: ensure typing.Self exists so imports in submodules
-#  like "from typing import Self" won't crash under Python 3.9/3.10.
-#  We install a shim onto the typing module *before* importing anything else
-#  that might rely on it.
-# ────────────────────────────────────────────────────────────────────────────
 try:
     # Python 3.11+ — already present
     from typing import Self as _ArgosTypingSelf  # type: ignore
@@ -30,6 +25,13 @@ from types import TracebackType
 from typing import Any, Callable, Final, Iterable, Iterator, List, Literal, Optional, Protocol, cast
 
 import typer
+
+# Diagnostics (always attach; best-effort — never crash if missing)
+try:
+    import importlib
+    importlib.import_module("panoptes.diagnostics")
+except Exception:
+    pass
 
 # ────────────────────────────────────────────────────────────────────────────
 #  app scaffolding
@@ -696,9 +698,9 @@ def _maybe_spinner(prefix: str, *, final_newline: bool = True) -> Iterator[Spinn
         else:
             os.environ["PANOPTES_PROGRESS_ACTIVE"] = prev_env
 
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  lightweight wrappers for lazy imports
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 def _pick_weight(task: Literal["detect", "heatmap"], *, small: bool):
     from panoptes import model_registry as _mr  # type: ignore[reportMissingTypeStubs]
     return _mr.pick_weight(task, small=small)
@@ -732,9 +734,9 @@ def _reinit_models(
             seg_override=seg_override,
         )
 
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  Progress proxy: map child current → JOB so ITEM stays pinned
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 class _JobAwareProxy:
     """
     Intercepts update(current=...) from child layers and treats it as JOB,
@@ -828,9 +830,9 @@ def _run_single(
         **kwargs,
     )
 
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  results tracking (for clickable file names)
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 def _snapshot_results(bases: Optional[list[Path]] = None) -> set[Path]:
     """
     Snapshot all files beneath the given base directories (defaults to _RESULTS_DIR).
@@ -1263,9 +1265,9 @@ def target(  # noqa: C901
             typer.echo("")  # spacer
             typer.echo("No new result files were detected.")
 
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  entry-point glue
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 def _prepend_argv(token: str) -> None:
     sys.argv = sys.argv[:1] + [token] + sys.argv[1:]
 

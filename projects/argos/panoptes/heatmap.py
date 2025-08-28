@@ -1,26 +1,3 @@
-# projects/argos/panoptes/heatmap.py
-"""
-panoptes.heatmap
-───────────────────
-Instance‑segmentation / heat‑map overlay helper.
-
-Lock‑down (2025‑08‑07)
-────────────────────────────────
-* No path/env probing — only the registry’s `load_segmenter()` is used.
-* Import‑time hard‑failure if weights are missing (mirrors lambda_like).
-
-Progress policy (single‑line UX)
-────────────────────────────────
-* The CLI owns the single, pinned spinner.
-* This module is QUIET by default (no prints, no nested spinners).
-* If you want per‑step animation here (e.g., debugging), opt‑in with:
-      PANOPTES_NESTED_PROGRESS=1
-
-API
-───
-    heatmap_overlay(img, *, boxes=None, alpha=0.4, return_mask=False, ...)
-    → PIL.Image (RGB) or ndarray (BGR if return_mask=False; 8‑bit mask if True)
-"""
 from __future__ import annotations
 
 import colorsys
@@ -147,7 +124,7 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
             # ▸ (N,H,W) → np.float32
             try:
                 import torch  # type: ignore
-                masks_np: NDArray[np.float32] = (
+                masks_np: NDArray[np.float32] = ( # type: ignore[assignment]
                     mdat.cpu().numpy().astype(np.float32)  # type: ignore[attr-defined]
                     if isinstance(mdat, torch.Tensor)
                     else np.asarray(mdat, dtype=np.float32)

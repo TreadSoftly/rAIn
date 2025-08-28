@@ -1,26 +1,3 @@
-# projects/argos/panoptes/model_registry.py
-"""
-panoptes.model_registry
---------------------------
-*Single* source-of-truth for every weight-selection decision.
-
-Hard-locking rules
-────────────────────────────────────────────────────────────────────────
-1. **Only** the paths listed in ``WEIGHT_PRIORITY`` are ever considered.
-2. No directory scans, no implicit “-seg” discovery, no env-variable
-   overrides (`panoptes_*`).  The *override=* argument in
-   ``load_detector/segmenter/...`` is retained for unit-tests and ad‑hoc use.
-3. If a required weight is missing we raise **RuntimeError** immediately
-   - downstream code must catch or let the program abort.
-
-Progress policy
-────────────────────────────────────────────────────────────────────────
-This module **never** creates or displays any progress UI on its own.
-It does not import or use any progress/status helpers. All progress is
-centralized in the CLI via the Halo/Rich spinner. Model initialization
-happens silently here so the single parent spinner remains the *only*
-progress surface visible to the user.
-"""
 from __future__ import annotations
 
 import contextlib

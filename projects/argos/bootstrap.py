@@ -1,4 +1,4 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\bootstrap.py
+# projects/argos/bootstrap.py
 #!/usr/bin/env python3
 """
 Argos bootstrap - zero-touch, idempotent, fast.
@@ -48,6 +48,13 @@ from typing import (
     cast,
     overload,
 )
+
+# Diagnostics (always try to attach; never crash on failure)
+try:
+    import importlib
+    importlib.import_module("panoptes.diagnostics")
+except Exception:
+    pass
 
 # ──────────────────────────────────────────────────────────────
 # Optional: Progress UI (safe fallbacks if deps missing / CI / non-TTY)
@@ -333,7 +340,7 @@ def _pip_install_editable_if_needed(*, reinstall: bool = False) -> None:
 
     _print("→ installing Argos package (editable) + dev extras …")
     _run(
-        [str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + "[dev]", *_constraints_args()],
+        [str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + "[dev]", *_constraints_args() ],
         check=True,
         capture=False,
     )
