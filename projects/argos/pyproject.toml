@@ -1,11 +1,10 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\pyproject.toml
 [build-system]
 requires      = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
 name            = "Argos"
-version         = "1.2.0"
+version         = "1.2.2"
 description     = "The Many Eyed Sentinel"
 authors         = [{ name = "Dr4gnf1y", email = "shadowburner@protonmail.com" }]
 readme          = "README.md"
@@ -30,7 +29,9 @@ dependencies = [
   # ── Imaging / numerics ──
   # Force GUI-capable OpenCV on ALL platforms (no headless)
   "opencv-python>=4.11,<4.12",
-  "numpy!=2.0.*,>=1.26,<2.3",
+
+  # NumPy: raise floor so Torch/Tv CPU wheels resolve across Py 3.10–3.12
+  "numpy!=2.0.*,>=2.1,<2.3",
   "pillow>=10.0,<12.0",
   "pillow-avif-plugin>=1.4",
 
@@ -43,7 +44,7 @@ dependencies = [
 
   # Infra / utils
   "redis>=5.0",
-  "typer[all]>=0.12",
+  "typer>=0.12",
   "thop==0.1.1.post2209072238",
 ]
 

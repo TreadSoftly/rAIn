@@ -1,4 +1,3 @@
-# installers\build.ps1  — zero-touch bootstrap + model selector (smoke check asked ONCE after selection)
 [CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$BuildArgs)
 $ErrorActionPreference = 'Stop'
@@ -12,7 +11,6 @@ $env:PANOPTES_NESTED_PROGRESS = '1'
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
 
 # Force the CLI to use a single-line progress on a proper TTY stream
-# (Argos/panoptes progress uses this and will render on one line)
 $env:ARGOS_PROGRESS_STREAM = 'stdout'
 $env:ARGOS_FORCE_PLAIN_PROGRESS = '1'
 
@@ -21,10 +19,6 @@ $env:ARGOS_SKIP_WEIGHTS = '1'
 Remove-Item Env:ARGOS_ASSUME_YES -ErrorAction SilentlyContinue
 
 # ---- Keep progress to ONE line: silence pip's noisy progress/log output ----
-# pip can still emit a lot of lines (downloads, wheels, etc.) which pushes the progress
-# line up. We disable pip's progress bar and enable quiet mode. We do this both via
-# environment variables and a temporary pip config so that calls issued by child
-# processes (e.g. bootstrap) inherit it reliably.
 $env:PIP_PROGRESS_BAR = 'off'
 $env:PIP_NO_COLOR = '1'
 
@@ -44,14 +38,10 @@ catch {
   Write-Host "Warning: could not create pip single-line config. Continuing with env-based settings."
 }
 
-# (Optional) If your terminal still wraps the progress line, you can try:
-# $env:ARGOS_PROGRESS_STREAM = 'stderr'
-
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 
 function Install-VcRedistIfMissing {
-  # Windows only; harmless no-op elsewhere
   if ($env:OS -ne 'Windows_NT') { return }
   try {
     $sys = Join-Path $env:WINDIR 'System32'
@@ -59,8 +49,7 @@ function Install-VcRedistIfMissing {
     $has2 = Test-Path -LiteralPath (Join-Path $sys 'vcruntime140_1.dll')
     $has3 = Test-Path -LiteralPath (Join-Path $sys 'msvcp140.dll')
     if ($has1 -and $has2 -and $has3) { return }
-  }
-  catch { }
+  } catch {}
   Write-Host "Installing Microsoft Visual C++ Redistributable (x64)..." -ForegroundColor Yellow
   $tmp = Join-Path $env:TEMP 'vc_redist.x64.exe'
   try {
@@ -85,7 +74,7 @@ function _Here {
 $HERE = _Here
 $ROOT = Split-Path -Parent $HERE
 
-# --- OS flags (avoid PS 6+ automatic variables) ---
+# --- OS flags ---
 $OsIsWindows = ($env:OS -eq 'Windows_NT')
 $OsIsMac = $false
 $OsIsLinux = $false

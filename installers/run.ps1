@@ -1,7 +1,5 @@
-# installers\run.ps1 — robust launcher for Argos CLI and LiveVideo
 [CmdletBinding()]
 param(
-  # NOTE: do NOT name this "$Args" — that would shadow the automatic variable.
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$ArgList
 )
@@ -81,7 +79,6 @@ function _Here {
 $HERE = _Here
 $ROOT = Split-Path -Parent $HERE
 
-# Approved verb: Enable- (instead of Ensure-)
 function Enable-GitLfs {
   if (Get-Command git -ErrorAction SilentlyContinue) {
     & git lfs version > $null 2>&1
@@ -97,8 +94,7 @@ function Enable-GitLfs {
   }
 }
 
-# Approved verb: Install- (instead of Ensure-OpenCV)
-# If launching live/video mode, install the GUI build of OpenCV; otherwise the headless build.
+# If launching live/video mode, install GUI OpenCV; otherwise the headless build.
 function Install-OpenCvPackage {
   [CmdletBinding()]
   param(
@@ -110,7 +106,6 @@ function Install-OpenCvPackage {
 
   & $Vpy -m pip show $want *>&1 | Out-Null
   if ($LASTEXITCODE -ne 0) {
-    # Remove conflicting build if present (these two conflict)
     & $Vpy -m pip show $avoid *>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
       & $Vpy -m pip uninstall -y $avoid *>&1 | Out-Null
@@ -141,7 +136,6 @@ foreach ($a in ($ArgList | ForEach-Object { $_ })) {
   }
 }
 
-# Allow "l v" crumbs to imply live mode; if enabled, drop one l and one v from the argv
 if (-not $liveMode -and $foundL -and $foundV) {
   $liveMode = $true
   $new = New-Object System.Collections.Generic.List[string]
@@ -160,7 +154,7 @@ if ($tokens.Count -gt 0) {
   $filtered = New-Object System.Collections.Generic.List[string]
   foreach ($t in $tokens) {
     $k = $t.ToLowerInvariant()
-    if ($k -in @('--no-headless', '-no-headless')) { continue }  # default is windowed already
+    if ($k -in @('--no-headless', '-no-headless')) { continue }
     $filtered.Add($t) | Out-Null
   }
   $tokens = $filtered
@@ -185,7 +179,6 @@ if ($sawBuild) {
 }
 
 # ---------- Python / venv ----------
-# PS 5.1-safe Python detection
 $pyExe = $null
 $pyArgs = @()
 $cmd = Get-Command py -ErrorAction SilentlyContinue
@@ -194,18 +187,14 @@ if (-not $pyExe) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue; if 
 if (-not $pyExe) { $cmd = Get-Command python  -ErrorAction SilentlyContinue; if ($cmd) { $pyExe = $cmd.Source } }
 if (-not $pyExe) { throw "Python 3 not found." }
 
-# Always ensure the venv quietly to avoid stderr noise being treated as errors
 $bootstrap = Join-Path $ROOT 'projects\argos\bootstrap.py'
 & $pyExe @pyArgs "$bootstrap" --ensure --yes > $null 2>&1
 
-# Resolve venv python
 $vpy = & $pyExe @pyArgs "$bootstrap" --print-venv
 if (-not $vpy) { throw "could not resolve venv python" }
 
-# Keep pycache out of tree
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
-# Ensure VC++ runtime before any potential ONNX use on Windows
 Install-VcRedistIfMissing
 
 # ---------- Ensure OpenCV in the venv (GUI vs headless) ----------

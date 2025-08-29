@@ -1,20 +1,16 @@
-# C:\Users\MrDra\OneDrive\Desktop\rAIn\projects\argos\constraints.txt
 # Resolver anchors used by CI across Linux/macOS/Windows.
-
-# Torch/TorchVision pairs (lets pip land on a single, known-good combo)
-torch==2.5.1
-torchvision==0.20.1
-
-# Torchaudio (only if [audio] extra is installed)
-torchaudio==2.5.1
+# NOTE:
+#  - Torch/TorchVision pins were removed here to avoid blocking +cpu local wheels
+#    when the CPU index is used. Torch pairs are selected by requirements + bootstrap logic.
+#  - NumPy floor raised so TorchVision 0.20 CPU wheels resolve cleanly.
 
 # OpenCV wheels (GUI-capable on all platforms)
 opencv-python==4.11.0.86
 
-# NumPy: allow 1.26 or NP2 across Pythons (TV 0.20 cpu wheels need NP>=2.1 on 3.9/3.11)
-numpy>=1.26,<2.3
+# NumPy: allow NP2 across Pythons (Torch/Tv CPU wheels require >=2.1)
+numpy>=2.1,<2.3
 
-# Sympy/Scipy pins to satisfy Torch and ONNX tools
+# Sympy/Scipy pins to satisfy Torch and ONNX tools landscapes
 sympy==1.13.1
 scipy==1.13.*
 

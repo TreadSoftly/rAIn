@@ -1,4 +1,3 @@
-# projects/argos/bootstrap.py
 #!/usr/bin/env python3
 """
 Argos bootstrap - zero-touch, idempotent, fast.
@@ -38,7 +37,7 @@ from typing import (
     Any,
     Callable,
     Dict,
-    Literal,  # pyright: ignore[reportUnusedImport]
+    Literal,
     Mapping,
     MutableMapping,
     Optional,
@@ -69,32 +68,20 @@ except Exception:
     live_percent = None  # type: ignore[assignment]
 
 JSONDict = Dict[str, Any]
-
 APP = "rAIn"
 
-# Help Windows avoid legacy codepage weirdness in child processes (CI, cmd.exe)
 if os.name == "nt":
     os.environ.setdefault("PYTHONUTF8", "1")
 
-# ──────────────────────────────────────────────────────────────
-# Path / typing helpers
-# ──────────────────────────────────────────────────────────────
 StrPath = Union[str, PathLike[str]]
 
-# ──────────────────────────────────────────────────────────────
-# Project roots
-# ──────────────────────────────────────────────────────────────
 HERE: Path = Path(__file__).resolve().parent
-# If someone moves this file to repo-root later, auto-fallback to projects/argos
 ARGOS: Path = (
     HERE
     if (HERE / "pyproject.toml").exists() and (HERE / "panoptes").exists()
     else (HERE / "projects" / "argos")
 )
 
-# ──────────────────────────────────────────────────────────────
-# OS-specific config/data dirs (venv lives under DATA/venvs)
-# ──────────────────────────────────────────────────────────────
 def _cfg_dir() -> Path:
     if os.name == "nt":
         base = Path(os.getenv("APPDATA") or os.getenv("LOCALAPPDATA") or (Path.home() / "AppData" / "Roaming"))
@@ -102,7 +89,6 @@ def _cfg_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / APP
     return Path(os.getenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / APP
-
 
 def _data_dir() -> Path:
     if os.name == "nt":
@@ -112,7 +98,6 @@ def _data_dir() -> Path:
         return Path.home() / "Library" / "Application Support" / APP
     return Path(os.getenv("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / APP
 
-
 CFG: Path = _cfg_dir()
 DATA: Path = _data_dir()
 VENVS: Path = DATA / "venvs"
@@ -121,12 +106,7 @@ SENTINEL: Path = CFG / "first_run.json"
 VENV: Path = VENVS / f"py{sys.version_info.major}{sys.version_info.minor}-argos"
 VPY: Path = VENV / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
 
-
 def _print(msg: object = "") -> None:
-    """
-    Robust print that won't crash on Windows legacy codepages when emitting
-    Unicode (e.g., ★, →). Falls back to UTF-8 bytes with replacement.
-    """
     s = str(msg)
     if not s.endswith("\n"):
         s += "\n"
@@ -136,9 +116,7 @@ def _print(msg: object = "") -> None:
         try:
             sys.stdout.buffer.write(s.encode("utf-8", "replace"))
         except Exception:
-            # Last resort: strip to ASCII replacements
             sys.stdout.write(s.encode("ascii", "replace").decode("ascii"))
-
 
 @overload
 def _run(
@@ -148,10 +126,7 @@ def _run(
     env: Optional[Mapping[str, str]] = ...,
     check: bool = ...,
     capture: Literal[True],
-) -> subprocess.CompletedProcess[str]:
-    ...
-
-
+) -> subprocess.CompletedProcess[str]: ...
 @overload
 def _run(
     cmd: Sequence[str],
@@ -160,9 +135,7 @@ def _run(
     env: Optional[Mapping[str, str]] = ...,
     check: bool = ...,
     capture: Literal[False] = ...,
-) -> None:
-    ...
-
+) -> None: ...
 
 def _run(
     cmd: Sequence[str],
@@ -172,11 +145,6 @@ def _run(
     check: bool = True,
     capture: bool = False,
 ):
-    """
-    Thin wrapper over subprocess.run with typed overloads:
-      • capture=True  -> returns CompletedProcess[str] (text mode)
-      • capture=False -> returns None
-    """
     if capture:
         return subprocess.run(
             list(cmd),
@@ -190,15 +158,10 @@ def _run(
     subprocess.run(list(cmd), check=check, cwd=cwd, env=dict(env) if isinstance(env, MutableMapping) else env)
     return None
 
-
 def _ensure_dirs() -> None:
     for p in (CFG, DATA, VENVS):
         p.mkdir(parents=True, exist_ok=True)
 
-
-# ──────────────────────────────────────────────────────────────
-# Fast checks
-# ──────────────────────────────────────────────────────────────
 def _module_present(mod: str) -> bool:
     code = f"import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('{mod}') else 1)"
     try:
@@ -206,7 +169,6 @@ def _module_present(mod: str) -> bool:
         return True
     except Exception:
         return False
-
 
 def _has_cuda() -> bool:
     smi = shutil.which("nvidia-smi")
@@ -218,18 +180,10 @@ def _has_cuda() -> bool:
     except Exception:
         return False
 
-
-# ──────────────────────────────────────────────────────────────
-# Constraints helper
-# ──────────────────────────────────────────────────────────────
 def _constraints_args() -> list[str]:
     c = ARGOS / "constraints.txt"
     return ["-c", str(c)] if c.exists() else []
 
-
-# ──────────────────────────────────────────────────────────────
-# Venv + pip
-# ──────────────────────────────────────────────────────────────
 def _create_venv() -> None:
     if VENV.exists() and VPY.exists():
         return
@@ -237,13 +191,9 @@ def _create_venv() -> None:
     _run([sys.executable, "-m", "venv", str(VENV)], check=True, capture=False)
     _run([str(VPY), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], check=True, capture=False)
 
-
 def _torch_pins_from_requirements() -> Tuple[str, str]:
-    # Defaults: let constraints select exact versions
     torch_spec = "torch"
     tv_spec = "torchvision"
-
-    # Optional: allow a local requirements.txt to override
     req = ARGOS / "requirements.txt"
     if req.exists():
         for line in req.read_text(encoding="utf-8").splitlines():
@@ -251,74 +201,84 @@ def _torch_pins_from_requirements() -> Tuple[str, str]:
             if not s or s.startswith("#"):
                 continue
             low = s.lower()
-            if low.startswith(("torch==", "torch>", "torch<")):
+            if low.startswith(("torch==", "torch>", "torch<", "torch>=", "torch<=")):
                 torch_spec = s
-            if low.startswith(("torchvision==", "torchvision>", "torchvision<")):
+            if low.startswith(("torchvision==", "torchvision>", "torchvision<", "torchvision>=", "torchvision<=")):
                 tv_spec = s
     return torch_spec, tv_spec
 
+def _ensure_numpy_floor_for_torch() -> None:
+    """
+    Torch/Tv CPU wheels for recent Python require NumPy >=2.1.
+    Pre-install/upgrade NumPy to that floor so pip's resolver doesn't deadlock.
+    """
+    _print("→ ensuring NumPy >=2.1,<2.3 for Torch/Tv …")
+    _run([str(VPY), "-m", "pip", "install", "--upgrade", *_constraints_args(), "numpy>=2.1,<2.3"], check=True, capture=False)
 
 def _install_torch_if_needed(cpu_only: bool) -> None:
     """
-    Install Torch/Torchvision if missing.
-    - Uses the CPU-only wheels index on Windows/Linux when CUDA isn’t available or --cpu was passed.
-    - macOS sticks to PyPI (MPS wheels).
-    - Always honors constraints.txt.
+    Install Torch/Torchvision if missing with robust fallbacks:
+      1) Try requirement specs + constraints (with CPU index when cpu_only).
+      2) On failure, ensure NumPy floor and retry.
+      3) On failure, fall back to curated pairs (with +cpu local tags on CPU index).
     """
     if _module_present("torch") and _module_present("torchvision"):
         return
+
     torch_spec, tv_spec = _torch_pins_from_requirements()
-    # CPU wheels index for Win/Linux when cpu_only; macOS uses default (MPS wheels on PyPI)
+
+    # Use CPU wheels index on Win/Linux when CPU-only; macOS uses default (MPS wheels).
+    base_cmd = [str(VPY), "-m", "pip", "install"]
     idx: list[str] = []
     if cpu_only and (os.name == "nt" or sys.platform.startswith("linux")):
         idx = ["--index-url", "https://download.pytorch.org/whl/cpu"]
-    _print(f"→ installing Torch ({'CPU-only' if cpu_only else 'auto'}) …")
-    _run([str(VPY), "-m", "pip", "install", *idx, *_constraints_args(), torch_spec, tv_spec], check=True, capture=False)
 
+    def _try_install(pkgs: list[str], label: str) -> bool:
+        try:
+            _print(f"→ installing Torch ({label}) …")
+            _run([*base_cmd, *idx, *_constraints_args(), *pkgs], check=True, capture=False)
+            return True
+        except Exception:
+            return False
+
+    # 1) Requirements + constraints (preferred)
+    if _try_install([torch_spec, tv_spec], "requirements"):
+        return
+
+    # 2) Add NumPy floor and retry
+    _ensure_numpy_floor_for_torch()
+    if _try_install([torch_spec, tv_spec], "requirements+numpy"):
+        return
+
+    # 3) Curated fallback pairs
+    if cpu_only and (os.name == "nt" or sys.platform.startswith("linux")):
+        # CPU local-tagged wheels
+        for pair in (["torch==2.4.1+cpu", "torchvision==0.19.1+cpu"],
+                     ["torch==2.5.1+cpu", "torchvision==0.20.1+cpu"]):
+            if _try_install(pair, f"fallback {'/'.join(pair)}"):
+                return
+    else:
+        for pair in (["torch==2.4.1", "torchvision==0.19.1"],
+                     ["torch==2.5.1", "torchvision==0.20.1"]):
+            if _try_install(pair, f"fallback {'/'.join(pair)}"):
+                return
+
+    raise RuntimeError("Torch/Torchvision installation failed after multiple attempts.")
 
 def _ensure_opencv_gui() -> None:
-    """
-    Enforce GUI-capable OpenCV across ALL platforms.
-      • Uninstall any headless variants that shadow HighGUI
-      • Install/upgrade opencv-python pinned by constraints.txt
-    """
     _print("→ ensuring OpenCV (GUI-capable) …")
-    # Remove headless variants if present (best-effort)
     try:
-        _run(
-            [
-                str(VPY),
-                "-m",
-                "pip",
-                "uninstall",
-                "-y",
-                "opencv-python-headless",
-                "opencv-contrib-python-headless",
-            ],
-            check=False,
-            capture=False,
-        )
+        _run([str(VPY), "-m", "pip", "uninstall", "-y",
+              "opencv-python-headless", "opencv-contrib-python-headless"], check=False, capture=False)
     except Exception:
         pass
-    # Install/upgrade GUI wheel; constraints.txt will anchor the exact version
     _run([str(VPY), "-m", "pip", "install", "--upgrade", *_constraints_args(), "opencv-python"], check=True, capture=False)
 
-
-def _pip_install_editable_if_needed(*, reinstall: bool = False) -> None:
-    """
-    Install Argos in editable mode (with dev extras) if missing, or when
-    explicitly forced. Also nuke headless OpenCV if it slipped in.
-
-    Also fixes the prior pyright/typing warning by importing symbols directly
-    from importlib.metadata (with a backport fallback) instead of using a
-    partially-unknown module alias.
-    """
+def _pip_install_editable_if_needed(*, reinstall: bool = False, with_dev: bool = True) -> None:
     need = reinstall or (not _module_present("panoptes")) or (not _module_present("ultralytics"))
 
-    # If headless OpenCV is installed, force a reinstall path so deps are corrected.
     headless_present = False
     try:
-        # Prefer stdlib importlib.metadata; fall back to backport.
         from importlib.metadata import PackageNotFoundError, distribution as ild_distribution  # type: ignore
     except Exception:  # pragma: no cover
         from importlib_metadata import PackageNotFoundError, distribution as ild_distribution  # type: ignore
@@ -338,28 +298,12 @@ def _pip_install_editable_if_needed(*, reinstall: bool = False) -> None:
     if not need:
         return
 
-    _print("→ installing Argos package (editable) + dev extras …")
-    _run(
-        [str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + "[dev]", *_constraints_args() ],
-        check=True,
-        capture=False,
-    )
+    _print(f"→ installing Argos package (editable){' + dev' if with_dev else ''} …")
+    extra = "[dev]" if with_dev else ""
+    _run([str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + extra, *_constraints_args()], check=True, capture=False)
 
-
-# ──────────────────────────────────────────────────────────────
-# Weights helpers
-# ──────────────────────────────────────────────────────────────
 def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str], list[str]]:
-    """
-    Return (model_dir, all_names, default_names, nano_names, perception_names) from registry.
-    Robust against noisy stdout on CI by writing JSON to a temp file.
-
-    Works on *first run* even before the venv exists by:
-      • falling back to the current interpreter when VPY is missing
-      • injecting PYTHONPATH so the in-repo `panoptes/` is importable
-    """
     import tempfile
-
     probe = r"""
 import json, sys
 from pathlib import Path
@@ -375,7 +319,6 @@ def uniq(xs):
 def first_or_none(lst):
     return lst[0] if lst else None
 
-# Build name families from registry
 all_names=[]
 for _, paths in WEIGHT_PRIORITY.items():
     for p in paths:
@@ -402,24 +345,22 @@ out_path.write_text(json.dumps({
     'perception': uniq([x for x in perception_names if x]),
 }), encoding='utf-8')
 """
-    # Use a named temp file (closed) so Windows can reopen it in the child.
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tf:
         out_path = Path(tf.name)
     try:
-        # Interpreter: prefer venv Python if present, else current Python
         py = str(VPY) if VENV.exists() and VPY.exists() else sys.executable
-        # Ensure the repo source is importable inside the child
         env = os.environ.copy()
         env_pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = (str(ARGOS) + (os.pathsep + env_pp if env_pp else ""))
 
         _run([py, "-c", probe, str(out_path)], check=True, capture=False, env=env)
         txt = out_path.read_text(encoding="utf-8")
-        meta: JSONDict = {}
         try:
             obj = json.loads(txt)
             if isinstance(obj, dict):
                 meta = cast(JSONDict, obj)
+            else:
+                meta = {}
         except Exception:
             meta = {}
     finally:
@@ -430,8 +371,7 @@ out_path.write_text(json.dumps({
 
     def _to_str_list(v: Any) -> list[str]:
         if isinstance(v, list):
-            vv = cast(list[Any], v)
-            return [str(x) for x in vv if x is not None]
+            return [str(x) for x in cast(list[object], v) if x is not None]
         return []
 
     model_dir_str = str(meta.get("model_dir", ""))
@@ -443,11 +383,7 @@ out_path.write_text(json.dumps({
         _to_str_list(meta.get("perception")),
     )
 
-
 def _child_json(code: str, args: list[str]) -> Dict[str, Any]:
-    """
-    Run a small Python snippet in the venv interpreter and read a JSON file it writes as its last arg. This avoids noisy stdout (Ultralytics logs).
-    """
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tf:
         out_path = Path(tf.name)
     try:
@@ -468,25 +404,10 @@ def _child_json(code: str, args: list[str]) -> Dict[str, Any]:
         except Exception:
             pass
 
-
 def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names: Optional[list[str]] = None) -> None:
-    """
-    Ensure weights exist under panoptes.model_registry.WEIGHT_PRIORITY.
-
-    Preset (env or arg):
-    - "all"         → everything listed
-    - "default"     → first detect + first heatmap   (DEFAULT)
-    - "nano"        → detect_small + heatmap_small
-    - "perception"  → detect + heatmap + pose + obb (first in each family)
-
-    • Downloads *.pt via Ultralytics
-    • Builds missing *.onnx by exporting from the matching *.pt
-    """
     model_dir, all_names, default_names, nano_names, perception_names = _probe_weight_presets()
 
-    # choose names
     env_preset = (os.getenv("ARGOS_WEIGHT_PRESET") or "").strip().lower()
-    # DEFAULT remains "default" so we only ensure the two primary .pt weights for a quick first-run
     choice = (preset or env_preset or "default").lower()
     if explicit_names is not None:
         want_names = [n for n in explicit_names if n]
@@ -505,20 +426,17 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
         _print("→ model weights present.")
         return
 
-    # Ultralytics for fetching/exporting
     if not _module_present("ultralytics"):
         _run([str(VPY), "-m", "pip", "install", "ultralytics>=8.0"], check=True, capture=False)
 
     pt_missing = [n for n in need if n.lower().endswith(".pt")]
     onnx_missing = [n for n in need if n.lower().endswith(".onnx")]
 
-    # fetch *.pt directly into model_dir (avoid CWD pollution)
     if pt_missing:
         _print(f"→ fetching {len(pt_missing)} *.pt via Ultralytics …")
         dl_pt = r"""
 import json, sys, shutil, logging, os
 from pathlib import Path
-# Reduce Ultralytics/chatty logs
 try:
     from ultralytics.utils import LOGGER
     LOGGER.remove()
@@ -528,7 +446,7 @@ logging.getLogger().handlers.clear()
 logging.getLogger().setLevel(logging.ERROR)
 from ultralytics import YOLO
 dst = Path(sys.argv[-2]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
-os.chdir(dst)  # ← ensure YOLO downloads happen inside panoptes/model
+os.chdir(dst)
 ok=0
 for nm in sys.argv[1:-2]:
     try:
@@ -542,7 +460,6 @@ for nm in sys.argv[1:-2]:
         if target.exists():
             ok += 1
     except Exception:
-        # swallow; count only successful copies
         pass
 out_path = Path(sys.argv[-1])
 out_path.write_text(json.dumps({'ok': ok}), encoding='utf-8')
@@ -552,13 +469,11 @@ out_path.write_text(json.dumps({'ok': ok}), encoding='utf-8')
         if got < len(pt_missing):
             _print("⚠️  Some *.pt weights could not be fetched (network/rate-limit?).")
 
-    # export *.onnx from matching *.pt (work inside model_dir; avoid repo-root 'runs/')
     if onnx_missing:
         _print(f"→ exporting {len(onnx_missing)} *.onnx from matching *.pt …")
         exp = r"""
 import json, sys, shutil, logging, os
 from pathlib import Path
-# Reduce Ultralytics/chatty logs
 try:
     from ultralytics.utils import LOGGER
     LOGGER.remove()
@@ -568,26 +483,23 @@ logging.getLogger().handlers.clear()
 logging.getLogger().setLevel(logging.ERROR)
 from ultralytics import YOLO
 dst = Path(sys.argv[-2]).expanduser().resolve(); dst.mkdir(parents=True, exist_ok=True)
-os.chdir(dst)  # ← everything (including runs/) stays under model_dir
+os.chdir(dst)
 ok=0
 for onnx_name in sys.argv[1:-2]:
     try:
         pt_name = Path(onnx_name).with_suffix(".pt").name
         src_pt  = dst / pt_name
-        # ensure the .pt exists in dst (YOLO will fetch to CWD=dst if needed)
         if not src_pt.exists():
             m_fetch = YOLO(pt_name)
             p = Path(getattr(m_fetch,'ckpt_path', pt_name)).expanduser()
             if p.exists() and p.resolve() != src_pt.resolve():
                 shutil.copy2(p, src_pt)
-        # export ONNX from the .pt within dst
         m = YOLO(str(src_pt))
         outp_path = None
         try:
             outp = Path(m.export(format='onnx', dynamic=True, simplify=True, imgsz=640, opset=12, device='cpu'))
             outp_path = outp
         except Exception:
-            # fallback if simplification or opset settings cause trouble
             try:
                 outp = Path(m.export(format='onnx', dynamic=True, simplify=False, imgsz=640, opset=12, device='cpu'))
                 outp_path = outp
@@ -601,9 +513,7 @@ for onnx_name in sys.argv[1:-2]:
         if target.exists():
             ok += 1
     except Exception:
-        # swallow; we'll report a warning in the parent
         pass
-# optional tidy: remove the transient 'runs' folder produced by Ultralytics
 try:
     shutil.rmtree(dst / 'runs', ignore_errors=True)
 except Exception:
@@ -618,26 +528,18 @@ out_path.write_text(json.dumps({'ok': ok}), encoding='utf-8')
 
     _print("→ weights ensured.")
 
-
-# ──────────────────────────────────────────────────────────────
-# Keep repo clean: pytest cache outside; pycache outside via launchers
-# ──────────────────────────────────────────────────────────────
 def _move_pytest_cache_out_of_repo() -> None:
     ini = HERE / "pytest.ini"
     if not ini.exists():
         cache = (DATA / "pytest_cache").as_posix()
         ini.write_text(
-            textwrap.dedent(
-                f"""\
+            textwrap.dedent(f"""\
             [pytest]
             cache_dir = {cache}
-        """
-            ),
+        """),
             encoding="utf-8",
         )
 
-
-# Optional extra: sitecustomize fallback to keep pycache outside even if someone runs VPY directly
 def _ensure_sitecustomize() -> None:
     pyver = f"python{sys.version_info.major}.{sys.version_info.minor}"
     sp = VENV / ("Lib" if os.name == "nt" else "lib") / pyver / "site-packages"
@@ -650,12 +552,7 @@ def _ensure_sitecustomize() -> None:
             encoding="utf-8",
         )
 
-
-# ──────────────────────────────────────────────────────────────
-# Portable launchers that work BEFORE the venv exists
-# ──────────────────────────────────────────────────────────────
 def _create_launchers() -> None:
-    # POSIX
     sh = HERE / "argos"
     sh.write_text(
         textwrap.dedent(
@@ -666,7 +563,6 @@ def _create_launchers() -> None:
         PY="$(command -v python3 || command -v python)"
         "$PY" "$HERE/bootstrap.py" --ensure --yes >/dev/null 2>&1 || true
         VPY="$("$PY" "$HERE/bootstrap.py" --print-venv)"
-        # keep *.pyc out of the repo
         export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
         exec "$VPY" -m panoptes.cli "$@"
     """
@@ -675,7 +571,6 @@ def _create_launchers() -> None:
     )
     os.chmod(sh, 0o755)
 
-    # PowerShell
     ps1 = HERE / "argos.ps1"
     ps1.write_text(
         textwrap.dedent(
@@ -695,7 +590,6 @@ param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
         encoding="utf-8",
     )
 
-    # Windows CMD (double-click)
     cmd = HERE / "argos.cmd"
     cmd.write_text(
         textwrap.dedent(
@@ -703,7 +597,6 @@ param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
         @echo off
         setlocal
         set HERE=%~dp0
-        rem choose py -3 if present, else python
         where py >NUL 2>&1
         if %ERRORLEVEL% EQU 0 (
             set "PY=py -3"
@@ -719,10 +612,6 @@ param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
         encoding="utf-8",
     )
 
-
-# ──────────────────────────────────────────────────────────────
-# First-run cheatsheet
-# ──────────────────────────────────────────────────────────────
 def _print_help(cpu_only: bool) -> None:
     py = VPY
     msg = f"""
@@ -765,15 +654,7 @@ CI / CD
 """
     _print(textwrap.dedent(msg).rstrip())
 
-
-# ──────────────────────────────────────────────────────────────
-# Interactive first-run menu
-# ──────────────────────────────────────────────────────────────
 def _first_run_menu() -> tuple[Optional[str], Optional[list[str]], bool]:
-    """
-    Ask the user which weights to fetch.
-    Returns (preset, explicit_names, skip_weights)
-    """
     model_dir, all_names, _d, _n, perception_names = _probe_weight_presets()
     _print("\nModel weights will be placed under: " + str(model_dir))
     _print("\nChoose what to fetch now:")
@@ -792,7 +673,6 @@ def _first_run_menu() -> tuple[Optional[str], Optional[list[str]], bool]:
         if ans == "3":
             return ("nano", None, False)
         if ans == "4":
-            # If any of the 4 are unavailable in the registry, fall back to default behavior handled downstream
             return ("perception", None, False) if perception_names else ("default", None, False)
         if ans == "6":
             return (None, None, True)
@@ -814,18 +694,12 @@ def _first_run_menu() -> tuple[Optional[str], Optional[list[str]], bool]:
         else:
             _print("Please enter 1, 2, 3, 4, 5 or 6.")
 
-
-# ──────────────────────────────────────────────────────────────
-# Driver
-# ──────────────────────────────────────────────────────────────
 def _first_run() -> bool:
     return not SENTINEL.exists()
 
-
 def _write_sentinel() -> None:
     SENTINEL.parent.mkdir(parents=True, exist_ok=True)
-    SENTINEL.write_text(json.dumps({"version": 5}, indent=2), encoding="utf-8")
-
+    SENTINEL.write_text(json.dumps({"version": 6}, indent=2), encoding="utf-8")
 
 def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
     d = "Y/n" if default_yes else "y/N"
@@ -838,13 +712,7 @@ def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
         if ans in {"n", "no"}:
             return False
 
-
 def _pip_check_soft() -> None:
-    """
-    Run 'pip check' and print problems, but do not fail the bootstrap.
-    This avoids non-actionable build failures when constraints.txt is absent
-    or when upstream wheels temporarily conflict.
-    """
     try:
         _run([str(VPY), "-m", "pip", "check"], check=True, capture=False)
     except Exception:
@@ -858,7 +726,6 @@ def _pip_check_soft() -> None:
         except Exception:
             pass
 
-
 def _ensure(
     cpu_only: bool,
     *,
@@ -866,16 +733,13 @@ def _ensure(
     weight_names: Optional[list[str]] = None,
     skip_weights: bool = False,
     reinstall: bool = False,
+    with_dev: bool = True,
 ) -> None:
-    """
-    Core ensure pipeline with optional progress output.
-    Uses ProgressEngine when available; otherwise prints plain messages.
-    """
     steps: list[tuple[str, Callable[[], None]]] = [
         ("Create venv", _create_venv),
         ("Install Torch", lambda: _install_torch_if_needed(cpu_only)),
         ("Ensure OpenCV (GUI)", _ensure_opencv_gui),
-        ("Install Argos (editable)", lambda: _pip_install_editable_if_needed(reinstall=reinstall)),
+        ("Install Argos (editable)", lambda: _pip_install_editable_if_needed(reinstall=reinstall, with_dev=with_dev)),
         (
             "Ensure weights",
             (lambda: None)
@@ -888,7 +752,6 @@ def _ensure(
     ]
 
     if ProgressEngine is None or live_percent is None:
-        # Fallback: just run steps in order
         for name, fn in steps:
             _print(f"→ {name} …")
             fn()
@@ -903,8 +766,6 @@ def _ensure(
                 fn()
             finally:
                 eng.add(1)
-        # done — spinner closes on context exit
-
 
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(add_help=True)
@@ -913,6 +774,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--cpu", dest="cpu_only", action="store_true", help="Force CPU-only Torch")
     p.add_argument("--weights-preset", choices=["all", "default", "nano", "perception"], help="Preset for weights (overrides env)")
     p.add_argument("--reinstall", action="store_true", help="Force reinstall of Argos editable package")
+    p.add_argument("--with-dev", action="store_true", help="Install Argos with [dev] extras as well")
     p.add_argument("--yes", action="store_true", help="Assume Yes to prompts (non-interactive)")
     args, _ = p.parse_known_args(argv)
     _ensure_dirs()
@@ -925,9 +787,8 @@ def main(argv: list[str]) -> int:
 
     if args.ensure:
         try:
-            _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall)
+            _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall, with_dev=args.with_dev or True)
         except Exception as e:
-            # Show full traceback in CI to locate the exact failing file/line
             traceback.print_exc()
             _print(f"ensure failed: {e}")
             return 1
@@ -936,12 +797,10 @@ def main(argv: list[str]) -> int:
     if _first_run():
         _print("First run detected for Argos.")
         if args.yes or _ask_yes_no("Install dependencies and set up now?", default_yes=True):
-            # interactive weights choice unless --yes was used
             preset = args.weights_preset
             picks: Optional[list[str]] = None
             skip = False
 
-            # Menu can run *before* venv exists thanks to _probe_weight_presets() fallback.
             if not args.yes and preset is None:
                 preset, picks, skip = _first_run_menu()
                 if preset:
@@ -949,7 +808,7 @@ def main(argv: list[str]) -> int:
             elif preset:
                 os.environ["ARGOS_WEIGHT_PRESET"] = preset
 
-            _ensure(cpu_only, preset=preset, weight_names=picks, skip_weights=skip, reinstall=args.reinstall)
+            _ensure(cpu_only, preset=preset, weight_names=picks, skip_weights=skip, reinstall=args.reinstall, with_dev=True)
             _create_launchers()
             _write_sentinel()
             _print_help(cpu_only)
@@ -957,10 +816,8 @@ def main(argv: list[str]) -> int:
             _print("Setup skipped. You can run later with:  python bootstrap.py --ensure")
         return 0
 
-    # Subsequent manual invocations: still idempotent
-    _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall)
+    _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall, with_dev=True)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))

@@ -1,4 +1,3 @@
-# \rAIn\projects\argos\panoptes\model\_fetch_models.py
 from __future__ import annotations
 
 import glob
@@ -47,12 +46,8 @@ class _NoopSpinner:
     def update(self, **_: Any) -> "_NoopSpinner":
         return self
 
-
 # ---------------------------------------------------------------------
-# Halo-based progress (Panoptes)
-# - Use a local Protocol to avoid "unknown type" warnings on Spinner
-# - Provide a Path-safe osc8 wrapper
-# - Provide no-op fallbacks if the package isn't available
+# Halo-based progress (Panoptes) with safe fallbacks
 # ---------------------------------------------------------------------
 class _ProgressLike(Protocol):
     def update(self, **kwargs: Any) -> Any: ...
@@ -64,44 +59,30 @@ class _ProgressLike(Protocol):
         tb: Optional[TracebackType],
     ) -> None: ...
 
-
 try:
     from panoptes.progress import (  # type: ignore[reportMissingTypeStubs]
         percent_spinner as _percent_spinner,
         simple_status as _simple_status,
         osc8 as _osc8_raw,
     )
-
     def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _percent_spinner(*args, **kwargs)  # type: ignore[misc]
-
     def simple_status(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _simple_status(*args, **kwargs)  # type: ignore[misc]
-
 except Exception:  # pragma: no cover
-
     def percent_spinner(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore[no-redef]
         return _NoopSpinner()
-
     def simple_status(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore[no-redef]
         return _NoopSpinner()
-
     def _osc8_raw(label: str, target: str) -> str:  # type: ignore[no-redef]
         return str(target)
 
-
 def osc8_link(label: str, target: str | Path) -> str:
-    """
-    Safe wrapper so callers can pass either str or Path for 'target',
-    while deferring to Panoptes' osc8() implementation.
-    """
     try:
         return _osc8_raw(label, str(target))
     except Exception:
         return str(target)
 
-
-# Our byte-accurate downloader (works with a .update(total=..., count=..., current=...))
 try:
     from panoptes.progress.integrations.download_progress import download_url  # type: ignore
 except Exception:
@@ -123,7 +104,6 @@ has_yolo: bool
 try:
     from ultralytics import YOLO as _YOLO  # type: ignore[reportMissingTypeStubs]
     try:
-        # Keep Ultralytics quiet; we print our own succinct logs.
         from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
         _rem = getattr(_ULTRA_LOGGER, "remove", None)
         if callable(_rem):
@@ -156,7 +136,6 @@ SIZES: Tuple[str, ...] = ("x", "l", "m", "s", "n")
 EXTS: Tuple[str, ...] = (".pt", ".onnx")
 TASKS: Tuple[str, ...] = ("det", "seg", "pose", "cls", "obb")
 
-# A sensible curated default (small but covers multiple tasks)
 DEFAULT_PACK: List[str] = [
     # DETECT
     "yolov8x.pt",
@@ -208,25 +187,12 @@ DEFAULT_PACK: List[str] = [
     "yolo11s-obb.onnx",
 ]
 
-# ---------------------------------------------------------------------
-# Small helpers (naming, UX, links)
-# ---------------------------------------------------------------------
 def _mk(ver: str, size: str, task: str, ext: str) -> str:
-    """
-    Construct official Ultralytics-style names.
-
-    Ultralytics naming:
-    • YOLOv8:  yolov8{s}.pt / yolov8{s}-seg.pt / -pose / -cls / -obb
-    • YOLO11:  yolo11{s}.pt / yolo11{s}-seg.pt / -pose / -cls / -obb
-    • YOLO12:  yolo12{s}.pt / yolo12{s}-seg.pt / -pose / -cls / -obb
-    """
     base = f"yolov{ver}{size}" if ver == "8" else f"yolo{ver}{size}"
     suf = {"det": "", "seg": "-seg", "pose": "-pose", "cls": "-cls", "obb": "-obb"}[task]
     return base + suf + ext
 
-
 def _full_pack() -> List[str]:
-    """All versions/sizes/tasks; .pt + .onnx (deduped)."""
     out: List[str] = []
     seen: Set[str] = set()
     for ver in VERSIONS:
@@ -239,22 +205,17 @@ def _full_pack() -> List[str]:
                         out.append(n)
     return out
 
-
 def _dedupe(names: Iterable[str]) -> List[str]:
     return sorted({n.strip(): None for n in names if n and n.strip()}.keys())
-
 
 def _ok(msg: str) -> None:
     typer.secho(msg, fg="green")
 
-
 def _warn(msg: str) -> None:
     typer.secho(msg, fg="yellow")
 
-
 def _err(msg: str) -> None:
     typer.secho(msg, fg="red", err=True)
-
 
 def _human_bytes(n: float | int) -> str:
     try:
@@ -268,13 +229,8 @@ def _human_bytes(n: float | int) -> str:
         f /= 1024.0
     return f"{n}B"
 
-
-# ---------------------------------------------------------------------
-# Temporary env/context helpers
-# ---------------------------------------------------------------------
 @contextmanager
 def _cd(path: Path) -> Iterator[None]:
-    """Temporarily chdir to *path* (restores on exit)."""
     prev = Path.cwd()
     try:
         os.chdir(path)
@@ -282,13 +238,11 @@ def _cd(path: Path) -> Iterator[None]:
     finally:
         os.chdir(prev)
 
-
 @contextmanager
 def _silence_stdio() -> Iterator[None]:
     buf_out, buf_err = StringIO(), StringIO()
     with redirect_stdout(buf_out), redirect_stderr(buf_err):
         yield
-
 
 @contextmanager
 def _tqdm_disabled_env() -> Iterator[None]:
@@ -302,28 +256,17 @@ def _tqdm_disabled_env() -> Iterator[None]:
         else:
             os.environ["TQDM_DISABLE"] = old
 
-
-# ---------------------------------------------------------------------
-# Validation helpers
-# ---------------------------------------------------------------------
 def _looks_like_text_header(bs: bytes) -> bool:
     s = bs.lstrip()
     if not s:
         return False
     return s.startswith(b"<") or s.startswith(b"{") or b"AccessDenied" in s or b"Error" in s or b"<!DOCTYPE" in s
 
-
 def _validate_weight(p: Path) -> bool:
-    """
-    Basic sanity for .pt / .onnx:
-    - exists
-    - size ≥ 1MB (avoid truncated blobs)
-    - not an HTML/JSON error page
-    """
     try:
         if not p.exists():
             return False
-        if p.stat().st_size < 1_000_000:  # ~1MB
+        if p.stat().st_size < 1_000_000:
             return False
         with p.open("rb") as fh:
             head = fh.read(512)
@@ -333,28 +276,14 @@ def _validate_weight(p: Path) -> bool:
     except Exception:
         return False
 
-
 def _asset_url_for(name: str) -> str:
     return f"{ASSETS_BASE}/{Path(name).name}"
-
 
 def _latest_exported_onnx() -> Optional[Path]:
     hits = [Path(p) for p in glob.glob("runs/**/**/*.onnx", recursive=True)]
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
-
-# ---------------------------------------------------------------------
-# Spinner adapters (byte progress -> single-line UX without touching item totals)
-# ---------------------------------------------------------------------
 class _DownloadSpinnerAdapter:
-    """
-    Adapter so download_progress can emit byte-accurate updates without
-    breaking the global item-based percent displayed by percent_spinner.
-
-    It translates update(total=<bytes>, count=<bytes_done>, current=<file>)
-    into spinner.update(current=<file>, job="dl X/Y", model=<file>) while preserving
-    spinner's [DONE x/y] summary of *items*.
-    """
     def __init__(self, spinner: _ProgressLike, *, items_total: int, items_done: int, label: Optional[str] = None) -> None:
         self.spinner = spinner
         self.items_total = int(max(1, items_total))
@@ -391,36 +320,19 @@ class _DownloadSpinnerAdapter:
                 model=self.label,
             )
         except Exception:
-            # Never let UX failures break downloads
             pass
         return self
 
-
-# ---------------------------------------------------------------------
-# Fetch logic (uses percent_spinner for global item progress)
-# ---------------------------------------------------------------------
 def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_total: int, items_done: int) -> Tuple[str, str]:
-    """
-    Obtain *name* into *dst* and return (basename, action).
-
-    Possible actions:
-    • "present"   - already existed in dst
-    • "download"  - fetched via direct URL (Argos progress)
-    • "copied"    - YOLO fetched elsewhere; we copied into dst
-    • "exported"  - exported ONNX from a matching .pt
-    • "failed"    - nothing worked
-    """
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
 
-    # Always show what we're checking
     if spinner is not None:
         try:
             spinner.update(total=items_total, count=items_done, current=target.name, job="check", model=target.name)
         except Exception:
             pass
 
-    # Already present (and sane)
     if target.exists() and _validate_weight(target):
         return (target.name, "present")
     elif target.exists() and not _validate_weight(target):
@@ -429,21 +341,12 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         except Exception:
             pass
 
-    # 1) Direct download (.pt only) with byte progress
     base = target.name
     if base.lower().endswith(".pt") and download_url is not None:
         try:
             ctx: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
             with ctx:
-                if spinner is not None:
-                    adapter = _DownloadSpinnerAdapter(
-                        spinner,
-                        items_total=items_total,
-                        items_done=items_done,
-                        label=base,
-                    )
-                else:
-                    adapter = None
+                adapter = _DownloadSpinnerAdapter(spinner, items_total=items_total, items_done=items_done, label=base) if spinner else None
                 download_url(_asset_url_for(base), str(target), adapter)  # type: ignore[arg-type]
             if _validate_weight(target):
                 return (target.name, "download")
@@ -452,7 +355,6 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         except Exception:
             pass
 
-    # 2) YOLO as a last-resort fetcher for .pt (silenced)
     if base.lower().endswith(".pt") and has_yolo and YOLO is not None:
         try:
             if spinner is not None:
@@ -464,42 +366,27 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                     p = Path(base).expanduser()
                 if p.exists():
                     if p.resolve() == target.resolve():
-                        # downloaded straight to target
                         pass
                     else:
                         shutil.copy2(p, target)
         except Exception:
             pass
         if _validate_weight(target):
-            # If YOLO wrote into cwd directly, treat as "download"
             return (target.name, "download" if (dst / base).exists() else "copied")
 
-    # 3) If ONNX requested, export from the matching .pt (ensure it exists)
     if base.lower().endswith(".onnx"):
         pt_name = Path(base).with_suffix(".pt").name
         pt_path = dst / pt_name
 
-        # Ensure the .pt exists (prefer our downloader)
         if not pt_path.exists() or not _validate_weight(pt_path):
-            # try direct
             if download_url is not None:
                 try:
                     ctx2: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
                     with ctx2:
-                        if spinner is not None:
-                            adapter2 = _DownloadSpinnerAdapter(
-                                spinner,
-                                items_total=items_total,
-                                items_done=items_done,
-                                label=pt_name,
-                            )
-                        else:
-                            adapter2 = None
+                        adapter2 = _DownloadSpinnerAdapter(spinner, items_total=items_total, items_done=items_done, label=pt_name) if spinner else None
                         download_url(_asset_url_for(pt_name), str(pt_path), adapter2)  # type: ignore[arg-type]
                 except Exception:
                     pass
-
-            # YOLO fallback for fetching the .pt
             if (not pt_path.exists() or not _validate_weight(pt_path)) and has_yolo and YOLO is not None:
                 try:
                     if spinner is not None:
@@ -514,7 +401,6 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                 except Exception:
                     pass
 
-        # Export ONNX
         if has_yolo and YOLO is not None and pt_path.exists() and _validate_weight(pt_path):
             try:
                 if spinner is not None:
@@ -528,11 +414,9 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                         except Exception:
                             YOLO(str(pt_path)).export(format="onnx", simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
 
-                # success path (a)
                 if target.exists() and _validate_weight(target):
                     return (target.name, "exported")
 
-                # success path (b): look under runs/
                 cand = _latest_exported_onnx()
                 if cand and cand.exists():
                     try:
@@ -547,29 +431,18 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
             except Exception:
                 pass
 
-    # If we reach here, we failed to produce the artifact
     return (target.name, "failed")
 
-
 def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
-    """
-    Fetch all *names* into MODEL_DIR with an aggregated progress view.
-
-    The single-line spinner shows:
-    • [File:<current>] [Job:<phase>] [Model:<weight>]  [DONE: i/N] [PROGRESS: %]
-    Where i/N represents *items*, while download bytes appear in Job.
-    """
     results: List[Tuple[str, str]] = []
     failed: List[str] = []
 
-    # No fancy environment probing here; percent_spinner already handles TTY/CI.
     with percent_spinner(prefix="FETCH MODELS") as sp:
         total = len(names)
         sp.update(total=max(1, total), count=0)
 
         done = 0
         for nm in names:
-            # Per-item
             try:
                 sp.update(current=nm, job="start", model=nm)
             except Exception:
@@ -588,14 +461,8 @@ def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
 
     return results, failed
 
-
 def _write_manifest(selected: List[str], installed: List[str]) -> Path:
-    """
-    Write a user-agnostic manifest:
-      • model_dir is stored *relative* to projects/argos to avoid absolute user paths
-    • paths use forward slashes for cross-platform consistency
-    """
-    repo_root = Path(__file__).resolve().parents[2]  # .../projects/argos
+    repo_root = Path(__file__).resolve().parents[2]
     rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
 
     data: Dict[str, object] = {
@@ -607,20 +474,11 @@ def _write_manifest(selected: List[str], installed: List[str]) -> Path:
     man.write_text(json.dumps(data, indent=2))
     return man
 
-
-# ---------------------------------------------------------------------
-# Interactive helpers
-# ---------------------------------------------------------------------
 def _show_row(title: str, items: Iterable[str]) -> None:
     typer.secho(f"\n{title}", bold=True)
     typer.echo("  " + "  |  ".join(f"[{i+1}] {v}" for i, v in enumerate(items)))
 
-
 def _parse_multi(raw: str, items: Tuple[str, ...], *, aliases: Optional[Dict[str, str]] = None) -> List[str]:
-    """
-    Parse comma/space-separated numbers or names.
-    Supports 'all'/'*' and simple aliases (e.g., 'v8' -> '8', 'nano' -> 'n').
-    """
     if not raw:
         return []
     raw = raw.strip().lower()
@@ -650,7 +508,6 @@ def _parse_multi(raw: str, items: Tuple[str, ...], *, aliases: Optional[Dict[str
             out.append(t)
     return out
 
-
 def _build_combo(
     vers: Iterable[str],
     sizes: Iterable[str],
@@ -666,19 +523,13 @@ def _build_combo(
                     names.append(_mk(ver, sz, task, ext))
     return _dedupe(names)
 
-
-# ---------------------------------------------------------------------
-# Menus
-# ---------------------------------------------------------------------
 def _ensure_env_hint() -> None:
     typer.echo()
     typer.secho("If this is a fresh clone, the launcher ensured the Python env.", fg="yellow")
     typer.secho("You do not need to activate a venv manually.", fg="yellow")
     typer.echo()
 
-
 def _menu() -> int:
-    """Loop until user selects a valid option (0-4)."""
     while True:
         typer.echo(
             textwrap.dedent(
@@ -698,9 +549,9 @@ def _menu() -> int:
         pick = typer.prompt("Pick [0-4, ? for help]", default="1 or ?").strip().lower()
         if pick in {"?", "h", "help"}:
             typer.echo("Typing numbers or names are fine in the builder.")
-            typer.echo("What you are chosing to download are model weights for types of visual detection that Argos can perform.")
+            typer.echo("You are choosing model weights for tasks Argos can perform.")
             typer.echo("YOLO models are named by version (v8, v11, v12), size (n/s/m/l/x), task (det/seg/pose/cls/obb), and format (.pt/.onnx).")
-            typer.echo("Choosing the default pack (1) is a good starting point for most users.")
+            typer.echo("Choosing the default pack (1) is a good start for most users.")
             continue
         try:
             choice = int(pick)
@@ -709,7 +560,6 @@ def _menu() -> int:
         except ValueError:
             pass
         typer.secho("Invalid choice. Try 0-4 or '?' for help.", fg="yellow")
-
 
 def _ask_size_pack() -> List[str]:
     ver = typer.prompt(f"Version {VERSIONS}", default="8").strip()
@@ -720,9 +570,8 @@ def _ask_size_pack() -> List[str]:
     while sz not in SIZES:
         sz = typer.prompt(f"Size {SIZES}", default="x").strip().lower()
 
-    # Tasks
-    task_alias = {"detect": "det", "segmentation": "seg", "classification": "cls"}
     _show_row("Tasks:", TASKS)
+    task_alias = {"detect": "det", "segmentation": "seg", "classification": "cls"}
     raw_tasks = typer.prompt("Pick tasks (e.g. 'det,seg,pose' or 'all')", default="det,seg").strip()
     chosen_tasks = _parse_multi(raw_tasks, TASKS, aliases=task_alias)
     if not chosen_tasks:
@@ -736,12 +585,7 @@ def _ask_size_pack() -> List[str]:
     names = _build_combo([ver], [sz], chosen_tasks, formats=exts)
     return _dedupe(names)
 
-
 def _ask_custom() -> List[str]:
-    """
-    Guided, multi-select custom builder.
-    """
-    # Versions
     _show_row("Versions:", VERSIONS)
     ver_alias: Dict[str, str] = {"v8": "8", "v11": "11", "v12": "12"}
     vers: List[str] = []
@@ -749,9 +593,8 @@ def _ask_custom() -> List[str]:
         raw = typer.prompt("Pick versions (e.g. '1', '2', '3' / 'all')", default="all")
         vers = _parse_multi(raw, VERSIONS, aliases=ver_alias)
         if not vers:
-            typer.secho("Pick at least one version (try typing '1' '2' '3' or 'all').", fg="yellow")
+            typer.secho("Pick at least one version (try '1', '2', '3' or 'all').", fg="yellow")
 
-    # Sizes
     _show_row("Model sizes:", SIZES)
     size_alias: Dict[str, str] = {"nano": "n", "small": "s", "medium": "m", "large": "l", "xlarge": "x"}
     sizes: List[str] = []
@@ -761,7 +604,6 @@ def _ask_custom() -> List[str]:
         if not sizes:
             typer.secho("Pick at least one size (e.g., 'n' or 'all').", fg="yellow")
 
-    # Tasks
     _show_row("Tasks:", TASKS)
     task_alias = {"detect": "det", "segmentation": "seg", "classification": "cls"}
     tasks: List[str] = []
@@ -771,14 +613,12 @@ def _ask_custom() -> List[str]:
         if not tasks:
             typer.secho("Pick at least one task (e.g., 'det').", fg="yellow")
 
-    # Formats
     _show_row("Formats:", EXTS)
     fmt_raw = typer.prompt("Formats (.pt / .onnx / both)", default="both").strip().lower()
     if fmt_raw not in {"pt", "onnx", "both"}:
         fmt_raw = "both"
     formats: Tuple[str, ...] = (".pt", ".onnx") if fmt_raw == "both" else (f".{fmt_raw}",)
 
-    # Build + optional extras
     names = _build_combo(vers, sizes, tasks, formats=formats)
 
     typer.secho("\nPreview (will be fetched):", bold=True)
@@ -794,15 +634,10 @@ def _ask_custom() -> List[str]:
 
     return _dedupe(names)
 
-
-# ---------------------------------------------------------------------
-# Quick smoke (progress-enabled) — now clears results in place (no backups)
-# ---------------------------------------------------------------------
 def _quick_check() -> None:
     if not typer.confirm("Run a quick smoke check now?", default=False):
         return
 
-    # Accept full names and short aliases
     raw_task = typer.prompt(
         "Task [detect|heatmap|geojson|classify|pose|obb]  (aliases: d|hm|gj|cls|pse|object)",
         default="heatmap",
@@ -830,7 +665,6 @@ def _quick_check() -> None:
     results_dir = repo_root / "tests" / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    # CLEAR previous results (no backups). Set PANOPTES_SMOKE_KEEP_PREV=1 to keep existing files.
     keep_prev = (os.environ.get("PANOPTES_SMOKE_KEEP_PREV", "").lower() in {"1", "true", "yes"})
     if not keep_prev:
         for p in list(results_dir.iterdir()):
@@ -840,11 +674,8 @@ def _quick_check() -> None:
                 else:
                     shutil.rmtree(p, ignore_errors=True)
             except Exception:
-                # best-effort cleanup; continue even if some files are locked
                 pass
 
-    # Expected items = number of raw inputs (bounded to ≥1)
-    # Match CLI’s notion of supported inputs for a better initial estimate
     try:
         from panoptes import cli as _cli  # type: ignore
         _img: Set[str] = set(cast(Iterable[str], getattr(_cli, "_IMAGE_EXTS", ())))  # type: ignore[misc]
@@ -861,15 +692,12 @@ def _quick_check() -> None:
     _ok(f"→ running: {py} {' '.join(args)}")
 
     def _list_created() -> List[Path]:
-        # Flat results dir; include files only
         return sorted([p for p in results_dir.glob("*") if p.is_file()],
                       key=lambda p: p.name.lower())
 
-    # Progress spinner bound to expected items
     with percent_spinner(prefix=f"ARGOS TESTING {task.upper()}") as sp:
         sp.update(total=float(expected), count=0, current="starting", job="spawn", model=task)
 
-        # Run CLI quiet, but from repo root so paths resolve consistently
         proc = subprocess.Popen([py, *args],
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL,
@@ -886,8 +714,6 @@ def _quick_check() -> None:
                     last_poll = now_t
                     created = _list_created()
                     n = len(created)
-
-                    # If we produced more than initially expected, grow the total.
                     if n > expected:
                         try:
                             sp.update(total=float(n))
@@ -909,7 +735,6 @@ def _quick_check() -> None:
                     break
                 time.sleep(0.05)
 
-            # Final top-up (also grow total if needed)
             created = _list_created()
             n = len(created)
             if n > expected:
@@ -944,15 +769,10 @@ def _quick_check() -> None:
             except Exception:
                 pass
 
-
-# ---------------------------------------------------------------------
-# Entry
-# ---------------------------------------------------------------------
 @app.command()
 def main() -> None:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Show environment hint on first run (no manifest yet)
     if not (MODEL_DIR / "manifest.json").exists():
         _ensure_env_hint()
 
@@ -962,7 +782,7 @@ def main() -> None:
     if choice == 1:
         selected = _dedupe(DEFAULT_PACK)
     elif choice == 2:
-        selected = _full_pack()
+        selected = _dedupe(_full_pack())
     elif choice == 3:
         selected = _ask_size_pack()
     elif choice == 4:
@@ -986,14 +806,7 @@ def main() -> None:
 
     results, bad = _fetch_all(selected)
 
-    # Per-file, clear log
-    action_icons = {
-        "present": "↺",
-        "download": "↓",
-        "copied": "⇢",
-        "exported": "⎘",
-        "failed": "✗",
-    }
+    action_icons = {"present": "↺", "download": "↓", "copied": "⇢", "exported": "⎘", "failed": "✗"}
     for name, action in results:
         icon = action_icons.get(action, "•")
         if action == "failed":
@@ -1011,7 +824,6 @@ def main() -> None:
 
     installed = [n for (n, a) in results if a != "failed"]
 
-    # Summary + clickable list
     typer.echo()
     _ok(f"Installed/ready: {len(installed)}")
     if installed:
@@ -1025,12 +837,10 @@ def main() -> None:
             typer.echo(f"  - {n}")
         _warn("Those names may not be hosted yet, or export failed.")
 
-    # Manifest for reproducibility (user-agnostic, relative paths)
     man = _write_manifest(selected, installed)
     typer.echo(f"\nManifest: {osc8_link('manifest.json', man)}")
 
     _quick_check()
-
 
 if __name__ == "__main__":
     main()
