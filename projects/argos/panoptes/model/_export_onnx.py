@@ -4,31 +4,25 @@ from __future__ import annotations
 import glob
 import os
 import shutil
-import subprocess
 import sys
+import subprocess
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import TracebackType
 from typing import (
-    TYPE_CHECKING,
     Any,
     ContextManager,
     Generator,
     List,
     Optional,
-    Protocol,
-    Sequence,
     Tuple,
-    TypeGuard,
+    Sequence,
     Union,
-    cast,
+    Protocol,
     runtime_checkable,
+    cast,
 )
-
-if TYPE_CHECKING:  # Only for type checkers; no runtime dependency if torch absent
-    import torch
-    from torch import nn
 
 # ---------------------------------------------------------------------
 # Environment safety for reliable ONNX export on fresh installs
@@ -72,12 +66,10 @@ class _NoopSpinner:
 # ---------------------------------------------------------------------
 try:
     from panoptes.progress import osc8 as _osc8_raw  # type: ignore[reportMissingTypeStubs]
-    from panoptes.progress import ( # type: ignore[reportMissingTypeStubs]
-        percent_spinner as _percent_spinner,  # type: ignore[reportMissingTypeStubs]
+    from panoptes.progress import (  # type: ignore[reportMissingTypeStubs]
+        percent_spinner as _percent_spinner,
     )
-    from panoptes.progress import ( # type: ignore[reportMissingTypeStubs]
-        simple_status as _simple_status,  # type: ignore[reportMissingTypeStubs]
-    )
+    from panoptes.progress import simple_status as _simple_status  # type: ignore[reportMissingTypeStubs]
 
     def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _percent_spinner(*args, **kwargs)  # type: ignore[misc]
@@ -203,16 +195,16 @@ def _ensure_export_runtime() -> None:
     if not ok:
         torch_ver = os.environ.get("ARGOS_TORCH_VERSION", "2.4.1")
         extra: List[str] = []
-        # Prefer CPU wheels for Windows/Linux to avoid CUDA downloads
-        if os.name in ("nt", "posix"):  # win/linux
+        # Prefer CPU wheels for Windows/Linux to avoid CUDA downloads; macOS uses default (MPS wheels)
+        if os.name == "nt" or sys.platform.startswith("linux"):
             idx = os.environ.get("ARGOS_TORCH_INDEX_URL", "https://download.pytorch.org/whl/cpu")
             extra = ["--index-url", idx]
         _pip_install([f"torch=={torch_ver}"], extra_args=extra)
         _try_import("torch")  # retry once; ignore result (export will handle errors)
 
-    # 2) onnx + protobuf + onnxscript + onnxsim
+    # 2) onnx + protobuf + onnxscript + onnxsim (ranges aligned with project constraints)
     wants = [
-        "onnx>=1.16,<1.18",
+        "onnx>=1.18,<1.19",
         "protobuf>=4.23,<5",
         "onnxscript>=0.1.0,<0.2",
         "onnxsim>=0.4.36,<0.5",
@@ -222,46 +214,32 @@ def _ensure_export_runtime() -> None:
     # 3) Sanity: import onnx; if we hit the Windows DLL error, pin a known-good set
     ok, err = _try_import("onnx")
     if not ok and err and ("onnx_cpp2py_export" in err or "DLL load failed" in err):
-        _pip_install(["onnx==1.16.0", "protobuf==4.25.3"], extra_args=["--force-reinstall", "--no-deps"])
+        _pip_install(["onnx==1.18.0", "protobuf==4.25.3"], extra_args=["--force-reinstall", "--no-deps"])
         _try_import("onnx")  # try again; final failure will be surfaced by exporter
 
 
 # ---------------------------------------------------------------------
-# Ultralytics typing shims (protocols) + lazy import
+# YOLO typing helpers (to quiet editors without stubs)
 # ---------------------------------------------------------------------
-# Precise export return union
-ExportOut = Union[str, os.PathLike[str], Sequence[Union[str, os.PathLike[str]]], None]
-
 @runtime_checkable
-class _YOLOModelProto(Protocol):
-    ckpt_path: Any
-    # Expose inner torch module (ultralytics sets .model)
-    if TYPE_CHECKING:
-        model: "nn.Module"
-    else:
-        model: Any
-
-    def export(
-        self,
-        *,
-        format: str,
-        dynamic: bool,
-        simplify: bool,
-        imgsz: int,
-        opset: int,
-        device: str,
-    ) -> ExportOut: ...   # narrowed
+class _YOLOClassLike(Protocol):
+    def __call__(self, source: str) -> Any: ...
 
 
-@runtime_checkable
-class _YOLOClassProto(Protocol):
-    def __call__(self, arg: str) -> _YOLOModelProto: ...
+ExportOut = Union[
+    str,
+    os.PathLike[str],  # type: ignore[name-defined]
+    Sequence[Union[str, os.PathLike[str]]],  # type: ignore[name-defined]
+    None,
+]
 
 
-def _get_yolo_class() -> Optional[_YOLOClassProto]:
+# ---------------------------------------------------------------------
+# Lazy Ultralytics import (after ensuring torch)
+# ---------------------------------------------------------------------
+def _get_yolo_class() -> _YOLOClassLike | None:
     try:
         from ultralytics import YOLO as _YOLO  # type: ignore
-
         # Silence Ultralytics’ global logger to keep build output clean
         try:
             from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
@@ -276,7 +254,7 @@ def _get_yolo_class() -> Optional[_YOLOClassProto]:
                         pass
         except Exception:
             pass
-        return cast(_YOLOClassProto, _YOLO)
+        return cast(_YOLOClassLike, _YOLO)
     except Exception:
         return None
 
@@ -310,49 +288,37 @@ def _parse_ops_candidates() -> List[int]:
     return [21, 20, 19, 18, 17]
 
 
-def _is_seq_of_paths(val: object) -> TypeGuard[Sequence[Union[str, os.PathLike[str]]]]:
-    if isinstance(val, (list, tuple)):
-        # Cast so the comprehension variable 'x' has a concrete (object) type instead of Unknown for strict type checkers.
-        return all(isinstance(x, (str, os.PathLike)) for x in cast(Sequence[object], val))
-    return False
-
-
-def _normalize_export_out(raw: Any) -> Optional[Path]:
+def _try_ultralytics_export(YOLO: _YOLOClassLike, pt: Path, target: Path) -> Tuple[bool, Optional[str]]:
     """
-    Normalize the ultralytics export return into a single Path (if possible).
-    Accepted:
-      - str / os.PathLike
-      - Sequence[str|os.PathLike] (first element used)
-      - None  -> returns None
+    Use Ultralytics' exporter across a cascade of opsets and flags.
+    Returns (ok, last_error_message).
     """
-    out = cast(ExportOut, raw)
-    if out is None:
-        return None
-    if isinstance(out, (str, os.PathLike)):
-        return Path(str(out))
-    if _is_seq_of_paths(out) and out:
-        return Path(str(out[0]))
-    return None
-
-
-def _try_ultralytics_export(YOLO: _YOLOClassProto, pt: Path, target: Path) -> Tuple[bool, Optional[str]]:
     opsets = _parse_ops_candidates()
     last_err: Optional[str] = None
     with _status_cm("export onnx (ultralytics)"), _silence_stdio():
-        m = YOLO(str(pt))
+        m: Any = YOLO(str(pt))  # runtime-provided class; methods are dynamically typed
+        outp_path: Optional[Path] = None
+
         for opset in opsets:
             for dynamic in (True, False):
                 for simplify_flag in (True, False):
                     try:
-                        raw_out = m.export(
+                        out_any: ExportOut = cast(ExportOut, m.export(  # type: ignore[attr-defined]
                             format="onnx",
                             dynamic=dynamic,
                             simplify=simplify_flag,
                             imgsz=DEFAULT_IMGSZ,
                             opset=opset,
                             device="cpu",
-                        )
-                        outp_path = _normalize_export_out(raw_out) or _latest_exported_onnx()
+                        ))
+                        # Some versions return str, some a path-like, some a list
+                        if isinstance(out_any, (list, tuple)) and out_any:
+                            outp_path = Path(str(out_any[0]))
+                        elif out_any:
+                            outp_path = Path(str(out_any))
+                        else:
+                            outp_path = _latest_exported_onnx()
+
                         if outp_path and outp_path.exists():
                             if outp_path.resolve() != target.resolve():
                                 shutil.copy2(outp_path, target)
@@ -371,54 +337,59 @@ def _try_ultralytics_export(YOLO: _YOLOClassProto, pt: Path, target: Path) -> Tu
 def _try_torch_export_fallback(pt: Path, target: Path) -> Tuple[bool, Optional[str]]:
     """
     Optional fallback: use torch.onnx exporter.
+    Tries the modern `dynamo=True` path first (PyTorch ≥ 2.5), then legacy if needed.
+    Returns (ok, error_message).
     """
     try:
-        import torch
+        import torch  # type: ignore
         from ultralytics import YOLO as _Y  # type: ignore
     except Exception as e:
         return False, f"torch/ultralytics import failed: {e}"
 
     try:
-        m = _Y(str(pt))
-        # Narrow type for static checkers
-        raw_model: Any = getattr(m, "model", m)
-        model = cast("torch.nn.Module", raw_model)
-
+        m: Any = _Y(str(pt))
+        model: Any = getattr(m, "model", m)
         try:
             model.eval()
         except Exception:
             pass
 
-        dummy: "torch.Tensor" = torch.zeros(1, 3, DEFAULT_IMGSZ, DEFAULT_IMGSZ)
+        dummy = torch.zeros(1, 3, DEFAULT_IMGSZ, DEFAULT_IMGSZ)  # type: ignore[attr-defined]
         opsets = _parse_ops_candidates()
         opver = max(min(opsets), 12)
         tmp = target.with_suffix(".dynamo.onnx")
 
-        def _do_export(dynamo_flag: bool) -> None:
-            # Provide precise argument types; silence overload mismatch
-            torch.onnx.export(  # type: ignore[call-overload]
-                model,
-                (dummy,),
-                str(tmp),
-                opset_version=opver,
-                input_names=["images"],
-                output_names=["output"],
-                dynamic_axes={
-                    "images": {0: "batch", 2: "h", 3: "w"},
-                    "output": {0: "batch"},
-                },
-                export_params=True,
-                do_constant_folding=True,
-                verbose=False,
-                dynamo=dynamo_flag,
-            )
-
+        # 1) Try dynamo exporter
         try:
             with _status_cm("export onnx (torch dynamo)"), _silence_stdio():
-                _do_export(True)
+                torch.onnx.export(  # type: ignore[attr-defined]
+                    model,
+                    (dummy,),
+                    str(tmp),
+                    opset_version=opver,
+                    input_names=["images"],
+                    output_names=["output"],
+                    dynamic_axes={"images": {0: "batch", 2: "h", 3: "w"}, "output": {0: "batch"}},
+                    export_params=True,
+                    do_constant_folding=True,
+                    verbose=False,
+                    dynamo=True,  # PyTorch ≥ 2.5
+                )
         except TypeError:
+            # 2) Fallback to legacy exporter (no `dynamo` kw)
             with _status_cm("export onnx (torch legacy)"), _silence_stdio():
-                _do_export(False)
+                torch.onnx.export(  # type: ignore[attr-defined]
+                    model,
+                    (dummy,),
+                    str(tmp),
+                    opset_version=opver,
+                    input_names=["images"],
+                    output_names=["output"],
+                    dynamic_axes={"images": {0: "batch", 2: "h", 3: "w"}, "output": {0: "batch"}},
+                    export_params=True,
+                    do_constant_folding=True,
+                    verbose=False,
+                )
 
         if tmp.exists():
             if tmp.resolve() != target.resolve():
@@ -493,7 +464,7 @@ def _export_one(arg: str) -> Tuple[Path, str]:
             try:
                 # 1) Fetch or locate the .pt
                 with _status_cm("fetch weights"), _silence_stdio():
-                    m = YOLO(str(src_pt_path or nm))  # may download into CWD=dst
+                    m: Any = YOLO(str(src_pt_path or nm))  # may download into CWD=dst
                     ck = Path(getattr(m, "ckpt_path", nm)).expanduser()
                     if not ck.exists():
                         ck = Path(nm).expanduser()

@@ -1,13 +1,5 @@
-###############################################################################
-#  PROJECT-LOCAL OVERRIDES
-###############################################################################
-# Keep this file in the repo; add ONLY project-wide rules here.
+# .gitignore (repo root)
 
-###############################################################################
-# ⛔  GENERAL BUILD / BINARY ARTEFACTS
-###############################################################################
-
-# ── Python byte-code / metadata ─────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -16,33 +8,27 @@ __pycache__/
 *.egg-info/
 *.bak
 
-# ── Virtual-envs (top-level **and** inside sub-projects) ────────────────────
 .venv/
 env/
 venv/
 ENV/
 projects/**/.venv/
 
-# ── Node ────────────────────────────────────────────────────────────────────
 node_modules/
 
-# ── Models & other large binaries (fetched by build) ────────────────────────
 projects/argos/panoptes/model/*.pt
 projects/argos/panoptes/model/*.onnx
 
-# ── Test / coverage artefacts ───────────────────────────────────────────────
 .pytest_cache/
 .coverage
 htmlcov/
-projects/argos/tests/results/         # per-run outputs only
+projects/argos/tests/results/
 
-# ── Build / packaging outputs ───────────────────────────────────────────────
 build/
 dist/
 *.egg-info/
 projects/**/cdk.out/
 
-# ── Media produced during ad-hoc runs (never tracked) ───────────────────────
 *.jpg
 *.jpeg
 *.png
@@ -51,24 +37,14 @@ projects/**/cdk.out/
 *.mp4
 *.mov
 
-# ── IDE / editor junk ───────────────────────────────────────────────────────
 .vscode/
 .vscode/*.log
 projects/**/.vscode/
 
-# ── OS noise ────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# ── Historical artefacts we no longer need ──────────────────────────────────
 projects/argos/requirements-py39.txt
 
-###############################################################################
-# Auto-generated / user-specific
-###############################################################################
-
-# Build manifest (rewritten per-user with relative paths)
 projects/argos/panoptes/model/manifest.json
-
-# Local pytest config (contained only here; prevents committing user paths)
 projects/argos/pytest.ini

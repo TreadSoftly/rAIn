@@ -25,8 +25,8 @@ from typing import (
     Protocol,
     Set,
     Tuple,
-    Type,
     cast,
+    runtime_checkable,
 )
 
 import typer
@@ -40,10 +40,10 @@ class _NoopSpinner:
 
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
-    ) -> Optional[bool]:
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool | None:
         return None
 
     def update(self, **_: Any) -> "_NoopSpinner":
@@ -52,15 +52,16 @@ class _NoopSpinner:
 # ---------------------------------------------------------------------
 # Halo-based progress (Panoptes) fallbacks + Path-safe osc8 wrapper
 # ---------------------------------------------------------------------
+@runtime_checkable
 class _ProgressLike(Protocol):
     def update(self, **kwargs: Any) -> Any: ...
     def __enter__(self) -> "_ProgressLike": ...
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
-    ) -> Optional[bool]: ...
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool | None: ...
 
 try:
     from panoptes.progress import osc8 as _osc8_raw  # type: ignore
@@ -81,6 +82,7 @@ except Exception:  # pragma: no cover
 
     def _osc8_raw(label: str, target: str) -> str:  # type: ignore
         return str(target)
+
 
 def osc8_link(label: str, target: str | Path) -> str:
     try:
@@ -114,6 +116,7 @@ def _have(mod: str) -> bool:
     except Exception:
         return False
 
+
 def _pip_quiet(*pkgs: str) -> None:
     if not pkgs:
         return
@@ -127,28 +130,59 @@ def _pip_quiet(*pkgs: str) -> None:
     except Exception:
         pass  # best-effort
 
+
 def _ensure_export_toolchain() -> None:
     """
-    Idempotently ensure ultralytics + onnx toolchain without importing
-    untyped libs. Versions chosen to work on Py3.12 + Windows.
+    Idempotently ensure ultralytics + onnx toolchain (and Torch for YOLO fetch)
+    without importing untyped libs. Versions chosen to work on Py3.12 + Windows.
     """
     if not _have("ultralytics"):
         _pip_quiet("ultralytics>=8.3.0,<8.6.0")
-    # Ensure ONNX is modern (fixes 'Unsupported opset 21' and DLL init issues on Win+Py3.12)
+
+    # YOLO's model fetch sometimes needs to instantiate the model; ensure Torch/Tv.
+    if not _have("torch"):
+        if os.name == "nt" or sys.platform.startswith("linux"):
+            # Use the official CPU wheels index to avoid CUDA pulls
+            try:
+                subprocess.run(
+                    [
+                        sys.executable, "-m", "pip", "install", "--no-input", "--quiet",
+                        "--index-url", os.environ.get("ARGOS_TORCH_INDEX_URL", "https://download.pytorch.org/whl/cpu"),
+                        "torch>=2.4,<2.6", "torchvision>=0.19,<0.21",
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+        else:
+            _pip_quiet("torch>=2.4,<2.6", "torchvision>=0.19,<0.21")
+
+    # Ensure ONNX is modern (fixes 'Unsupported opset' and DLL init issues on Win+Py3.12)
     if not _have("onnx"):
         _pip_quiet("onnx>=1.18,<1.19")
+
+    # ONNX Runtime: CPU-only, platform aware (not used for export, but present helps probes)
     if not _have("onnxruntime"):
         if os.name == "nt":
             _pip_quiet("onnxruntime>=1.22,<1.23")
         else:
             _pip_quiet("onnxruntime>=1.22,<1.24")
+
+    # Tools used by Ultralytics exporter in some branches
+    if not _have("onnxscript"):
+        _pip_quiet("onnxscript>=0.1.0,<0.2")
+    if not _have("protobuf"):
+        _pip_quiet("protobuf>=4.23,<5")
     if not _have("onnxslim"):
         _pip_quiet("onnxslim<0.1.59")
+
 
 # Ensure deps before we try to import YOLO
 _ensure_export_toolchain()
 
-# Ultralytics (used to export ONNX and as last-resort fetcher)
+# Ultralytics (used to export ONNX and as last-resort fetcher for PT)
 has_yolo: bool
 try:
     from ultralytics import YOLO as _YOLO  # type: ignore
@@ -215,6 +249,7 @@ def _mk(ver: str, size: str, task: str, ext: str) -> str:
     suf = {"det": "", "seg": "-seg", "pose": "-pose", "cls": "-cls", "obb": "-obb"}[task]
     return base + suf + ext
 
+
 def _full_pack() -> List[str]:
     out: List[str] = []
     seen: Set[str] = set()
@@ -228,14 +263,23 @@ def _full_pack() -> List[str]:
                         out.append(n)
     return out
 
+
 def _dedupe(names: Iterable[str]) -> List[str]:
     return sorted({n.strip(): None for n in names if n and n.strip()}.keys())
+
 
 def _ok(msg: str) -> None:
     typer.secho(msg, fg="green")
 
+
 def _warn(msg: str) -> None:
     typer.secho(msg, fg="yellow")
+
+
+def _err(msg: str) -> None:
+    # used for per-item failure reporting (stderr)
+    typer.secho(msg, fg="red", err=True)
+
 
 def _human_bytes(n: float | int) -> str:
     try:
@@ -261,11 +305,13 @@ def _cd(path: Path) -> Iterator[None]:
     finally:
         os.chdir(prev)
 
+
 @contextmanager
 def _silence_stdio() -> Iterator[None]:
     buf_out, buf_err = StringIO(), StringIO()
     with redirect_stdout(buf_out), redirect_stderr(buf_err):
         yield
+
 
 @contextmanager
 def _tqdm_disabled_env() -> Iterator[None]:
@@ -288,6 +334,7 @@ def _looks_like_text_header(bs: bytes) -> bool:
         return False
     return s.startswith(b"<") or s.startswith(b"{") or b"AccessDenied" in s or b"Error" in s or b"<!DOCTYPE" in s
 
+
 def _validate_weight(p: Path) -> bool:
     try:
         if not p.exists():
@@ -302,8 +349,10 @@ def _validate_weight(p: Path) -> bool:
     except Exception:
         return False
 
+
 def _asset_url_for(name: str) -> str:
     return f"{ASSETS_BASE}/{Path(name).name}"
+
 
 def _latest_exported_onnx() -> Optional[Path]:
     hits = [Path(p) for p in glob.glob("runs/**/**/*.onnx", recursive=True)]
@@ -353,6 +402,30 @@ class _DownloadSpinnerAdapter:
         return self
 
 # ---------------------------------------------------------------------
+# Subprocess wrapper for ONNX export (isolation = stability)
+# ---------------------------------------------------------------------
+def _export_onnx_subprocess(onnx_name: str) -> bool:
+    """
+    Run the dedicated exporter module in a clean subprocess so any native DLL issues
+    cannot crash this selector process.
+    """
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    # Run from model dir so Ultralytics 'runs/' ends up here if created
+    try:
+        cp = subprocess.run(
+            [sys.executable, "-m", "panoptes.model._export_onnx", onnx_name],
+            cwd=str(MODEL_DIR),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        return (cp.returncode == 0) and _validate_weight(MODEL_DIR / onnx_name)
+    except Exception:
+        return False
+
+# ---------------------------------------------------------------------
 # Fetch logic
 # ---------------------------------------------------------------------
 def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_total: int, items_done: int) -> Tuple[str, str]:
@@ -393,7 +466,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         except Exception:
             pass
 
-    # 2) YOLO as last-resort fetcher for .pt (silenced)
+    # 2) YOLO as last-resort fetcher for .pt (silenced). Torch/Tv ensured above.
     if base.lower().endswith(".pt") and has_yolo and YOLO is not None:
         try:
             if spinner is not None:
@@ -413,66 +486,33 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         if _validate_weight(target):
             return (target.name, "download" if (dst / base).exists() else "copied")
 
-    # 3) If ONNX requested, export from matching .pt
+    # 3) If ONNX requested, export in an ISOLATED subprocess via the dedicated exporter
     if base.lower().endswith(".onnx"):
-        pt_name = Path(base).with_suffix(".pt").name
-        pt_path = dst / pt_name
-
-        if not pt_path.exists() or not _validate_weight(pt_path):
-            if download_url is not None:
-                try:
-                    ctx2: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
-                    with ctx2:
-                        adapter2 = _DownloadSpinnerAdapter(spinner, items_total=items_total, items_done=items_done, label=pt_name) if spinner else None
-                        download_url(_asset_url_for(pt_name), str(pt_path), adapter2)  # type: ignore[arg-type]
-                except Exception:
-                    pass
-            if (not pt_path.exists() or not _validate_weight(pt_path)) and has_yolo and YOLO is not None:
-                try:
-                    if spinner is not None:
-                        spinner.update(current=pt_name, job="ultralytics", model=pt_name)
-                    with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
-                        m_pt = YOLO(pt_name)  # type: ignore
-                        p_pt = Path(getattr(m_pt, "ckpt_path", pt_name)).expanduser()
-                        if not p_pt.exists():
-                            p_pt = Path(pt_name).expanduser()
-                        if p_pt.exists() and p_pt.resolve() != pt_path.resolve():
-                            shutil.copy2(p_pt, pt_path)
-                except Exception:
-                    pass
-
-        if has_yolo and YOLO is not None and pt_path.exists() and _validate_weight(pt_path):
+        if spinner is not None:
             try:
-                if spinner is not None:
-                    spinner.update(current=base, job="export onnx", model=pt_name)
-                with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
-                    # Robust triad: export with pinned opset=12 and fallbacks on dynamic/simplify
-                    try:
-                        YOLO(str(pt_path)).export(format="onnx", dynamic=True,  simplify=True,  imgsz=640, opset=12, device="cpu")  # type: ignore
-                    except Exception:
-                        try:
-                            YOLO(str(pt_path)).export(format="onnx", dynamic=True,  simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
-                        except Exception:
-                            YOLO(str(pt_path)).export(format="onnx", dynamic=False, simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
-
-                if target.exists() and _validate_weight(target):
-                    return (target.name, "exported")
-
-                cand = _latest_exported_onnx()
-                if cand and cand.exists():
-                    try:
-                        shutil.copy2(cand, target)
-                    finally:
-                        try:
-                            shutil.rmtree(dst / "runs", ignore_errors=True)
-                        except Exception:
-                            pass
-                if target.exists() and _validate_weight(target):
-                    return (target.name, "exported")
+                spinner.update(current=base, job="export onnx (subproc)", model=base)
             except Exception:
                 pass
 
+        ok = _export_onnx_subprocess(base)
+        if ok:
+            return (target.name, "exported")
+
+        # Last chance: look for the latest ONNX under 'runs/' and move it in place
+        cand = _latest_exported_onnx()
+        if cand and cand.exists():
+            try:
+                shutil.copy2(cand, target)
+            finally:
+                try:
+                    shutil.rmtree(dst / "runs", ignore_errors=True)
+                except Exception:
+                    pass
+        if target.exists() and _validate_weight(target):
+            return (target.name, "exported")
+
     return (target.name, "failed")
+
 
 def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
     results: List[Tuple[str, str]] = []
@@ -500,6 +540,7 @@ def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
 
     return results, failed
 
+
 def _write_manifest(selected: List[str], installed: List[str]) -> Path:
     repo_root = Path(__file__).resolve().parents[2]  # .../projects/argos
     rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
@@ -518,6 +559,7 @@ def _write_manifest(selected: List[str], installed: List[str]) -> Path:
 def _show_row(title: str, items: Iterable[str]) -> None:
     typer.secho(f"\n{title}", bold=True)
     typer.echo("  " + "  |  ".join(f"[{i+1}] {v}" for i, v in enumerate(items)))
+
 
 def _parse_multi(raw: str, items: Tuple[str, ...], *, aliases: Optional[Dict[str, str]] = None) -> List[str]:
     if not raw:
@@ -549,6 +591,7 @@ def _parse_multi(raw: str, items: Tuple[str, ...], *, aliases: Optional[Dict[str
             out.append(t)
     return out
 
+
 def _build_combo(vers: Iterable[str], sizes: Iterable[str], tasks: Iterable[str], *, formats: Iterable[str]) -> List[str]:
     names: List[str] = []
     for ver in vers:
@@ -558,11 +601,13 @@ def _build_combo(vers: Iterable[str], sizes: Iterable[str], tasks: Iterable[str]
                     names.append(_mk(ver, sz, task, ext))
     return _dedupe(names)
 
+
 def _ensure_env_hint() -> None:
     typer.echo()
     typer.secho("If this is a fresh clone, the launcher ensured the Python env.", fg="yellow")
     typer.secho("You do not need to activate a venv manually.", fg="yellow")
     typer.echo()
+
 
 def _menu() -> int:
     while True:
@@ -593,6 +638,7 @@ def _menu() -> int:
             pass
         typer.secho("Invalid choice. Try 0-4 or '?' for help.", fg="yellow")
 
+
 def _ask_size_pack() -> List[str]:
     ver = typer.prompt(f"Version {VERSIONS}", default="8").strip()
     while ver not in VERSIONS:
@@ -614,6 +660,7 @@ def _ask_size_pack() -> List[str]:
 
     names = _build_combo([ver], [sz], chosen_tasks, formats=exts)
     return _dedupe(names)
+
 
 def _ask_custom() -> List[str]:
     _show_row("Versions:", VERSIONS)
@@ -795,11 +842,12 @@ def _confirm_and_fetch(names: List[str]) -> None:
     if failed:
         _warn("\nSome items failed:")
         for nm in failed:
-            typer.echo(f"  - {nm}")
+            _err(f"  - {nm}")
     else:
         _ok("\nAll selected items installed successfully.")
 
     _quick_check()
+
 
 def main() -> None:
     choice = _menu()
@@ -813,6 +861,7 @@ def main() -> None:
         _confirm_and_fetch(_ask_size_pack())
     elif choice == 4:
         _confirm_and_fetch(_ask_custom())
+
 
 if __name__ == "__main__":
     main()

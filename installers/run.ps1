@@ -22,7 +22,7 @@ $env:ARGOS_PROGRESS_FINAL_NEWLINE = '0'
 # ---- Prefer DSHOW on Windows; keep MSMF disabled (works best on Win 10/11) ----
 if ($env:OS -eq 'Windows_NT') {
   if (-not $env:OPENCV_VIDEOIO_PRIORITY_DSHOW) { $env:OPENCV_VIDEOIO_PRIORITY_DSHOW = '1000' }
-  if (-not $env:OPENCV_VIDEOIO_PRIORITY_MSMF) { $env:OPENCV_VIDEOIO_PRIORITY_MSMF = '0' }
+  if (-not $env:OPENCV_VIDEOIO_PRIORITY_MSMF)  { $env:OPENCV_VIDEOIO_PRIORITY_MSMF  = '0' }
 }
 
 # Silence pip (prevents progress lines being interleaved)
@@ -101,7 +101,7 @@ function Install-OpenCvPackage {
     [Parameter(Mandatory)][string]$Vpy,
     [Parameter(Mandatory)][bool]$NeedsGui  # retained for backward compat; ignored
   )
-  $want = 'opencv-python'
+  $want  = 'opencv-python'
   $avoid = @('opencv-python-headless', 'opencv-contrib-python-headless')
 
   # If headless is present, remove it
@@ -163,36 +163,6 @@ if ($tokens.Count -gt 0) {
     $filtered.Add($t) | Out-Null
   }
   $tokens = $filtered
-}
-
-# ---- Normalize operation position: INPUT op  ->  op INPUT ----
-$op = $null
-$opIndex = -1
-for ($i = 0; $i -lt $tokens.Count; $i++) {
-  switch ($tokens[$i].ToLowerInvariant()) {
-    'd' { $op = 'd'; break }
-    'detect' { $op = 'd'; break }
-    'hm' { $op = 'hm'; break }
-    'heatmap' { $op = 'hm'; break }
-    'gj' { $op = 'gj'; break }
-    'geojson' { $op = 'gj'; break }
-    'classify' { $op = 'classify'; break }
-    'clf' { $op = 'classify'; break }
-    'pose' { $op = 'pose'; break }
-    'pse' { $op = 'pose'; break }
-    'obb' { $op = 'obb'; break }
-    'object' { $op = 'obb'; break }
-    default { continue }
-  }
-  $opIndex = $i; break
-}
-if ($opIndex -gt 0) {
-  $reordered = New-Object System.Collections.Generic.List[string]
-  $reordered.Add($op) | Out-Null
-  for ($j = 0; $j -lt $tokens.Count; $j++) {
-    if ($j -ne $opIndex) { $reordered.Add($tokens[$j]) | Out-Null }
-  }
-  $tokens = $reordered
 }
 
 # Infer project from CWD
