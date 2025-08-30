@@ -165,6 +165,36 @@ if ($tokens.Count -gt 0) {
   $tokens = $filtered
 }
 
+# ---- Normalize operation position: INPUT op  ->  op INPUT ----
+$op = $null
+$opIndex = -1
+for ($i = 0; $i -lt $tokens.Count; $i++) {
+  switch ($tokens[$i].ToLowerInvariant()) {
+    'd' { $op = 'd'; break }
+    'detect' { $op = 'd'; break }
+    'hm' { $op = 'hm'; break }
+    'heatmap' { $op = 'hm'; break }
+    'gj' { $op = 'gj'; break }
+    'geojson' { $op = 'gj'; break }
+    'classify' { $op = 'classify'; break }
+    'clf' { $op = 'classify'; break }
+    'pose' { $op = 'pose'; break }
+    'pse' { $op = 'pose'; break }
+    'obb' { $op = 'obb'; break }
+    'object' { $op = 'obb'; break }
+    default { continue }
+  }
+  $opIndex = $i; break
+}
+if ($opIndex -gt 0) {
+  $reordered = New-Object System.Collections.Generic.List[string]
+  $reordered.Add($op) | Out-Null
+  for ($j = 0; $j -lt $tokens.Count; $j++) {
+    if ($j -ne $opIndex) { $reordered.Add($tokens[$j]) | Out-Null }
+  }
+  $tokens = $reordered
+}
+
 # Infer project from CWD
 $cwd = (Get-Location).Path
 if (-not $proj) { if ($cwd -like "*\projects\argos*") { $proj = 'argos' } }

@@ -25,6 +25,7 @@ from typing import (
     Protocol,
     Set,
     Tuple,
+    Type,
     cast,
 )
 
@@ -36,8 +37,15 @@ import typer
 class _NoopSpinner:
     def __enter__(self) -> "_NoopSpinner":
         return self
-    def __exit__(self, exc_type, exc, tb) -> None:
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> Optional[bool]:
         return None
+
     def update(self, **_: Any) -> "_NoopSpinner":
         return self
 
@@ -47,21 +55,30 @@ class _NoopSpinner:
 class _ProgressLike(Protocol):
     def update(self, **kwargs: Any) -> Any: ...
     def __enter__(self) -> "_ProgressLike": ...
-    def __exit__(self, exc_type, exc, tb) -> None: ...
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> Optional[bool]: ...
 
 try:
     from panoptes.progress import osc8 as _osc8_raw  # type: ignore
     from panoptes.progress import percent_spinner as _percent_spinner  # type: ignore
     from panoptes.progress import simple_status as _simple_status  # type: ignore
+
     def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _percent_spinner(*args, **kwargs)
+
     def simple_status(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _simple_status(*args, **kwargs)
 except Exception:  # pragma: no cover
     def percent_spinner(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore
         return _NoopSpinner()
+
     def simple_status(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore
         return _NoopSpinner()
+
     def _osc8_raw(label: str, target: str) -> str:  # type: ignore
         return str(target)
 
@@ -219,9 +236,6 @@ def _ok(msg: str) -> None:
 
 def _warn(msg: str) -> None:
     typer.secho(msg, fg="yellow")
-
-def _err(msg: str) -> None:
-    typer.secho(msg, fg="red", err=True)
 
 def _human_bytes(n: float | int) -> str:
     try:

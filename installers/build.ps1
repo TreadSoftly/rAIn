@@ -49,7 +49,8 @@ function Install-VcRedistIfMissing {
     $has2 = Test-Path -LiteralPath (Join-Path $sys 'vcruntime140_1.dll')
     $has3 = Test-Path -LiteralPath (Join-Path $sys 'msvcp140.dll')
     if ($has1 -and $has2 -and $has3) { return }
-  } catch {}
+  }
+  catch {}
   Write-Host "Installing Microsoft Visual C++ Redistributable (x64)..." -ForegroundColor Yellow
   $tmp = Join-Path $env:TEMP 'vc_redist.x64.exe'
   try {
@@ -189,6 +190,9 @@ if ($LASTEXITCODE -ne 0) { throw "bootstrap failed ($LASTEXITCODE)" }
 $vpy = & $script:pyExe @script:pyArgs "$scriptPath" --print-venv
 if (-not $vpy) { throw "could not resolve venv python" }
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
+
+# Add installers/ to PATH (session + profile) non-interactively (parity with Bash build)
+try { & (Join-Path $HERE 'setup-path.ps1') -Quiet } catch { }
 
 # Make sure we don't accidentally keep the bootstrap 'skip' flag for the selector
 Remove-Item Env:ARGOS_SKIP_WEIGHTS -ErrorAction SilentlyContinue
