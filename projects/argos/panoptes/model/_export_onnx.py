@@ -1,20 +1,38 @@
-# \rAIn\projects\argos\panoptes\model\_export_onnx.py
+# projects/argos/panoptes/model/_export_onnx.py
 from __future__ import annotations
 
 import glob
 import os
 import shutil
 import sys
+import subprocess
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import TracebackType
 from typing import Any, ContextManager, Generator, List, Optional, Tuple, cast
 
+# ---------------------------------------------------------------------
+# Environment safety for reliable ONNX export on fresh installs
+# (project-driven, no terminal steps required by end users)
+# ---------------------------------------------------------------------
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ.setdefault("ORT_DISABLE_CPU_CAPABILITY_CHECK", "1")
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
+MODEL_DIR = Path(__file__).resolve().parent  # panoptes/model
+DEFAULT_IMGSZ = int(os.environ.get("ARGOS_ONNX_IMGSZ", "640"))
 
 # ---------------------------------------------------------------------
-# Minimal no-op spinner (works with "with ... as sp: sp.update(...)")
+# Minimal quiet stdio helpers
 # ---------------------------------------------------------------------
+@contextmanager
+def _silence_stdio() -> Generator[None, None, None]:
+    buf_out, buf_err = StringIO(), StringIO()
+    with redirect_stdout(buf_out), redirect_stderr(buf_err):
+        yield
+
+
 class _NoopSpinner:
     def __enter__(self) -> "_NoopSpinner":
         return self
@@ -32,9 +50,7 @@ class _NoopSpinner:
 
 
 # ---------------------------------------------------------------------
-# Panoptes progress (Halo-based, single-line)
-# - Provide a wrapper for osc8 so we can pass Path safely
-# - Provide no-op fallbacks if the package isn't available
+# Panoptes progress (Halo-based, single-line) with safe fallbacks
 # ---------------------------------------------------------------------
 try:
     from panoptes.progress import osc8 as _osc8_raw  # type: ignore[reportMissingTypeStubs]
@@ -50,7 +66,6 @@ try:
         return _simple_status(*args, **kwargs)  # type: ignore[misc]
 
 except Exception:  # pragma: no cover
-
     def percent_spinner(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore[no-redef]
         return _NoopSpinner()
 
@@ -62,41 +77,15 @@ except Exception:  # pragma: no cover
 
 
 def osc8_link(label: str, target: str | Path) -> str:
-    """
-    Safe wrapper so callers can pass either str or Path for 'target',
-    while deferring to Panoptes' osc8() implementation.
-    """
     try:
         return _osc8_raw(label, str(target))
     except Exception:
         return str(target)
 
 
-# --- Ultralytics (quiet logging, version-agnostic) ---
-has_yolo: bool = False
-try:
-    from ultralytics import YOLO  # type: ignore[reportMissingTypeStubs]
-    try:
-        from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
-        _rem = getattr(_ULTRA_LOGGER, "remove", None)
-        if callable(_rem):
-            _rem()
-        else:
-            for h in list(getattr(_ULTRA_LOGGER, "handlers", [])):
-                try:
-                    _ULTRA_LOGGER.removeHandler(h)  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    has_yolo = True
-except Exception:
-    YOLO = None  # type: ignore[assignment]
-    has_yolo = False
-
-MODEL_DIR = Path(__file__).resolve().parent  # panoptes/model
-
-
+# ---------------------------------------------------------------------
+# CWD switcher
+# ---------------------------------------------------------------------
 @contextmanager
 def _cd(p: Path) -> Generator[None, None, None]:
     prev = Path.cwd()
@@ -107,6 +96,9 @@ def _cd(p: Path) -> Generator[None, None, None]:
         os.chdir(prev)
 
 
+# ---------------------------------------------------------------------
+# Light validation/utils
+# ---------------------------------------------------------------------
 def _latest_exported_onnx() -> Optional[Path]:
     hits = [Path(p) for p in glob.glob("runs/**/**/*.onnx", recursive=True)]
     return max(hits, key=lambda pp: pp.stat().st_mtime) if hits else None
@@ -126,7 +118,12 @@ def _looks_like_text_header(bs: bytes) -> bool:
 
 
 def _validate_weight(p: Path) -> bool:
-    """Basic sanity for .onnx: exists, ≥1MB, not an HTML/JSON error."""
+    """
+    Basic sanity for .onnx:
+      - exists
+      - ≥ 1 MB (heuristic; avoids HTML error bodies)
+      - not an HTML/JSON error
+    """
     try:
         if not p.exists():
             return False
@@ -142,7 +139,10 @@ def _validate_weight(p: Path) -> bool:
 
 
 def _synonyms(name: str) -> List[str]:
-    """Try YOLO’s common spelling variants (yolo8/11/12 ↔ yolov8/11/12; suffixes preserved)."""
+    """
+    YOLO spelling variants: yolo8/11/12 ↔ yolov8/11/12; preserve suffixes.
+    E.g., 'yolo11s-seg.pt' <-> 'yolov11s-seg.pt'
+    """
     base = Path(name).name
     alts = {base}
     for ver in ("8", "11", "12"):
@@ -151,11 +151,84 @@ def _synonyms(name: str) -> List[str]:
     return [a for a in alts if a]
 
 
-@contextmanager
-def _silence_stdio() -> Generator[None, None, None]:
-    buf_out, buf_err = StringIO(), StringIO()
-    with redirect_stdout(buf_out), redirect_stderr(buf_err):
-        yield
+# ---------------------------------------------------------------------
+# Runtime ensure for export: torch + onnx + onnxscript + friends
+# ---------------------------------------------------------------------
+def _pip_install(pkgs: List[str], extra_args: Optional[List[str]] = None) -> None:
+    cmd = [sys.executable, "-m", "pip", "install", "-q", "--no-input"]
+    if extra_args:
+        cmd.extend(extra_args)
+    cmd.extend(pkgs)
+    try:
+        subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _try_import(name: str) -> tuple[bool, Optional[str]]:
+    try:
+        __import__(name)
+        return True, None
+    except Exception as e:
+        return False, f"{e.__class__.__name__}: {e}"
+
+
+def _ensure_export_runtime() -> None:
+    """
+    Ensure the *local venv* has the packages needed to export ONNX.
+    Silent best-effort; callers still have fallbacks.
+    """
+    # 1) torch (CPU) — required to load Ultralytics weights and to export
+    ok, _ = _try_import("torch")
+    if not ok:
+        torch_ver = os.environ.get("ARGOS_TORCH_VERSION", "2.4.1")
+        extra: List[str] = []
+        # Prefer CPU wheels for Windows/Linux to avoid CUDA downloads
+        if os.name in ("nt", "posix"):  # win/linux
+            idx = os.environ.get("ARGOS_TORCH_INDEX_URL", "https://download.pytorch.org/whl/cpu")
+            extra = ["--index-url", idx]
+        _pip_install([f"torch=={torch_ver}"], extra_args=extra)
+        _try_import("torch")  # retry once; ignore result (export will handle errors)
+
+    # 2) onnx + protobuf + onnxscript + onnxsim
+    wants = [
+        "onnx>=1.16,<1.18",
+        "protobuf>=4.23,<5",
+        "onnxscript>=0.1.0,<0.2",
+        "onnxsim>=0.4.36,<0.5",
+    ]
+    _pip_install(wants)
+
+    # 3) Sanity: import onnx; if we hit the Windows DLL error, pin a known-good set
+    ok, err = _try_import("onnx")
+    if not ok and err and ("onnx_cpp2py_export" in err or "DLL load failed" in err):
+        _pip_install(["onnx==1.16.0", "protobuf==4.25.3"], extra_args=["--force-reinstall", "--no-deps"])
+        _try_import("onnx")  # try again; final failure will be surfaced by exporter
+
+
+# ---------------------------------------------------------------------
+# Lazy Ultralytics import (after ensuring torch)
+# ---------------------------------------------------------------------
+def _get_yolo_class():
+    try:
+        from ultralytics import YOLO as _YOLO  # type: ignore
+        # Silence Ultralytics’ global logger to keep build output clean
+        try:
+            from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
+            _rem = getattr(_ULTRA_LOGGER, "remove", None)
+            if callable(_rem):
+                _rem()
+            else:
+                for h in list(getattr(_ULTRA_LOGGER, "handlers", [])):
+                    try:
+                        _ULTRA_LOGGER.removeHandler(h)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return _YOLO
+    except Exception:
+        return None
 
 
 def _status_cm(label: str) -> ContextManager[Any]:
@@ -169,12 +242,146 @@ def _status_cm(label: str) -> ContextManager[Any]:
         return _NoopSpinner()
 
 
+def _parse_ops_candidates() -> List[int]:
+    """
+    Read ARGOS_ONNX_OPSETS or default to a modern cascade.
+    """
+    raw = os.environ.get("ARGOS_ONNX_OPSETS", "").strip()
+    if raw:
+        out: List[int] = []
+        for part in raw.replace(",", " ").split():
+            try:
+                out.append(int(part))
+            except Exception:
+                pass
+        if out:
+            return out
+    # default cascade: newest → older, wide coverage for YOLOv8/11/12
+    return [21, 20, 19, 18, 17]
+
+
+def _try_ultralytics_export(YOLO, pt: Path, target: Path) -> Tuple[bool, Optional[str]]:
+    """
+    Use Ultralytics' exporter across a cascade of opsets and flags.
+    Returns (ok, last_error_message).
+    """
+    opsets = _parse_ops_candidates()
+    last_err: Optional[str] = None
+    with _status_cm("export onnx (ultralytics)"), _silence_stdio():
+        m = YOLO(str(pt))  # type: ignore[arg-type]
+        outp_path: Optional[Path] = None
+
+        for opset in opsets:
+            for dynamic in (True, False):
+                for simplify_flag in (True, False):
+                    try:
+                        out = m.export(
+                            format="onnx",
+                            dynamic=dynamic,
+                            simplify=simplify_flag,
+                            imgsz=DEFAULT_IMGSZ,
+                            opset=opset,
+                            device="cpu",
+                        )
+                        # Some versions return str, some a path-like, some a list
+                        if isinstance(out, (list, tuple)) and out:
+                            outp_path = Path(str(out[0]))
+                        else:
+                            outp_path = Path(str(out)) if out else _latest_exported_onnx()
+                        if outp_path and outp_path.exists():
+                            if outp_path.resolve() != target.resolve():
+                                shutil.copy2(outp_path, target)
+                            if _validate_weight(target):
+                                return True, None
+                            try:
+                                target.unlink(missing_ok=True)
+                            except TypeError:
+                                if target.exists():
+                                    target.unlink()
+                    except Exception as e:
+                        last_err = f"opset={opset}, dynamic={dynamic}, simplify={simplify_flag}: {e}"
+    return False, last_err
+
+
+def _try_torch_export_fallback(pt: Path, target: Path) -> Tuple[bool, Optional[str]]:
+    """
+    Optional fallback: use torch.onnx exporter.
+    Tries the modern `dynamo=True` path first (PyTorch ≥ 2.5), then legacy if needed.
+    Returns (ok, error_message).
+    """
+    try:
+        import torch  # type: ignore
+        from ultralytics import YOLO as _Y  # type: ignore
+    except Exception as e:
+        return False, f"torch/ultralytics import failed: {e}"
+
+    try:
+        m = _Y(str(pt))
+        model = getattr(m, "model", m)
+        try:
+            model.eval()
+        except Exception:
+            pass
+
+        dummy = torch.zeros(1, 3, DEFAULT_IMGSZ, DEFAULT_IMGSZ)
+        opsets = _parse_ops_candidates()
+        opver = max(min(opsets), 12)
+        tmp = target.with_suffix(".dynamo.onnx")
+
+        # 1) Try dynamo exporter
+        try:
+            with _status_cm("export onnx (torch dynamo)"), _silence_stdio():
+                torch.onnx.export(
+                    model,
+                    (dummy,),
+                    str(tmp),
+                    opset_version=opver,
+                    input_names=["images"],
+                    output_names=["output"],
+                    dynamic_axes={"images": {0: "batch", 2: "h", 3: "w"}, "output": {0: "batch"}},
+                    export_params=True,
+                    do_constant_folding=True,
+                    verbose=False,
+                    dynamo=True,  # PyTorch ≥ 2.5
+                )
+        except TypeError:
+            # 2) Fallback to legacy exporter (no `dynamo` kw)
+            with _status_cm("export onnx (torch legacy)"), _silence_stdio():
+                torch.onnx.export(
+                    model,
+                    (dummy,),
+                    str(tmp),
+                    opset_version=opver,
+                    input_names=["images"],
+                    output_names=["output"],
+                    dynamic_axes={"images": {0: "batch", 2: "h", 3: "w"}, "output": {0: "batch"}},
+                    export_params=True,
+                    do_constant_folding=True,
+                    verbose=False,
+                )
+
+        if tmp.exists():
+            if tmp.resolve() != target.resolve():
+                shutil.copy2(tmp, target)
+            if _validate_weight(target):
+                return True, None
+            try:
+                target.unlink(missing_ok=True)
+            except TypeError:
+                if target.exists():
+                    target.unlink()
+            return False, "torch exporter produced non-valid file"
+        return False, "torch exporter produced no output"
+    except Exception as e:
+        return False, f"torch export failed: {e}"
+
+
 def _export_one(arg: str) -> Tuple[Path, str]:
     """
     Export ONNX for *arg*.
     Returns (final_path, action) where action ∈ {"present" | "exported" | "failed"}.
     """
-    # Decide canonical target path first (works even if YOLO missing)
+    # Decide canonical target path first
     p = Path(arg)
     if p.suffix.lower() == ".pt":
         dst = (p.parent if p.parent != Path() else MODEL_DIR)
@@ -204,7 +411,12 @@ def _export_one(arg: str) -> Tuple[Path, str]:
         except Exception:
             pass
 
-    if not has_yolo or YOLO is None:
+    # Ensure runtime first (torch + onnx + onnxscript + protobuf + onnxsim)
+    _ensure_export_runtime()
+
+    # Acquire Ultralytics class after torch is available
+    YOLO = _get_yolo_class()
+    if YOLO is None:
         return (target, "failed")
 
     # Work inside *dst* so Ultralytics writes runs/ here (not repo root)
@@ -216,9 +428,10 @@ def _export_one(arg: str) -> Tuple[Path, str]:
 
         # Try the provided spelling + synonyms for hub fetch
         tried_names: List[str] = [pt_name, *{nm for nm in _synonyms(pt_name) if nm != pt_name}]
+
         for nm in tried_names:
             try:
-                # Load/Fetch the .pt
+                # 1) Fetch or locate the .pt
                 with _status_cm("fetch weights"), _silence_stdio():
                     m = YOLO(str(src_pt_path or nm))  # may download into CWD=dst
                     ck = Path(getattr(m, "ckpt_path", nm)).expanduser()
@@ -228,38 +441,21 @@ def _export_one(arg: str) -> Tuple[Path, str]:
                     if ck.exists() and ck.resolve() != canon_pt.resolve():
                         shutil.copy2(ck, canon_pt)
 
-                # Export ONNX (with safe fallbacks)
-                with _status_cm("export onnx"), _silence_stdio():
+                # 2) Export via Ultralytics (multi-try)
+                ok, _ = _try_ultralytics_export(YOLO, canon_pt, target)
+
+                # 3) Fallback: torch exporter (dynamo or legacy)
+                if not ok:
+                    ok, _ = _try_torch_export_fallback(canon_pt, target)
+
+                # 4) Finalize outcome
+                if ok and target.exists() and _validate_weight(target):
+                    # Tidy transient folder; ignore errors
                     try:
-                        YOLO(str(canon_pt)).export(  # type: ignore[call-arg]
-                            format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu"
-                        )
+                        shutil.rmtree(dst / "runs", ignore_errors=True)
                     except Exception:
-                        try:
-                            YOLO(str(canon_pt)).export(  # type: ignore[call-arg]
-                                format="onnx", dynamic=True, simplify=False, imgsz=640, opset=12, device="cpu"
-                            )
-                        except Exception:
-                            YOLO(str(canon_pt)).export(  # last ditch: drop dynamic
-                                format="onnx", simplify=False, imgsz=640, opset=12, device="cpu"  # type: ignore[call-arg]
-                            )
-
-                # (a) direct save as target
-                if target.exists() and _validate_weight(target):
-                    action = "exported"
-                else:
-                    # (b) under runs/ → copy to target (then validate)
-                    cand = _latest_exported_onnx()
-                    if cand and cand.exists():
-                        shutil.copy2(cand, target)
-                    action = "exported" if (target.exists() and _validate_weight(target)) else "failed"
-
-                # Tidy transient folder; ignore errors
-                try:
-                    shutil.rmtree(dst / "runs", ignore_errors=True)
-                except Exception:
-                    pass
-                return (target, action)
+                        pass
+                    return (target, "exported")
             except Exception:
                 continue
 
@@ -278,7 +474,6 @@ def main(argv: List[str]) -> int:
         sp.update(total=len(argv), count=0)
         for i, a in enumerate(argv, start=1):
             try:
-                # show model (weight base) while exporting
                 model_name = Path(a).name
                 sp.update(current=a, job="export", model=model_name)
             except Exception:

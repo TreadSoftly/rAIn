@@ -1,6 +1,8 @@
+# projects/argos/panoptes/model/_fetch_models.py
 from __future__ import annotations
 
 import glob
+import importlib.util
 import json
 import os
 import shutil
@@ -34,47 +36,33 @@ import typer
 class _NoopSpinner:
     def __enter__(self) -> "_NoopSpinner":
         return self
-
-    def __exit__(
-        self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
-    ) -> None:
+    def __exit__(self, exc_type, exc, tb) -> None:
         return None
-
     def update(self, **_: Any) -> "_NoopSpinner":
         return self
 
 # ---------------------------------------------------------------------
-# Halo-based progress (Panoptes) with safe fallbacks
+# Halo-based progress (Panoptes) fallbacks + Path-safe osc8 wrapper
 # ---------------------------------------------------------------------
 class _ProgressLike(Protocol):
     def update(self, **kwargs: Any) -> Any: ...
     def __enter__(self) -> "_ProgressLike": ...
-    def __exit__(
-        self,
-        exc_type: Optional[type[BaseException]],
-        exc: Optional[BaseException],
-        tb: Optional[TracebackType],
-    ) -> None: ...
+    def __exit__(self, exc_type, exc, tb) -> None: ...
 
 try:
-    from panoptes.progress import (  # type: ignore[reportMissingTypeStubs]
-        percent_spinner as _percent_spinner,
-        simple_status as _simple_status,
-        osc8 as _osc8_raw,
-    )
+    from panoptes.progress import osc8 as _osc8_raw  # type: ignore
+    from panoptes.progress import percent_spinner as _percent_spinner  # type: ignore
+    from panoptes.progress import simple_status as _simple_status  # type: ignore
     def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
-        return _percent_spinner(*args, **kwargs)  # type: ignore[misc]
+        return _percent_spinner(*args, **kwargs)
     def simple_status(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
-        return _simple_status(*args, **kwargs)  # type: ignore[misc]
+        return _simple_status(*args, **kwargs)
 except Exception:  # pragma: no cover
-    def percent_spinner(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore[no-redef]
+    def percent_spinner(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore
         return _NoopSpinner()
-    def simple_status(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore[no-redef]
+    def simple_status(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore
         return _NoopSpinner()
-    def _osc8_raw(label: str, target: str) -> str:  # type: ignore[no-redef]
+    def _osc8_raw(label: str, target: str) -> str:  # type: ignore
         return str(target)
 
 def osc8_link(label: str, target: str | Path) -> str:
@@ -83,6 +71,7 @@ def osc8_link(label: str, target: str | Path) -> str:
     except Exception:
         return str(target)
 
+# Our byte-accurate downloader (works with .update(total=..., count=..., current=...))
 try:
     from panoptes.progress.integrations.download_progress import download_url  # type: ignore
 except Exception:
@@ -99,10 +88,53 @@ except Exception:
 
 MODEL_DIR: Path = _registry_model_dir or (Path(__file__).resolve().parents[2] / "panoptes" / "model")
 
+# ---------------------------------------------------------------------
+# Auto-install export deps (avoid importing libs that lack type stubs)
+# ---------------------------------------------------------------------
+def _have(mod: str) -> bool:
+    try:
+        return importlib.util.find_spec(mod) is not None
+    except Exception:
+        return False
+
+def _pip_quiet(*pkgs: str) -> None:
+    if not pkgs:
+        return
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--no-input", "--quiet", *pkgs],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass  # best-effort
+
+def _ensure_export_toolchain() -> None:
+    """
+    Idempotently ensure ultralytics + onnx toolchain without importing
+    untyped libs. Versions chosen to work on Py3.12 + Windows.
+    """
+    if not _have("ultralytics"):
+        _pip_quiet("ultralytics>=8.3.0,<8.6.0")
+    # Ensure ONNX is modern (fixes 'Unsupported opset 21' and DLL init issues on Win+Py3.12)
+    if not _have("onnx"):
+        _pip_quiet("onnx>=1.18,<1.19")
+    if not _have("onnxruntime"):
+        if os.name == "nt":
+            _pip_quiet("onnxruntime>=1.22,<1.23")
+        else:
+            _pip_quiet("onnxruntime>=1.22,<1.24")
+    if not _have("onnxslim"):
+        _pip_quiet("onnxslim<0.1.59")
+
+# Ensure deps before we try to import YOLO
+_ensure_export_toolchain()
+
 # Ultralytics (used to export ONNX and as last-resort fetcher)
 has_yolo: bool
 try:
-    from ultralytics import YOLO as _YOLO  # type: ignore[reportMissingTypeStubs]
+    from ultralytics import YOLO as _YOLO  # type: ignore
     try:
         from ultralytics.utils import LOGGER as _ULTRA_LOGGER  # type: ignore
         _rem = getattr(_ULTRA_LOGGER, "remove", None)
@@ -121,7 +153,7 @@ except Exception:
     _YOLO = None  # type: ignore[assignment]
     has_yolo = False
 
-YOLO = _YOLO
+YOLO = _YOLO  # assign once
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 
@@ -132,61 +164,35 @@ ASSETS_BASE = os.getenv("ULTRA_ASSETS_BASE", "https://github.com/ultralytics/ass
 # Packs / naming
 # ---------------------------------------------------------------------
 VERSIONS: Tuple[str, ...] = ("8", "11", "12")
-SIZES: Tuple[str, ...] = ("x", "l", "m", "s", "n")
-EXTS: Tuple[str, ...] = (".pt", ".onnx")
-TASKS: Tuple[str, ...] = ("det", "seg", "pose", "cls", "obb")
+SIZES:    Tuple[str, ...] = ("x", "l", "m", "s", "n")
+EXTS:     Tuple[str, ...] = (".pt", ".onnx")
+TASKS:    Tuple[str, ...] = ("det", "seg", "pose", "cls", "obb")
 
 DEFAULT_PACK: List[str] = [
     # DETECT
-    "yolov8x.pt",
-    "yolo11x.pt",
-    "yolo12x.pt",
-    "yolo12x.onnx",
-    "yolov8n.pt",
-    "yolov8n.onnx",
-    "yolov8s.pt",
-    "yolov8s.onnx",
-    "yolo11n.pt",
-    "yolo11n.onnx",
-    "yolo12n.pt",
-    "yolo12n.onnx",
+    "yolov8x.pt", "yolo11x.pt", "yolo12x.pt", "yolo12x.onnx",
+    "yolov8n.pt", "yolov8n.onnx", "yolov8s.pt", "yolov8s.onnx",
+    "yolo11n.pt", "yolo11n.onnx", "yolo12n.pt", "yolo12n.onnx",
 
     # SEG
-    "yolov8x-seg.pt",
-    "yolov8n-seg.onnx",
-    "yolov8s-seg.pt",
-    "yolov8s-seg.onnx",
-    "yolo11x-seg.pt",
-    "yolo11n-seg.onnx",
-    "yolo11s-seg.pt",
-    "yolo11s-seg.onnx",
+    "yolov8x-seg.pt", "yolov8n-seg.onnx", "yolov8s-seg.pt", "yolov8s-seg.onnx",
+    "yolo11x-seg.pt", "yolo11n-seg.onnx", "yolo11s-seg.pt", "yolo11s-seg.onnx",
 
     # POSE
-    "yolov8x-pose.pt",
-    "yolov8n-pose.onnx",
-    "yolov8s-pose.pt",
-    "yolov8s-pose.onnx",
-    "yolo11x-pose.pt",
-    "yolo11n-pose.onnx",
-    "yolo11s-pose.pt",
-    "yolo11s-pose.onnx",
+    "yolov8x-pose.pt", "yolov8n-pose.onnx", "yolov8s-pose.pt", "yolov8s-pose.onnx",
+    "yolo11x-pose.pt", "yolo11n-pose.onnx", "yolo11s-pose.pt", "yolo11s-pose.onnx",
 
     # CLS
-    "yolov8x-cls.pt",
-    "yolov8n-cls.onnx",
-    "yolo11x-cls.pt",
-    "yolo11n-cls.onnx",
+    "yolov8x-cls.pt", "yolov8n-cls.onnx", "yolo11x-cls.pt", "yolo11n-cls.onnx",
 
     # OBB
-    "yolov8x-obb.pt",
-    "yolov8n-obb.onnx",
-    "yolov8s-obb.pt",
-    "yolov8s-obb.onnx",
-    "yolo11x-obb.pt",
-    "yolo11n-obb.onnx",
-    "yolo11s-obb.onnx",
+    "yolov8x-obb.pt", "yolov8n-obb.onnx", "yolov8s-obb.pt", "yolov8s-obb.onnx",
+    "yolo11x-obb.pt", "yolo11n-obb.onnx", "yolo11s-obb.onnx",
 ]
 
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 def _mk(ver: str, size: str, task: str, ext: str) -> str:
     base = f"yolov{ver}{size}" if ver == "8" else f"yolo{ver}{size}"
     suf = {"det": "", "seg": "-seg", "pose": "-pose", "cls": "-cls", "obb": "-obb"}[task]
@@ -229,6 +235,9 @@ def _human_bytes(n: float | int) -> str:
         f /= 1024.0
     return f"{n}B"
 
+# ---------------------------------------------------------------------
+# Temporary env/context helpers
+# ---------------------------------------------------------------------
 @contextmanager
 def _cd(path: Path) -> Iterator[None]:
     prev = Path.cwd()
@@ -256,6 +265,9 @@ def _tqdm_disabled_env() -> Iterator[None]:
         else:
             os.environ["TQDM_DISABLE"] = old
 
+# ---------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------
 def _looks_like_text_header(bs: bytes) -> bool:
     s = bs.lstrip()
     if not s:
@@ -283,6 +295,9 @@ def _latest_exported_onnx() -> Optional[Path]:
     hits = [Path(p) for p in glob.glob("runs/**/**/*.onnx", recursive=True)]
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
+# ---------------------------------------------------------------------
+# Spinner adapter (byte progress → single-line UX)
+# ---------------------------------------------------------------------
 class _DownloadSpinnerAdapter:
     def __init__(self, spinner: _ProgressLike, *, items_total: int, items_done: int, label: Optional[str] = None) -> None:
         self.spinner = spinner
@@ -323,7 +338,14 @@ class _DownloadSpinnerAdapter:
             pass
         return self
 
+# ---------------------------------------------------------------------
+# Fetch logic
+# ---------------------------------------------------------------------
 def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_total: int, items_done: int) -> Tuple[str, str]:
+    """
+    Obtain *name* into *dst* and return (basename, action).
+    Actions: "present" | "download" | "copied" | "exported" | "failed"
+    """
     dst.mkdir(parents=True, exist_ok=True)
     target = dst / Path(name).name
 
@@ -342,6 +364,8 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
             pass
 
     base = target.name
+
+    # 1) Direct download (.pt only)
     if base.lower().endswith(".pt") and download_url is not None:
         try:
             ctx: ContextManager[Any] = simple_status("download", enabled=(os.environ.get("PANOPTES_PROGRESS_ACTIVE") != "1"))  # type: ignore[misc]
@@ -355,6 +379,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         except Exception:
             pass
 
+    # 2) YOLO as last-resort fetcher for .pt (silenced)
     if base.lower().endswith(".pt") and has_yolo and YOLO is not None:
         try:
             if spinner is not None:
@@ -374,6 +399,7 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
         if _validate_weight(target):
             return (target.name, "download" if (dst / base).exists() else "copied")
 
+    # 3) If ONNX requested, export from matching .pt
     if base.lower().endswith(".onnx"):
         pt_name = Path(base).with_suffix(".pt").name
         pt_path = dst / pt_name
@@ -406,13 +432,14 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
                 if spinner is not None:
                     spinner.update(current=base, job="export onnx", model=pt_name)
                 with _cd(dst), _tqdm_disabled_env(), _silence_stdio():
+                    # Robust triad: export with pinned opset=12 and fallbacks on dynamic/simplify
                     try:
-                        YOLO(str(pt_path)).export(format="onnx", dynamic=True, simplify=True, imgsz=640, opset=12, device="cpu")  # type: ignore
+                        YOLO(str(pt_path)).export(format="onnx", dynamic=True,  simplify=True,  imgsz=640, opset=12, device="cpu")  # type: ignore
                     except Exception:
                         try:
-                            YOLO(str(pt_path)).export(format="onnx", dynamic=False, simplify=True, imgsz=640, opset=12, device="cpu")  # type: ignore
+                            YOLO(str(pt_path)).export(format="onnx", dynamic=True,  simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
                         except Exception:
-                            YOLO(str(pt_path)).export(format="onnx", simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
+                            YOLO(str(pt_path)).export(format="onnx", dynamic=False, simplify=False, imgsz=640, opset=12, device="cpu")  # type: ignore
 
                 if target.exists() and _validate_weight(target):
                     return (target.name, "exported")
@@ -436,11 +463,9 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
 def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
     results: List[Tuple[str, str]] = []
     failed: List[str] = []
-
     with percent_spinner(prefix="FETCH MODELS") as sp:
         total = len(names)
         sp.update(total=max(1, total), count=0)
-
         done = 0
         for nm in names:
             try:
@@ -462,9 +487,8 @@ def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
     return results, failed
 
 def _write_manifest(selected: List[str], installed: List[str]) -> Path:
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[2]  # .../projects/argos
     rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
-
     data: Dict[str, object] = {
         "model_dir": rel_model_dir,
         "selected": _dedupe(selected),
@@ -474,6 +498,9 @@ def _write_manifest(selected: List[str], installed: List[str]) -> Path:
     man.write_text(json.dumps(data, indent=2))
     return man
 
+# ---------------------------------------------------------------------
+# Menu helpers
+# ---------------------------------------------------------------------
 def _show_row(title: str, items: Iterable[str]) -> None:
     typer.secho(f"\n{title}", bold=True)
     typer.echo("  " + "  |  ".join(f"[{i+1}] {v}" for i, v in enumerate(items)))
@@ -508,13 +535,7 @@ def _parse_multi(raw: str, items: Tuple[str, ...], *, aliases: Optional[Dict[str
             out.append(t)
     return out
 
-def _build_combo(
-    vers: Iterable[str],
-    sizes: Iterable[str],
-    tasks: Iterable[str],
-    *,
-    formats: Iterable[str],
-) -> List[str]:
+def _build_combo(vers: Iterable[str], sizes: Iterable[str], tasks: Iterable[str], *, formats: Iterable[str]) -> List[str]:
     names: List[str] = []
     for ver in vers:
         for sz in sizes:
@@ -548,10 +569,7 @@ def _menu() -> int:
         )
         pick = typer.prompt("Pick [0-4, ? for help]", default="1 or ?").strip().lower()
         if pick in {"?", "h", "help"}:
-            typer.echo("Typing numbers or names are fine in the builder.")
-            typer.echo("You are choosing model weights for tasks Argos can perform.")
-            typer.echo("YOLO models are named by version (v8, v11, v12), size (n/s/m/l/x), task (det/seg/pose/cls/obb), and format (.pt/.onnx).")
-            typer.echo("Choosing the default pack (1) is a good start for most users.")
+            typer.echo("Type numbers or names in the builder. v8/v11/v12, sizes n/s/m/l/x, tasks det/seg/pose/cls/obb, formats .pt/.onnx.")
             continue
         try:
             choice = int(pick)
@@ -573,9 +591,7 @@ def _ask_size_pack() -> List[str]:
     _show_row("Tasks:", TASKS)
     task_alias = {"detect": "det", "segmentation": "seg", "classification": "cls"}
     raw_tasks = typer.prompt("Pick tasks (e.g. 'det,seg,pose' or 'all')", default="det,seg").strip()
-    chosen_tasks = _parse_multi(raw_tasks, TASKS, aliases=task_alias)
-    if not chosen_tasks:
-        chosen_tasks = ["det"]
+    chosen_tasks = _parse_multi(raw_tasks, TASKS, aliases=task_alias) or ["det"]
 
     fmt = typer.prompt("Formats: .pt / .onnx / both", default="both").strip().lower()
     if fmt not in {"pt", "onnx", "both"}:
@@ -593,7 +609,7 @@ def _ask_custom() -> List[str]:
         raw = typer.prompt("Pick versions (e.g. '1', '2', '3' / 'all')", default="all")
         vers = _parse_multi(raw, VERSIONS, aliases=ver_alias)
         if not vers:
-            typer.secho("Pick at least one version (try '1', '2', '3' or 'all').", fg="yellow")
+            typer.secho("Pick at least one version (try 'all').", fg="yellow")
 
     _show_row("Model sizes:", SIZES)
     size_alias: Dict[str, str] = {"nano": "n", "small": "s", "medium": "m", "large": "l", "xlarge": "x"}
@@ -620,24 +636,21 @@ def _ask_custom() -> List[str]:
     formats: Tuple[str, ...] = (".pt", ".onnx") if fmt_raw == "both" else (f".{fmt_raw}",)
 
     names = _build_combo(vers, sizes, tasks, formats=formats)
-
     typer.secho("\nPreview (will be fetched):", bold=True)
     for n in names:
         typer.echo(f"  • {n}")
 
-    extra = typer.prompt(
-        "Optional: add exact extra names (comma-sep) or press Enter",
-        default="",
-    ).strip()
+    extra = typer.prompt("Optional: add exact extra names (comma-sep) or press Enter", default="").strip()
     if extra:
         names += _dedupe(n for n in (p.strip() for p in extra.split(",")) if n)
-
     return _dedupe(names)
 
+# ---------------------------------------------------------------------
+# Quick smoke (optional)
+# ---------------------------------------------------------------------
 def _quick_check() -> None:
     if not typer.confirm("Run a quick smoke check now?", default=False):
         return
-
     raw_task = typer.prompt(
         "Task [detect|heatmap|geojson|classify|pose|obb]  (aliases: d|hm|gj|cls|pse|object)",
         default="heatmap",
@@ -652,13 +665,10 @@ def _quick_check() -> None:
     }
     task = task_alias.get(raw_task, "heatmap")
 
-    inp = typer.prompt(
-        "Input (Files in tests/raw; enter a file name or 'all' to process the whole folder)",
-        default="all",
-    ).strip()
+    inp = typer.prompt("Input (tests/raw; file name or 'all')", default="all").strip()
 
     py = sys.executable
-    args: List[str] = ["-m", "panoptes.cli", ("all" if inp.lower() == "all" else inp), "--task", task]
+    args: List[str] = ["-m", "panoptes.cli", (inp if inp.lower() != "all" else "all"), "--task", task]
 
     repo_root = Path(__file__).resolve().parents[2]
     raw_dir = repo_root / "tests" / "raw"
@@ -682,8 +692,8 @@ def _quick_check() -> None:
         _vid: Set[str] = set(cast(Iterable[str], getattr(_cli, "_VIDEO_EXTS", ())))  # type: ignore[misc]
         exts: Set[str] = _img | _vid
     except Exception:
-        exts: Set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif",
-                          ".mp4", ".mov", ".avi", ".mkv", ".webm"}
+        exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".gif",
+                ".mp4", ".mov", ".avi", ".mkv", ".webm"}
     expected = 1
     if inp.lower() == "all":
         expected = sum(1 for p in raw_dir.glob("*") if p.suffix.lower() in exts)
@@ -719,128 +729,76 @@ def _quick_check() -> None:
                             sp.update(total=float(n))
                         except Exception:
                             pass
-
                     delta = n - done_reported
                     if delta > 0:
                         try:
                             sp.update(count=done_reported + delta,
                                       current=(created[-1].name if created else "working"),
-                                      job="write",
+                                      job="process",
                                       model=task)
                         except Exception:
                             pass
                         done_reported = n
-
                 if rc is not None:
                     break
-                time.sleep(0.05)
-
-            created = _list_created()
-            n = len(created)
-            if n > expected:
-                try:
-                    sp.update(total=float(n))
-                except Exception:
-                    pass
-            delta = n - done_reported
-            if delta > 0:
-                try:
-                    sp.update(count=done_reported + delta,
-                              current=(created[-1].name if created else "done"),
-                              job="finalize",
-                              model=task)
-                except Exception:
-                    pass
-                done_reported = n
-
-            if proc.returncode == 0:
-                _ok("Smoke check finished.")
-                if created:
-                    typer.secho("Results (Ctl + Click To Open):", bold=True)
-                    for p in created:
-                        typer.echo(f"  • {osc8_link(p.name, p)}")
-                else:
-                    _warn("CLI ran but produced no files.")
-            else:
-                _warn(f"Smoke check failed (exit code {proc.returncode}).")
+                time.sleep(0.15)
         finally:
             try:
                 proc.terminate()
             except Exception:
                 pass
 
-@app.command()
-def main() -> None:
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    typer.secho("Smoke check completed.", fg="green")
 
-    if not (MODEL_DIR / "manifest.json").exists():
-        _ensure_env_hint()
+# ---------------------------------------------------------------------
+# Entry (interactive)
+# ---------------------------------------------------------------------
+def _confirm_and_fetch(names: List[str]) -> None:
+    names = _dedupe(names)
+    if not names:
+        _warn("Nothing selected. Exiting.")
+        raise typer.Exit(code=0)
 
-    choice = _menu()
-    if choice == 0:
-        raise typer.Exit(0)
-    if choice == 1:
-        selected = _dedupe(DEFAULT_PACK)
-    elif choice == 2:
-        selected = _dedupe(_full_pack())
-    elif choice == 3:
-        selected = _ask_size_pack()
-    elif choice == 4:
-        selected = _ask_custom()
+    _ensure_env_hint()
+    typer.secho("\nSelected:", bold=True)
+    for n in names:
+        typer.echo(f"  • {n}")
+
+    ok = typer.confirm(f"\nProceed to download/install into {osc8_link('panoptes/model', MODEL_DIR)}/?", default=True)
+    if not ok:
+        _warn("Cancelled.")
+        raise typer.Exit(code=0)
+
+    installed: List[str] = []
+    results, failed = _fetch_all(names)
+    for base, action in results:
+        if action != "failed":
+            installed.append(base)
+
+    man = _write_manifest(names, installed)
+    typer.echo(f"\nManifest written: {osc8_link(man.name, man)}")
+
+    if failed:
+        _warn("\nSome items failed:")
+        for nm in failed:
+            typer.echo(f"  - {nm}")
     else:
-        _err("Invalid choice.")
-        raise typer.Exit(2)
-
-    if not selected:
-        _warn("Nothing selected, exiting.")
-        raise typer.Exit(0)
-
-    typer.echo()
-    typer.secho("Selected:", bold=True)
-    for nm in selected:
-        typer.echo(f"  • {nm}")
-    typer.echo()
-
-    if not typer.confirm("Proceed to download/install into panoptes/model/?", default=True):
-        raise typer.Exit(1)
-
-    results, bad = _fetch_all(selected)
-
-    action_icons = {"present": "↺", "download": "↓", "copied": "⇢", "exported": "⎘", "failed": "✗"}
-    for name, action in results:
-        icon = action_icons.get(action, "•")
-        if action == "failed":
-            _warn(f"{icon} {name}  (failed)")
-        elif action == "present":
-            typer.echo(f"{icon} {name}  (already present)")
-        elif action == "download":
-            _ok(f"{icon} {name}  (downloaded)")
-        elif action == "copied":
-            _ok(f"{icon} {name}  (downloaded → copied into model dir)")
-        elif action == "exported":
-            _ok(f"{icon} {name}  (exported from matching .pt)")
-        else:
-            typer.echo(f"{icon} {name}  ({action})")
-
-    installed = [n for (n, a) in results if a != "failed"]
-
-    typer.echo()
-    _ok(f"Installed/ready: {len(installed)}")
-    if installed:
-        typer.secho("Ready (Ctl + Click To Open):", bold=True)
-        for bn in _dedupe(installed):
-            typer.echo(f"  • {osc8_link(bn, MODEL_DIR / bn)}")
-
-    if bad:
-        _warn(f"Skipped/failed: {len(bad)}")
-        for n in _dedupe(bad):
-            typer.echo(f"  - {n}")
-        _warn("Those names may not be hosted yet, or export failed.")
-
-    man = _write_manifest(selected, installed)
-    typer.echo(f"\nManifest: {osc8_link('manifest.json', man)}")
+        _ok("\nAll selected items installed successfully.")
 
     _quick_check()
+
+def main() -> None:
+    choice = _menu()
+    if choice == 0:
+        raise typer.Exit(code=0)
+    elif choice == 1:
+        _confirm_and_fetch(DEFAULT_PACK)
+    elif choice == 2:
+        _confirm_and_fetch(_full_pack())
+    elif choice == 3:
+        _confirm_and_fetch(_ask_size_pack())
+    elif choice == 4:
+        _confirm_and_fetch(_ask_custom())
 
 if __name__ == "__main__":
     main()

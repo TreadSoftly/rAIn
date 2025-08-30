@@ -1,10 +1,4 @@
-# Resolver anchors used by CI across Linux/macOS/Windows.
-# NOTE:
-#  - Torch/TorchVision pins were removed here to avoid blocking +cpu local wheels
-#    when the CPU index is used. Torch pairs are selected by requirements + bootstrap logic.
-#  - NumPy floor raised so TorchVision 0.20 CPU wheels resolve cleanly.
-
-# OpenCV wheels (GUI-capable on all platforms)
+# Anchor critical wheels to combinations that resolve across Python 3.10–3.12
 opencv-python==4.11.0.86
 
 # NumPy: allow NP2 across Pythons (Torch/Tv CPU wheels require >=2.1)
@@ -13,6 +7,17 @@ numpy>=2.1,<2.3
 # Sympy/Scipy pins to satisfy Torch and ONNX tools landscapes
 sympy==1.13.1
 scipy==1.13.*
+
+# ONNX: modern enough for Ultralytics exporters (supports opset ≥ 21 wheels)
+onnx>=1.18,<1.19
+
+# ONNX Runtime: platform-aware ranges
+onnxruntime==1.19.2 ; python_version < "3.10"
+onnxruntime>=1.22,<1.23 ; python_version >= "3.10" and platform_system == "Windows"
+onnxruntime>=1.22,<1.24 ; python_version >= "3.10" and platform_system != "Windows"
+
+# Ultralytics range stable for YOLO11/YOLO12 weights fetching
+ultralytics>=8.3,<8.6
 
 # Matplotlib: cap on Py3.9 only to avoid wheel gaps
 matplotlib>=3.9,<3.10  ; python_version < "3.10"

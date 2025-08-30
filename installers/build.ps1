@@ -190,6 +190,9 @@ $vpy = & $script:pyExe @script:pyArgs "$scriptPath" --print-venv
 if (-not $vpy) { throw "could not resolve venv python" }
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
+# Make sure we don't accidentally keep the bootstrap 'skip' flag for the selector
+Remove-Item Env:ARGOS_SKIP_WEIGHTS -ErrorAction SilentlyContinue
+
 # --- Launch the *model selector* (user picks pack, fetches, exports, THEN smoke check prompts once) ---
 & $vpy -m panoptes.model._fetch_models @BuildArgs
 if ($LASTEXITCODE -ne 0) { throw "model selector failed ($LASTEXITCODE)" }

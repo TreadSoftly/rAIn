@@ -94,22 +94,27 @@ function Enable-GitLfs {
   }
 }
 
-# If launching live/video mode, install GUI OpenCV; otherwise the headless build.
+# Always install GUI-capable OpenCV (no headless)
 function Install-OpenCvPackage {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory)][string]$Vpy,
-    [Parameter(Mandatory)][bool]$NeedsGui
+    [Parameter(Mandatory)][bool]$NeedsGui  # retained for backward compat; ignored
   )
-  $want = if ($NeedsGui) { 'opencv-python' } else { 'opencv-python-headless' }
-  $avoid = if ($NeedsGui) { 'opencv-python-headless' } else { 'opencv-python' }
+  $want = 'opencv-python'
+  $avoid = @('opencv-python-headless', 'opencv-contrib-python-headless')
 
+  # If headless is present, remove it
+  foreach ($pkg in $avoid) {
+    & $Vpy -m pip show $pkg *>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      & $Vpy -m pip uninstall -y $pkg *>&1 | Out-Null
+    }
+  }
+
+  # Ensure GUI build
   & $Vpy -m pip show $want *>&1 | Out-Null
   if ($LASTEXITCODE -ne 0) {
-    & $Vpy -m pip show $avoid *>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-      & $Vpy -m pip uninstall -y $avoid *>&1 | Out-Null
-    }
     & $Vpy -m pip install --no-input --quiet $want *>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Failed to install $want" }
   }
@@ -197,8 +202,8 @@ $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
 Install-VcRedistIfMissing
 
-# ---------- Ensure OpenCV in the venv (GUI vs headless) ----------
-Install-OpenCvPackage -Vpy $vpy -NeedsGui:$liveMode
+# ---------- Ensure OpenCV (GUI) in the venv ----------
+Install-OpenCvPackage -Vpy $vpy -NeedsGui:$true
 
 # ---------- Select module and live-mode env ----------
 $pyMod = if ($liveMode) { 'panoptes.live.cli' } else { 'panoptes.cli' }

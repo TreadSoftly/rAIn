@@ -5,7 +5,7 @@ Argos bootstrap - zero-touch, idempotent, fast.
 What it does (one-time on first run):
   • creates a private venv OUTSIDE the repo (no .venv mess)
   • auto-selects CPU-only Torch when CUDA isn’t present
-  • installs your project in editable mode (+dev extras)
+  • installs your project in editable mode (dev extras optional)
   • fetches model weights via Ultralytics (no git/LFS)
     - preset: all | default | nano | perception (ARGOS_WEIGHT_PRESET)
     - or interactively: pick specific files from a list
@@ -51,6 +51,7 @@ from typing import (
 # Diagnostics (always try to attach; never crash on failure)
 try:
     import importlib
+
     importlib.import_module("panoptes.diagnostics")
 except Exception:
     pass
@@ -136,7 +137,6 @@ def _run(
     check: bool = ...,
     capture: Literal[False] = ...,
 ) -> None: ...
-
 def _run(
     cmd: Sequence[str],
     *,
@@ -252,7 +252,6 @@ def _install_torch_if_needed(cpu_only: bool) -> None:
 
     # 3) Curated fallback pairs
     if cpu_only and (os.name == "nt" or sys.platform.startswith("linux")):
-        # CPU local-tagged wheels
         for pair in (["torch==2.4.1+cpu", "torchvision==0.19.1+cpu"],
                      ["torch==2.5.1+cpu", "torchvision==0.20.1+cpu"]):
             if _try_install(pair, f"fallback {'/'.join(pair)}"):
@@ -274,7 +273,7 @@ def _ensure_opencv_gui() -> None:
         pass
     _run([str(VPY), "-m", "pip", "install", "--upgrade", *_constraints_args(), "opencv-python"], check=True, capture=False)
 
-def _pip_install_editable_if_needed(*, reinstall: bool = False, with_dev: bool = True) -> None:
+def _pip_install_editable_if_needed(*, reinstall: bool = False, with_dev: bool = False) -> None:
     need = reinstall or (not _module_present("panoptes")) or (not _module_present("ultralytics"))
 
     headless_present = False
@@ -504,7 +503,11 @@ for onnx_name in sys.argv[1:-2]:
                 outp = Path(m.export(format='onnx', dynamic=True, simplify=False, imgsz=640, opset=12, device='cpu'))
                 outp_path = outp
             except Exception:
-                outp_path = None
+                try:
+                    outp = Path(m.export(format='onnx', dynamic=False, simplify=False, imgsz=640, opset=12, device='cpu'))
+                    outp_path = outp
+                except Exception:
+                    outp_path = None
         target = dst / onnx_name
         if outp_path and outp_path.exists() and outp_path.resolve() != target.resolve():
             shutil.copy2(outp_path, target)
@@ -733,7 +736,7 @@ def _ensure(
     weight_names: Optional[list[str]] = None,
     skip_weights: bool = False,
     reinstall: bool = False,
-    with_dev: bool = True,
+    with_dev: bool = False,
 ) -> None:
     steps: list[tuple[str, Callable[[], None]]] = [
         ("Create venv", _create_venv),
@@ -784,10 +787,13 @@ def main(argv: list[str]) -> int:
         return 0
 
     cpu_only = bool(args.cpu_only or not _has_cuda())
+    with_dev_flag = bool(
+        args.with_dev or (os.getenv("ARGOS_WITH_DEV", "").strip().lower() in {"1", "true", "yes"})
+    )
 
     if args.ensure:
         try:
-            _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall, with_dev=args.with_dev or True)
+            _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall, with_dev=with_dev_flag)
         except Exception as e:
             traceback.print_exc()
             _print(f"ensure failed: {e}")
@@ -808,7 +814,7 @@ def main(argv: list[str]) -> int:
             elif preset:
                 os.environ["ARGOS_WEIGHT_PRESET"] = preset
 
-            _ensure(cpu_only, preset=preset, weight_names=picks, skip_weights=skip, reinstall=args.reinstall, with_dev=True)
+            _ensure(cpu_only, preset=preset, weight_names=picks, skip_weights=skip, reinstall=args.reinstall, with_dev=with_dev_flag)
             _create_launchers()
             _write_sentinel()
             _print_help(cpu_only)
@@ -816,7 +822,7 @@ def main(argv: list[str]) -> int:
             _print("Setup skipped. You can run later with:  python bootstrap.py --ensure")
         return 0
 
-    _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall, with_dev=True)
+    _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall, with_dev=with_dev_flag)
     return 0
 
 if __name__ == "__main__":

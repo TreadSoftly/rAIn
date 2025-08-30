@@ -8,7 +8,9 @@ ultralytics>=8.3,<8.6
 onnxruntime==1.19.2 ; python_version < '3.10'
 onnxruntime>=1.22,<1.23 ; python_version >= '3.10' and platform_system == 'Windows'
 onnxruntime>=1.22,<1.24 ; python_version >= '3.10' and platform_system != 'Windows'
-onnx>=1.12,<1.18
+
+# ONNX: bump to support modern Ultralytics exporters (opset ≥ 21 capable wheels)
+onnx>=1.18,<1.19
 
 # OpenCV: GUI-capable wheels on ALL platforms (no headless)
 opencv-python>=4.11,<4.12
@@ -19,7 +21,8 @@ pillow>=10.0,<12.0
 pillow-avif-plugin>=1.4
 
 # Viz / numerics
-matplotlib>=3.9
+matplotlib>=3.9,<3.10  ; python_version < '3.10'
+matplotlib>=3.10       ; python_version >= '3.10'
 scipy>=1.11,<1.15
 pandas>=2.2
 
