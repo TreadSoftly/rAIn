@@ -16,7 +16,10 @@ except Exception:
 import fnmatch
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import textwrap
 import urllib.parse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
@@ -100,11 +103,11 @@ _DEFAULT_MODEL = "primary"
 _IMAGE_EXTS = {
     ".jpg", ".jpeg", ".png", ".avif", ".bmp", ".tif", ".tiff", ".gif", ".webp", ".heic", ".heif"
 }
-_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
+_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 _MEDIA_EXTS = _IMAGE_EXTS | _VIDEO_EXTS
 _PREF_EXT_ORDER = (
     ".avif", ".jpg", ".jpeg", ".png",
-    ".mp4", ".mov", ".avi", ".mkv",
+    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v",
     ".webp", ".bmp", ".tif", ".tiff", ".gif", ".heic", ".heif",
 )
 
@@ -119,6 +122,136 @@ _SEARCH_DIRS: list[Path] = [
 ]
 _NOISE = {"argos", "run", "me"}
 _GLOB_CHARS = set("*?[]")
+
+# ────────────────────────────────────────────────────────────
+#  media plugin registration + fallback transcode
+# ────────────────────────────────────────────────────────────
+def _media_debug_enabled(verbose_flag: bool) -> bool:
+    # Explicit verbose always enables logging; env var can also force it
+    if verbose_flag:
+        return True
+    v = os.environ.get("ARGOS_MEDIA_DEBUG", "").strip().lower()
+    return v not in ("", "0", "false", "no", "off")
+
+def _log_media(msg: str, *, verbose_flag: bool) -> None:
+    if _media_debug_enabled(verbose_flag):
+        try:
+            typer.secho(f"[media] {msg}", err=True)
+        except Exception:
+            pass
+
+def _register_media_plugins(*, verbose_flag: bool) -> None:
+    """
+    Best-effort registration of Pillow plugins for modern formats:
+      - AVIF  via pillow-avif-plugin (import side-effect)
+      - HEIC/HEIF via pillow-heif (register_heif_opener)
+    """
+    try:
+        import pillow_avif as _pillow_avif  # type: ignore
+        _ = _pillow_avif  # keep referenced to silence linters
+        _log_media("AVIF plugin (pillow-avif-plugin) loaded", verbose_flag=verbose_flag)
+    except Exception as exc:
+        _log_media(f"AVIF plugin not available: {exc!s}", verbose_flag=verbose_flag)
+
+    try:
+        import pillow_heif as _pillow_heif  # type: ignore
+        try:
+            _pillow_heif.register_heif_opener()  # type: ignore[attr-defined]
+            _log_media("HEIF/HEIC opener registered (pillow-heif)", verbose_flag=verbose_flag)
+        except Exception as exc:
+            _log_media(f"pillow-heif present but register_heif_opener failed: {exc!s}", verbose_flag=verbose_flag)
+    except Exception as exc:
+        _log_media(f"HEIF/HEIC plugin not available: {exc!s}", verbose_flag=verbose_flag)
+
+def _find_ffmpeg_exe(*, verbose_flag: bool) -> Optional[str]:
+    """
+    Resolve an ffmpeg executable.
+    Order:
+      1) FFMPEG_BINARY env var
+      2) 'ffmpeg' on PATH
+      3) imageio-ffmpeg bundled binary
+    """
+    env = os.environ.get("FFMPEG_BINARY", "").strip()
+    if env:
+        _log_media(f"FFmpeg from FFMPEG_BINARY={env}", verbose_flag=verbose_flag)
+        return env
+
+    exe = shutil.which("ffmpeg")
+    if exe:
+        _log_media(f"FFmpeg found on PATH: {exe}", verbose_flag=verbose_flag)
+        return exe
+
+    try:
+        import imageio_ffmpeg  # type: ignore
+        raw = imageio_ffmpeg.get_ffmpeg_exe()  # type: ignore[attr-defined]
+        exe2: Optional[str]
+        exe2 = raw if isinstance(raw, str) else None
+        if exe2 and Path(exe2).exists():
+            _log_media(f"FFmpeg via imageio-ffmpeg: {exe2}", verbose_flag=verbose_flag)
+            return exe2
+    except Exception as exc:
+        _log_media(f"imageio-ffmpeg not usable: {exc!s}", verbose_flag=verbose_flag)
+
+    _log_media("FFmpeg not found", verbose_flag=verbose_flag)
+    return None
+
+def _pil_can_open(path: Path) -> bool:
+    try:
+        from PIL import Image as _PILImage  # type: ignore
+        # Simplify: treat image object as Any to avoid partially unknown 'load' return type warnings.
+        with _PILImage.open(path) as img:  # type: ignore[attr-defined]
+            img.load()  # type: ignore[no-untyped-call]
+        return True
+    except Exception:
+        return False
+
+def _maybe_transcode_to_png_if_unreadable(src: str, *, verbose_flag: bool) -> str:
+    """
+    If *src* is .avif/.heic/.heif and Pillow can't open it, try to transcode
+    to a temporary PNG using ffmpeg. Return the path to use (original or converted).
+    """
+    try:
+        p = Path(src)
+        if not p.exists() or not p.is_file():
+            return src
+        ext = p.suffix.lower()
+        if ext not in {".avif", ".heic", ".heif"}:
+            return src
+
+        # If Pillow already opens it, keep original
+        if _pil_can_open(p):
+            _log_media(f"{p.name}: Pillow can decode; no transcode", verbose_flag=verbose_flag)
+            return src
+
+        ff = _find_ffmpeg_exe(verbose_flag=verbose_flag)
+        if not ff:
+            _log_media(f"{p.name}: not decodable; FFmpeg unavailable → proceed with original (may fail)", verbose_flag=verbose_flag)
+            return src
+
+        cache_dir = Path(tempfile.gettempdir()) / "argos_media_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        out_path = cache_dir / f"{p.stem}.png"
+
+        cmd = [ff, "-y", "-loglevel", "error", "-i", str(p), "-frames:v", "1", str(out_path)]
+        _log_media(f"Transcoding {p.name} → {out_path.name} via FFmpeg", verbose_flag=verbose_flag)
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as cpe:
+            _log_media(f"FFmpeg transcode failed: {cpe!s}", verbose_flag=verbose_flag)
+            return src
+
+        if out_path.exists() and out_path.stat().st_size > 0:
+            # Verify Pillow can open the result
+            if _pil_can_open(out_path):
+                _log_media(f"Transcode OK: using {out_path}", verbose_flag=verbose_flag)
+                return str(out_path)
+            _log_media(f"Transcode produced unreadable file: {out_path}", verbose_flag=verbose_flag)
+
+        # Fallthrough: use original
+        return src
+    except Exception as exc:
+        _log_media(f"Transcode fallback error: {exc!s}", verbose_flag=verbose_flag)
+        return src
 
 # ────────────────────────────────────────────────────────────
 #  rich manual / examples / tutorial text
@@ -644,7 +777,7 @@ _SpinnerFactory = Callable[..., SpinnerLike]
 # Hard-require our Halo/Rich spinner from the local progress package.
 # No console/text fallback exists anymore.
 try:
-    from .progress import percent_spinner as _percent_spinner  # type: ignore[reportMissingTypeStubs]
+    from .progress import percent_spinner as _percent_spinner
     _spinner_factory: Optional[_SpinnerFactory] = cast(_SpinnerFactory, _percent_spinner)
 except Exception:
     _spinner_factory = None  # type: ignore[assignment]
@@ -847,9 +980,9 @@ def _snapshot_results(bases: Optional[list[Path]] = None) -> set[Path]:
                 out.add(p.resolve())
     return out
 
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 #  command
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
 @app.command()
 def target(  # noqa: C901
     inputs: List[str] = typer.Argument(..., metavar="INPUT [d|hm|gj|cls|pose|obb|FLAGS|help|man]"),
@@ -995,6 +1128,9 @@ def target(  # noqa: C901
         typer.secho("[bold red]  no usable inputs found", err=True)
         raise typer.Exit(2)
 
+    # Register media plugins early (so downstream loaders see them)
+    _register_media_plugins(verbose_flag=not quiet)
+
     # Dry run: explain what would happen and exit
     if dry_run:
         typer.secho(
@@ -1003,7 +1139,7 @@ def target(  # noqa: C901
         )
         to_show = norm_inputs if len(norm_inputs) <= 20 or small else norm_inputs[:20] + ["..."]
         for item in to_show:
-            if item.endswith(tuple(_VIDEO_EXTS)):
+            if item.lower().endswith(tuple(_VIDEO_EXTS)):
                 typer.echo(f"  video:   {item}")
             elif _is_url(item):
                 typer.echo(f"  url:     {item}")
@@ -1150,6 +1286,17 @@ def target(  # noqa: C901
                     typer.secho(f"[bold red] URL inputs currently unsupported for task {task_final}; download the file first.", err=True)
                     raise typer.Exit(2)
 
+                # If local file is AVIF/HEIC/HEIF and unreadable, transcode via FFmpeg to PNG in temp
+                item_to_run = item
+                if not _is_url(item):
+                    try:
+                        src_path = Path(item)
+                        if src_path.suffix.lower() in {".avif", ".heic", ".heif"}:
+                            item_to_run = _maybe_transcode_to_png_if_unreadable(item, verbose_flag=not quiet)
+                    except Exception:
+                        # Best-effort only; fall back to original on any error
+                        item_to_run = item
+
                 # Choose (or show) model and put fields on the line up-front
                 if task_final == "detect":
                     w = Path(det_override) if det_override is not None else _pick_weight("detect", small=small)
@@ -1193,7 +1340,7 @@ def target(  # noqa: C901
                     result = None
                     if task_final in {"detect", "heatmap", "geojson"}:
                         result = _run_single(
-                            item,
+                            item_to_run,
                             model=model,
                             task=cast(Literal["detect", "heatmap", "geojson"], task_final),
                             progress=sp,   # child ‘current’ updates become JOB via the proxy
@@ -1204,19 +1351,19 @@ def target(  # noqa: C901
                         # Strict model via registry (preloaded) with explicit out_dir
                         from . import classify as _cls_mod  # type: ignore
                         result = _cls_mod.run_image(
-                            item, out_dir=(out_dir or _RESULTS_DIR),
+                            item_to_run, out_dir=(out_dir or _RESULTS_DIR),
                             model=model_cls, progress=_JobAwareProxy(sp), **cls_kwargs
                         )
                     elif task_final == "pose":
                         from . import pose as _pose_mod  # type: ignore
                         result = _pose_mod.run_image(
-                            item, out_dir=(out_dir or _RESULTS_DIR),
+                            item_to_run, out_dir=(out_dir or _RESULTS_DIR),
                             model=model_pose, progress=_JobAwareProxy(sp), **pose_kwargs
                         )
                     elif task_final == "obb":
                         from . import obb as _obb_mod  # type: ignore
                         result = _obb_mod.run_image(
-                            item, out_dir=(out_dir or _RESULTS_DIR),
+                            item_to_run, out_dir=(out_dir or _RESULTS_DIR),
                             model=model_obb, progress=_JobAwareProxy(sp), **obb_kwargs
                         )
 

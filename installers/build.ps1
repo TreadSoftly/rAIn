@@ -1,28 +1,34 @@
+# installers\build.ps1
+# Interactive model pack selector + fetch/export — KEEP bootstrap spinner visible.
+# Pip noise fixed via env + temp pip.ini; avoid NativeCommandError without hiding output.
+
 [CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$BuildArgs)
+
 $ErrorActionPreference = 'Stop'
 
-# --- Progress-friendly environment ---
+# --- Progress-friendly environment (match original UX) ---
 if (-not $env:TERM) { $env:TERM = 'xterm-256color' }
-$env:PYTHONUTF8 = '1'
-$env:PYTHONUNBUFFERED = '1'
-$env:FORCE_COLOR = '1'
+$env:PYTHONUTF8               = '1'
+$env:PYTHONUNBUFFERED         = '1'
+$env:FORCE_COLOR              = '1'
 $env:PANOPTES_NESTED_PROGRESS = '1'
+Remove-Item Env:PANOPTES_PROGRESS_ACTIVE -ErrorAction SilentlyContinue  # ensure spinner can open
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
 
-# Force the CLI to use a single-line progress on a proper TTY stream
-$env:ARGOS_PROGRESS_STREAM = 'stdout'
+# Single-line spinner on a proper TTY stream (same as original)
+$env:ARGOS_PROGRESS_STREAM      = 'stdout'
 $env:ARGOS_FORCE_PLAIN_PROGRESS = '1'
 
-# During bootstrap, skip weights (the selector will handle them)
+# During bootstrap, skip weights (selector handles them)
 $env:ARGOS_SKIP_WEIGHTS = '1'
 Remove-Item Env:ARGOS_ASSUME_YES -ErrorAction SilentlyContinue
 
-# ---- Keep progress to ONE line: silence pip's noisy progress/log output ----
+# ---- Keep pip quiet so its own progress doesn't fight our spinner ----
 $env:PIP_PROGRESS_BAR = 'off'
-$env:PIP_NO_COLOR = '1'
+$env:PIP_NO_COLOR     = '1'
 
-# Create a minimal, ephemeral pip config that enforces single-line friendliness
+# Minimal, ephemeral pip config enforcing single-line friendliness
 try {
   $pipCfg = Join-Path $env:TEMP 'pip-singleline.ini'
   @"
@@ -33,11 +39,11 @@ disable-pip-version-check = true
 no-color = true
 "@ | Set-Content -LiteralPath $pipCfg -Encoding ASCII
   $env:PIP_CONFIG_FILE = $pipCfg
-}
-catch {
+} catch {
   Write-Host "Warning: could not create pip single-line config. Continuing with env-based settings."
 }
 
+# ANSI + UTF-8 out
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 
@@ -57,11 +63,9 @@ function Install-VcRedistIfMissing {
     $vcRedistArgs = '/quiet', '/norestart'
     $p = Start-Process -FilePath $tmp -ArgumentList $vcRedistArgs -PassThru -Wait
     if ($p.ExitCode -ne 0) { throw "vc_redist failed with code $($p.ExitCode)" }
-  }
-  catch {
+  } catch {
     throw "Could not install VC++ Redistributable automatically: $($_.Exception.Message)"
-  }
-  finally {
+  } finally {
     Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue | Out-Null
   }
 }
@@ -81,17 +85,16 @@ $OsIsLinux = $false
 if (-not $OsIsWindows) {
   try {
     $OsIsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
-    $OsIsLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
-    $OsIsMac = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)
-  }
-  catch {
+    $OsIsLinux   = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
+    $OsIsMac     = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)
+  } catch {
     $OsIsLinux = ($env:OSTYPE -like '*linux*')
-    $OsIsMac = ($env:OSTYPE -like '*darwin*')
+    $OsIsMac   = ($env:OSTYPE -like '*darwin*')
   }
 }
 
 # --- Python ensure (auto-install if needed) ---
-$script:pyExe = $null
+$script:pyExe  = $null
 $script:pyArgs = @()
 
 function Find-Python {
@@ -116,8 +119,7 @@ function Test-IsAdmin {
     $wi = [Security.Principal.WindowsIdentity]::GetCurrent()
     $wp = New-Object Security.Principal.WindowsPrincipal($wi)
     return $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-  }
-  catch { return $false }
+  } catch { return $false }
 }
 function Install-Python {
   Write-Host "Python 3.9 - 3.12 not found or unsupported. Attempting to install Python..."
@@ -126,8 +128,7 @@ function Install-Python {
     if ($winget) {
       & winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
       if ($LASTEXITCODE -ne 0) { & winget install --id Python.Python.3.11 -e --accept-package-agreements --accept-source-agreements }
-    }
-    else {
+    } else {
       $arch = if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { 'win32' }
       $ver = '3.12.10'
       $url = "https://www.python.org/ftp/python/$ver/python-$ver-$arch.exe"
@@ -149,8 +150,7 @@ function Install-Python {
       if ($LASTEXITCODE -ne 0) { & brew install python@3.11 }
       if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9 - 3.12 required but not found after Homebrew install." }
       return
-    }
-    else { throw "Homebrew not found. Please install Homebrew or Python 3.9 - 3.12 and re-run." }
+    } else { throw "Homebrew not found. Please install Homebrew or Python 3.9 - 3.12 and re-run." }
   }
   if ($OsIsLinux) {
     if (Get-Command apt-get -ErrorAction SilentlyContinue) { & apt-get update; & apt-get install -y python3 }
@@ -162,10 +162,6 @@ function Install-Python {
   }
   throw "Unsupported OS. Please install Python 3.9 - 3.12 and re-run."
 }
-if (-not (Find-Python) -or -not (Test-PythonOk)) { Install-Python }
-
-# Ensure VC++ runtime before anything may trigger local ONNX export (Windows only)
-Install-VcRedistIfMissing
 
 # --- Git LFS best-effort (non-fatal) ---
 if (Get-Command git -ErrorAction SilentlyContinue) {
@@ -174,25 +170,44 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     & git -C $ROOT lfs install --local > $null 2>&1
     $env:GIT_LFS_SKIP_SMUDGE = '0'
     & git -C $ROOT lfs pull > $null 2>&1
-  }
-  else {
+  } else {
     Write-Host "Warning: Git LFS not installed. Large files (models) may be missing."
   }
 }
 
-# --- Bootstrap venv (ensure) ---
+# --- Bootstrap venv (ensure) — SHOW PROGRESS, don't escalate stderr to Stop ---
 $scriptPath = Join-Path $ROOT 'projects\argos\bootstrap.py'
-& $script:pyExe @script:pyArgs $scriptPath --ensure --yes
-if ($LASTEXITCODE -ne 0) { throw "bootstrap failed ($LASTEXITCODE)" }
+$prev = $ErrorActionPreference
+try {
+  $ErrorActionPreference = 'Continue'   # allow pip stderr/warnings without terminating
+  & $script:pyExe @script:pyArgs $scriptPath --ensure --yes
+  $rc = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $prev
+}
+if ($rc -ne 0) { throw "bootstrap failed ($rc)" }
 
 # --- Resolve venv Python ---
-$vpy = & $script:pyExe @script:pyArgs "$scriptPath" --print-venv
+$prev = $ErrorActionPreference
+try {
+  $ErrorActionPreference = 'Continue'
+  $vpy = & $script:pyExe @script:pyArgs "$scriptPath" --print-venv 2>$null
+} finally {
+  $ErrorActionPreference = $prev
+}
 if (-not $vpy) { throw "could not resolve venv python" }
+
 $env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
 
 # Make sure we don't accidentally keep the bootstrap 'skip' flag for the selector
 Remove-Item Env:ARGOS_SKIP_WEIGHTS -ErrorAction SilentlyContinue
 
-# --- Launch the *model selector* (user picks pack, fetches, exports, THEN smoke check prompts once) ---
-& $vpy -m panoptes.model._fetch_models @BuildArgs
-if ($LASTEXITCODE -ne 0) { throw "model selector failed ($LASTEXITCODE)" }
+# --- Launch the model selector (interactive; keep spinner/prompts visible) ---
+$prev = $ErrorActionPreference
+try {
+  $ErrorActionPreference = 'Continue'   # allow warnings to stderr without terminating
+  & $vpy -m panoptes.model._fetch_models @BuildArgs
+  if ($LASTEXITCODE -ne 0) { throw "model selector failed ($LASTEXITCODE)" }
+} finally {
+  $ErrorActionPreference = $prev
+}
