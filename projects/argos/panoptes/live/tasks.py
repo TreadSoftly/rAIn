@@ -737,7 +737,9 @@ class _SimpleOBB(TaskAdapter):
                 continue
             rect = cv2.minAreaRect(c)
             box = cv2.boxPoints(rect)
-            pts = [(int(x), int(y)) for (x, y) in box]
+            # Cast to a sequence of 2-item sequences for static type checkers
+            box_pts: Sequence[Sequence[float]] = cast(Sequence[Sequence[float]], box)
+            pts = [(int(x), int(y)) for x, y in box_pts]
             conf = min(0.99, 0.6 + (cv2.contourArea(c) / (W * H)))
             out.append((pts, conf, None))
         return out

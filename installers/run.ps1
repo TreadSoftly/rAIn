@@ -17,30 +17,30 @@ $ErrorActionPreference = "Stop"
 
 # ---------- Progress-friendly environment for CLI runs ----------
 if (-not $env:TERM) { $env:TERM = 'xterm-256color' }
-$env:PYTHONUTF8              = '1'
-$env:PYTHONUNBUFFERED        = '1'
-$env:FORCE_COLOR             = '1'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONUNBUFFERED = '1'
+$env:FORCE_COLOR = '1'
 $env:PANOPTES_NESTED_PROGRESS = '1'
 $env:PANOPTES_PROGRESS_ACTIVE = '0'
 
 # Argos/Panoptes single-line progress (keep Python spinners tidy)
-$env:ARGOS_PROGRESS_STREAM         = 'stdout'
-$env:ARGOS_FORCE_PLAIN_PROGRESS    = '1'
-$env:ARGOS_PROGRESS_TAIL           = 'erase'
-$env:ARGOS_PROGRESS_FINAL_NEWLINE  = '0'
+$env:ARGOS_PROGRESS_STREAM = 'stdout'
+$env:ARGOS_FORCE_PLAIN_PROGRESS = '1'
+$env:ARGOS_PROGRESS_TAIL = 'erase'
+$env:ARGOS_PROGRESS_FINAL_NEWLINE = '0'
 
 # ---- Prefer DSHOW on Windows; keep MSMF disabled (works best on Win 10/11) ----
 if ($env:OS -eq 'Windows_NT') {
   if (-not $env:OPENCV_VIDEOIO_PRIORITY_DSHOW) { $env:OPENCV_VIDEOIO_PRIORITY_DSHOW = '1000' }
-  if (-not $env:OPENCV_VIDEOIO_PRIORITY_MSMF)  { $env:OPENCV_VIDEOIO_PRIORITY_MSMF  = '0' }
+  if (-not $env:OPENCV_VIDEOIO_PRIORITY_MSMF) { $env:OPENCV_VIDEOIO_PRIORITY_MSMF = '0' }
 }
 
 # Silence pip (prevents progress lines being interleaved)
 $env:PIP_PROGRESS_BAR = 'off'
-$env:PIP_NO_COLOR     = '1'
+$env:PIP_NO_COLOR = '1'
 try {
   $pipCfg = Join-Path $env:TEMP 'pip-singleline.ini'
-@"
+  @"
 [global]
 progress-bar = off
 quiet = 1
@@ -48,7 +48,8 @@ disable-pip-version-check = true
 no-color = true
 "@ | Set-Content -LiteralPath $pipCfg -Encoding ASCII
   $env:PIP_CONFIG_FILE = $pipCfg
-} catch { }
+}
+catch { }
 
 # ANSI + UTF-8 out, where available
 try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
@@ -57,12 +58,13 @@ try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 function Install-VcRedistIfMissing {
   if ($env:OS -ne 'Windows_NT') { return }
   try {
-    $sys  = Join-Path $env:WINDIR 'System32'
+    $sys = Join-Path $env:WINDIR 'System32'
     $has1 = Test-Path -LiteralPath (Join-Path $sys 'vcruntime140.dll')
     $has2 = Test-Path -LiteralPath (Join-Path $sys 'vcruntime140_1.dll')
     $has3 = Test-Path -LiteralPath (Join-Path $sys 'msvcp140.dll')
     if ($has1 -and $has2 -and $has3) { return }
-  } catch { }
+  }
+  catch { }
   Write-Host "Installing Microsoft Visual C++ Redistributable (x64)..." -ForegroundColor Yellow
   $tmp = Join-Path $env:TEMP 'vc_redist.x64.exe'
   try {
@@ -70,9 +72,11 @@ function Install-VcRedistIfMissing {
     $installerArgs = '/quiet', '/norestart'
     $p = Start-Process -FilePath $tmp -ArgumentList $installerArgs -PassThru -Wait
     if ($p.ExitCode -ne 0) { throw "vc_redist failed with code $($p.ExitCode)" }
-  } catch {
+  }
+  catch {
     throw "Could not install VC++ Redistributable automatically: $($_.Exception.Message)"
-  } finally {
+  }
+  finally {
     Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue | Out-Null
   }
 }
@@ -92,7 +96,8 @@ function Enable-GitLfs {
       & git -C $ROOT lfs install --local > $null 2>&1
       $env:GIT_LFS_SKIP_SMUDGE = '0'
       & git -C $ROOT lfs pull > $null 2>&1
-    } else {
+    }
+    else {
       Write-Host "⚠️  Git LFS not installed. Large files (models) may be missing."
       Write-Host "   Install Git LFS and re-run this command."
     }
@@ -101,16 +106,18 @@ function Enable-GitLfs {
 
 # ---- Utility: run a native command quietly, don't escalate stderr to errors; return exit code ----
 function Invoke-NativeQuiet {
+  [CmdletBinding()]
   param(
     [Parameter(Mandatory)][string]$Exe,
-    [Parameter()][string[]]$Args = @()
+    [Parameter()][string[]]$CommandArgs = @()
   )
   $prev = $ErrorActionPreference
   try {
     $ErrorActionPreference = 'Continue' # avoid turning stderr into terminating error
-    & $Exe @Args > $null 2>&1
+    & $Exe @CommandArgs > $null 2>&1
     return $LASTEXITCODE
-  } finally {
+  }
+  finally {
     $ErrorActionPreference = $prev
   }
 }
@@ -122,38 +129,39 @@ function Install-OpenCvPackage {
     [Parameter(Mandatory)][string]$Vpy,
     [Parameter(Mandatory)][bool]$NeedsGui  # retained for backward compat; ignored
   )
-  $want  = 'opencv-python'
+  $want = 'opencv-python'
   $avoid = @('opencv-python-headless', 'opencv-contrib-python-headless')
 
+  # Remove any headless variants if present (do not fail if missing)
   foreach ($pkg in $avoid) {
-    & $Vpy -m pip show $pkg *>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-      # Uninstall headless variants quietly; ignore pip "Skipping ... not installed" chatter
-      Invoke-NativeQuiet -Exe $Vpy -Args @('-m','pip','uninstall','-y',$pkg) | Out-Null
+    $rcShow = Invoke-NativeQuiet -Exe $Vpy -CommandArgs @('-m', 'pip', 'show', $pkg)
+    if ($rcShow -eq 0) {
+      Invoke-NativeQuiet -Exe $Vpy -CommandArgs @('-m', 'pip', 'uninstall', '-y', $pkg) | Out-Null
     }
   }
 
-  & $Vpy -m pip show $want *>&1 | Out-Null
-  if ($LASTEXITCODE -ne 0) {
-    $rc = Invoke-NativeQuiet -Exe $Vpy -Args @('-m','pip','install','--no-input','--quiet',$want)
-    if ($rc -ne 0) { throw "Failed to install $want (exit $rc)" }
+  # Ensure GUI build is present
+  $rcWant = Invoke-NativeQuiet -Exe $Vpy -CommandArgs @('-m', 'pip', 'show', $want)
+  if ($rcWant -ne 0) {
+    $rcInstall = Invoke-NativeQuiet -Exe $Vpy -CommandArgs @('-m', 'pip', 'install', '--no-input', '--quiet', $want)
+    if ($rcInstall -ne 0) { throw "Failed to install $want (exit $rcInstall)" }
   }
 }
 
 # ---------- Parse args ----------
-$proj     = $null
-$tokens   = New-Object System.Collections.Generic.List[string]
+$proj = $null
+$tokens = New-Object System.Collections.Generic.List[string]
 $sawBuild = $false
 $liveMode = $false
-$foundL   = $false
-$foundV   = $false
+$foundL = $false
+$foundV = $false
 
 foreach ($a in ($ArgList | ForEach-Object { $_ })) {
   $la = $a.ToLowerInvariant()
-  if     ($la -in @('run','me'))                                      { continue }
-  elseif ($la -in @('build','package','pack'))                        { $sawBuild = $true }
-  elseif ($la -in @('argos','argos:run','run:argos','argos:build','build:argos')) { $proj = 'argos' }
-  elseif ($la -in @('lv','livevideo','live','video','ldv','lvd'))     { $liveMode = $true }
+  if ($la -in @('run', 'me')) { continue }
+  elseif ($la -in @('build', 'package', 'pack')) { $sawBuild = $true }
+  elseif ($la -in @('argos', 'argos:run', 'run:argos', 'argos:build', 'build:argos')) { $proj = 'argos' }
+  elseif ($la -in @('lv', 'livevideo', 'live', 'video', 'ldv', 'lvd')) { $liveMode = $true }
   else {
     if ($la -eq 'l') { $foundL = $true }
     if ($la -eq 'v') { $foundV = $true }
@@ -188,16 +196,16 @@ if ($tokens.Count -gt 0) {
 
 # ---- Optional: normalize op position (INPUT op -> op INPUT) to match *nix shims ----
 $opIndex = -1
-$normOp  = $null
+$normOp = $null
 for ($i = 0; $i -lt $tokens.Count; $i++) {
   $tok = $tokens[$i].ToLowerInvariant()
   switch ($tok) {
-    { $_ -in @('d','detect','-d','--detect') }           { $normOp='d';  $opIndex=$i; break }
-    { $_ -in @('hm','heatmap','-hm','--hm','-heatmap','--heatmap') } { $normOp='hm'; $opIndex=$i; break }
-    { $_ -in @('gj','geojson','-gj','--gj','-geojson','--geojson') } { $normOp='gj'; $opIndex=$i; break }
-    { $_ -in @('classify','clf') }                        { $normOp='classify'; $opIndex=$i; break }
-    { $_ -in @('pose','pse') }                            { $normOp='pose'; $opIndex=$i; break }
-    { $_ -in @('obb','object') }                          { $normOp='obb'; $opIndex=$i; break }
+    { $_ -in @('d', 'detect', '-d', '--detect') } { $normOp = 'd'; $opIndex = $i; break }
+    { $_ -in @('hm', 'heatmap', '-hm', '--hm', '-heatmap', '--heatmap') } { $normOp = 'hm'; $opIndex = $i; break }
+    { $_ -in @('gj', 'geojson', '-gj', '--gj', '-geojson', '--geojson') } { $normOp = 'gj'; $opIndex = $i; break }
+    { $_ -in @('classify', 'clf') } { $normOp = 'classify'; $opIndex = $i; break }
+    { $_ -in @('pose', 'pse') } { $normOp = 'pose'; $opIndex = $i; break }
+    { $_ -in @('obb', 'object') } { $normOp = 'obb'; $opIndex = $i; break }
   }
 }
 if ($opIndex -gt 0) {
@@ -226,7 +234,7 @@ if ($sawBuild) {
 }
 
 # ---------- Python / venv ----------
-$pyExe  = $null
+$pyExe = $null
 $pyArgs = @()
 $cmd = Get-Command py -ErrorAction SilentlyContinue
 if ($cmd) { $pyExe = $cmd.Source; $pyArgs = @('-3') }
@@ -237,7 +245,7 @@ if (-not $pyExe) { throw "Python 3 not found." }
 $bootstrap = Join-Path $ROOT 'projects\argos\bootstrap.py'
 
 # --- FIX: run ensure quietly; do NOT escalate stderr into a terminating error ---
-$rcEnsure = Invoke-NativeQuiet -Exe $pyExe -Args (@($pyArgs) + @("$bootstrap","--ensure","--yes"))
+$rcEnsure = Invoke-NativeQuiet -Exe $pyExe -CommandArgs (@($pyArgs) + @("$bootstrap", "--ensure", "--yes"))
 if ($rcEnsure -ne 0) { throw "bootstrap --ensure failed (exit $rcEnsure)" }
 
 # Resolve venv python (print-venv shouldn't be noisy; still silence stderr)
@@ -245,7 +253,8 @@ $prev = $ErrorActionPreference
 try {
   $ErrorActionPreference = 'Continue'
   $vpy = & $pyExe @pyArgs "$bootstrap" --print-venv 2>$null
-} finally {
+}
+finally {
   $ErrorActionPreference = $prev
 }
 if (-not $vpy) { throw "could not resolve venv python" }
@@ -260,10 +269,10 @@ Install-OpenCvPackage -Vpy $vpy -NeedsGui:$true
 # ---------- Select module and live-mode env ----------
 $pyMod = if ($liveMode) { 'panoptes.live.cli' } else { 'panoptes.cli' }
 if ($liveMode) {
-  $env:PANOPTES_LIVE                  = '1'
-  $env:PANOPTES_PROGRESS_TAIL         = 'none'
+  $env:PANOPTES_LIVE = '1'
+  $env:PANOPTES_PROGRESS_TAIL = 'none'
   $env:PANOPTES_PROGRESS_FINAL_NEWLINE = '0'
-  $env:PANOPTES_NESTED_PROGRESS       = '0'
+  $env:PANOPTES_NESTED_PROGRESS = '0'
 }
 
 # ---------- Launch (allow stderr without turning into terminating errors) ----------
@@ -272,6 +281,7 @@ try {
   $ErrorActionPreference = 'Continue'
   & $vpy -m $pyMod @([string[]]$tokens)
   exit $LASTEXITCODE
-} finally {
+}
+finally {
   $ErrorActionPreference = $prev
 }
