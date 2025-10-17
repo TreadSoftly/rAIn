@@ -31,7 +31,8 @@ dependencies = [
   "opencv-python>=4.11,<4.12",
 
   # NumPy: raise floor so Torch/Tv CPU wheels resolve across Py 3.10–3.12
-  "numpy!=2.0.*,>=2.1,<2.3",
+  "numpy!=2.0.*,>=2.1,<2.3; python_version >= \"3.10\"",
+  "numpy>=1.26,<2.0; python_version < \"3.10\"",
 
   # Pillow core plus modern format plugins
   "pillow>=10.0,<12.0",

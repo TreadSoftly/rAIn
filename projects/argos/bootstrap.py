@@ -228,11 +228,18 @@ def _torch_pins_from_requirements() -> Tuple[str, str]:
 
 def _ensure_numpy_floor_for_torch() -> None:
     """
-    Torch/Tv CPU wheels for recent Python require NumPy >=2.1.
-    Pre-install/upgrade NumPy to that floor so pip's resolver doesn't deadlock.
+    Torch/Tv CPU wheels for recent Python require NumPy >=2.1 (Py>=3.10).
+    When running under Python 3.9 we stick to the 1.26.x ladder, which is the
+    newest NumPy available for that interpreter while still satisfying Torch/Tv.
     """
-    _print("→ ensuring NumPy >=2.1,<2.3 for Torch/Tv …")
-    _run([str(VPY), "-m", "pip", "install", "--upgrade", *_constraints_args(), "numpy>=2.1,<2.3"], check=True, capture=False)
+    if sys.version_info >= (3, 10):
+        spec = "numpy>=2.1,<2.3"
+        note = "NumPy >=2.1,<2.3"
+    else:
+        spec = "numpy>=1.26,<2.0"
+        note = "NumPy >=1.26,<2.0"
+    _print(f" ensuring {note} for Torch/Tv .")
+    _run([str(VPY), "-m", "pip", "install", "--upgrade", *_constraints_args(), spec], check=True, capture=False)
 
 def _install_torch_if_needed(cpu_only: bool) -> None:
     """

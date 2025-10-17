@@ -1,8 +1,9 @@
 # Anchor critical wheels to combinations that resolve across Python 3.10–3.12
 opencv-python==4.11.0.86
 
-# NumPy: allow NP2 across Pythons (Torch/Tv CPU wheels require >=2.1)
-numpy>=2.1,<2.3
+# NumPy: prefer NP2 on Py>=3.10, fall back to 1.26.x ladder on Py3.9
+numpy>=2.1,<2.3; python_version >= "3.10"
+numpy>=1.26,<2.0; python_version < "3.10"
 
 # Sympy/Scipy pins to satisfy Torch and ONNX tools landscapes
 sympy==1.13.1

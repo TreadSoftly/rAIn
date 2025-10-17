@@ -15,8 +15,9 @@ onnx>=1.18,<1.19
 # OpenCV: GUI-capable wheels on ALL platforms (no headless)
 opencv-python>=4.11,<4.12
 
-# NumPy — raise floor for Torch/Tv CPU wheels
-numpy!=2.0.*,>=2.1,<2.3
+# NumPy - raise floor for Torch/Tv CPU wheels (Py>=3.10) while preserving Py3.9
+numpy!=2.0.*,>=2.1,<2.3; python_version >= "3.10"
+numpy>=1.26,<2.0; python_version < "3.10"
 
 # Imaging: Pillow core + modern format plugins
 pillow>=10.0,<12.0
