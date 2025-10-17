@@ -34,7 +34,7 @@ Key change (2025-08-18):
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict
+from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict, Callable
 from pathlib import Path
 import math
 import time
@@ -90,18 +90,19 @@ except Exception:  # pragma: no cover
     u8 = cast(Any, "uint8")
 
 from ._types import NDArrayU8, Boxes, Names
-
+from panoptes.runtime.resilient_yolo import ResilientYOLO
 # ─────────────────────────────────────────────────────────────────────
 # Central model registry (single source of truth) — guarded import
 # ─────────────────────────────────────────────────────────────────────
 try:
     from panoptes.model_registry import (  # type: ignore[reportMissingTypeStubs]
-        load_detector,    # type: ignore[no-redef]
-        load_segmenter,   # type: ignore[no-redef]
-        load_classifier,  # type: ignore[no-redef]
-        load_pose,        # type: ignore[no-redef]
-        load_obb,         # type: ignore[no-redef]
-        pick_weight,      # type: ignore[no-redef]
+        load_detector,     # type: ignore[no-redef]
+        load_segmenter,    # type: ignore[no-redef]
+        load_classifier,   # type: ignore[no-redef]
+        load_pose,         # type: ignore[no-redef]
+        load_obb,          # type: ignore[no-redef]
+        candidate_weights, # type: ignore[no-redef]
+        pick_weight,       # type: ignore[no-redef]
     )
 except Exception:  # pragma: no cover
 
@@ -120,6 +121,9 @@ except Exception:  # pragma: no cover
     def load_obb(*_a: object, **_k: object) -> Any:  # type: ignore[no-redef]
         raise RuntimeError("panoptes.model_registry not available")
 
+    def candidate_weights(*_a: object, **_k: object) -> list[Path]:  # type: ignore[no-redef]
+        return []
+
     def pick_weight(*_a: object, **_k: object) -> Any:  # type: ignore[no-redef]
         return None
 
@@ -134,6 +138,22 @@ LIVE_PSE_OVERRIDE: Optional[Union[str, Path]]      = None
 LIVE_OBB_OVERRIDE: Optional[Union[str, Path]]      = None
 
 
+
+def _names_from_model(model: Any) -> Dict[int, str]:
+    names: Dict[int, str] = {}
+    if model is None:
+        return names
+    names_attr: Any = getattr(model, "names", {})
+    if isinstance(names_attr, dict):
+        for k, v in cast(Dict[Any, Any], names_attr).items():
+            try:
+                names[int(k)] = str(v)
+            except Exception:
+                continue
+    elif isinstance(names_attr, (list, tuple)):
+        for idx, val in enumerate(cast(Sequence[object], names_attr)):
+            names[idx] = str(val)
+    return names
 class TaskAdapter(Protocol):
     """Common protocol for live task adapters."""
     def infer(self, frame_bgr: NDArrayU8) -> Any: ...
@@ -252,22 +272,15 @@ class _LaplacianHeatmap(TaskAdapter):
 class _YOLODetect(TaskAdapter):
     """YOLO-based detector adapter for live mode (boxes)."""
 
-    def __init__(self, model: _Predictor, *, label: str, conf: float = 0.25, iou: float = 0.45) -> None:
+    def __init__(self, model: ResilientYOLO, *, conf: float = 0.25, iou: float = 0.45) -> None:
         self.model = model
         self.conf = float(conf)
         self.iou = float(iou)
-        self.label = label
-        self.names: Dict[int, str] = {}
-        names_attr: Any = getattr(model, "names", {})
-        if isinstance(names_attr, dict):
-            for k, v in cast(Dict[Any, Any], names_attr).items():
-                try:
-                    self.names[int(k)] = str(v)
-                except Exception:
-                    continue
-        elif isinstance(names_attr, (list, tuple)):
-            for i, n in enumerate(cast(Sequence[object], names_attr)):
-                self.names[i] = str(n)
+        self.names = _names_from_model(model.active_model())
+        self.label = model.descriptor()
+
+    def current_label(self) -> str:
+        return self.model.descriptor()
 
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[int, int, int, int, float, Optional[int]]]:
         np_ = cast(Any, np)
@@ -314,22 +327,14 @@ class _YOLOHeatmap(TaskAdapter):
     color each instance distinctly (and label it), matching offline heatmap behavior.
     """
 
-    def __init__(self, model: _Predictor, *, label: str, conf: float = 0.25) -> None:
+    def __init__(self, model: ResilientYOLO, *, conf: float = 0.25) -> None:
         self.model = model
         self.conf = float(conf)
-        self.label = label
-        # Prepare class-name lookup once
-        self.names: Dict[int, str] = {}
-        names_attr: Any = getattr(model, "names", {})
-        if isinstance(names_attr, dict):
-            for k, v in cast(Dict[Any, Any], names_attr).items():
-                try:
-                    self.names[int(k)] = str(v)
-                except Exception:
-                    continue
-        elif isinstance(names_attr, (list, tuple)):
-            for i, n in enumerate(cast(Sequence[object], names_attr)):
-                self.names[i] = str(n)
+        self.names = _names_from_model(model.active_model())
+        self.label = model.descriptor()
+
+    def current_label(self) -> str:
+        return self.model.descriptor()
 
     @staticmethod
     def _resize_nn(mask: NDArrayU8, new_hw: Tuple[int, int]) -> NDArrayU8:
@@ -407,23 +412,14 @@ class _YOLOHeatmap(TaskAdapter):
 # ---------------------------
 
 class _YOLOClassify(TaskAdapter):
-    def __init__(self, model: _Predictor, *, label: str, topk: int = 1) -> None:
+    def __init__(self, model: ResilientYOLO, *, topk: int = 1) -> None:
         self.model = model
-        self.label = label
+        self.label = model.descriptor()
         self.topk = max(1, int(topk))
+        self.names = _names_from_model(model.active_model())
 
-        # Prepare class names mapping (int -> label) if available
-        self.names: Dict[int, str] = {}
-        names_attr: Any = getattr(model, "names", {})
-        if isinstance(names_attr, dict):
-            for k, v in cast(Dict[Any, Any], names_attr).items():
-                try:
-                    self.names[int(k)] = str(v)
-                except Exception:
-                    continue
-        elif isinstance(names_attr, (list, tuple)):
-            for i, n in enumerate(cast(Sequence[object], names_attr)):
-                self.names[i] = str(n)
+    def current_label(self) -> str:
+        return self.model.descriptor()
 
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[str, float]]:
         np_ = cast(Any, np)
@@ -510,10 +506,14 @@ class _SimpleClassify(TaskAdapter):
 # ---------------------------
 
 class _YOLOPose(TaskAdapter):
-    def __init__(self, model: _Predictor, *, label: str, conf: float = 0.25) -> None:
+    def __init__(self, model: ResilientYOLO, *, conf: float = 0.25) -> None:
         self.model = model
-        self.label = label
         self.conf = float(conf)
+        self.label = model.descriptor()
+        self.names = _names_from_model(model.active_model())
+
+    def current_label(self) -> str:
+        return self.model.descriptor()
 
     def infer(self, frame_bgr: NDArrayU8) -> List[List[List[float]]]:
         np_ = cast(Any, np)
@@ -609,12 +609,12 @@ def build_pse(
     *,
     small: bool = True,
     override: Optional[Union[str, Path]] = LIVE_PSE_OVERRIDE,
+    hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     """
     PSE is an alias of POSE: same model family, same overlay.
     """
-    # Delegate directly to build_pose to guarantee identical behavior
-    return build_pose(small=small, conf=0.25, override=override)
+    return build_pose(small=small, conf=0.25, override=override, hud_callback=hud_callback)
 
 
 # ---------------------------
@@ -634,22 +634,15 @@ def _rotrect_to_pts(cx: float, cy: float, w: float, h: float, theta_deg: float) 
     return out
 
 class _YOLOOBB(TaskAdapter):
-    def __init__(self, model: _Predictor, *, label: str, conf: float = 0.25, iou: float = 0.45) -> None:
+    def __init__(self, model: ResilientYOLO, *, conf: float = 0.25, iou: float = 0.45) -> None:
         self.model = model
-        self.label = label
         self.conf = float(conf)
         self.iou = float(iou)
-        self.names: Dict[int, str] = {}
-        names_attr: Any = getattr(model, "names", {})
-        if isinstance(names_attr, dict):
-            for k, v in cast(Dict[Any, Any], names_attr).items():
-                try:
-                    self.names[int(k)] = str(v)
-                except Exception:
-                    continue
-        elif isinstance(names_attr, (list, tuple)):
-            for i, n in enumerate(cast(Sequence[object], names_attr)):
-                self.names[i] = str(n)
+        self.label = model.descriptor()
+        self.names = _names_from_model(model.active_model())
+
+    def current_label(self) -> str:
+        return self.model.descriptor()
 
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[List[Tuple[int, int]], float, Optional[int]]]:
         np_ = cast(Any, np)
@@ -768,21 +761,26 @@ def build_detect(
     conf: float = 0.25,
     iou: float = 0.45,
     override: Optional[Union[str, Path]] = LIVE_DETECT_OVERRIDE,
+    hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
-    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
-        label = _label_from_override_or_pick("detect", small, override)
+        candidates = candidate_weights("detect", small=small, override=override)
+        if not candidates:
+            raise RuntimeError("no-detect-weights")
+        label_hint = _label_from_override_or_pick("detect", small, override)
+        wrapper = ResilientYOLO(
+            candidates,
+            task="detect",
+            conf=conf,
+            on_switch=hud_callback,
+        )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label, current="detector")
-            # Secondary task spinner (will auto-disable if nested under percent spinner)
-            with _progress_running_task("Load", f"detector:{label}"):
-                raw_model = load_detector(small=small, override=override)
-            sp.update(count=1)
-        assert raw_model is not None
-        model = cast(_Predictor, raw_model)
-        return _YOLODetect(model, label=label, conf=conf, iou=iou)
+            sp.update(total=1, count=0, job="Load", model=label_hint, current="detector")
+            with _progress_running_task("Load", f"detector:{label_hint}"):
+                wrapper.prepare()
+            sp.update(count=1, model=wrapper.descriptor())
+        return _YOLODetect(wrapper, conf=conf, iou=iou)
     except Exception:
-        # Emit a brief notice that we're using the fallback adapter
         with _progress_simple_status("FALLBACK: fast-contour (no-ML)"):
             time.sleep(0.05)
         return _ContourDetect(conf=conf, iou=iou)
@@ -791,18 +789,25 @@ def build_heatmap(
     *,
     small: bool = True,
     override: Optional[Union[str, Path]] = LIVE_HEATMAP_OVERRIDE,
+    hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
-    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
-        label = _label_from_override_or_pick("heatmap", small, override)
+        candidates = candidate_weights("heatmap", small=small, override=override)
+        if not candidates:
+            raise RuntimeError("no-heatmap-weights")
+        label_hint = _label_from_override_or_pick("heatmap", small, override)
+        wrapper = ResilientYOLO(
+            candidates,
+            task="heatmap",
+            conf=0.25,
+            on_switch=hud_callback,
+        )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label, current="segmenter")
-            with _progress_running_task("Load", f"segmenter:{label}"):
-                raw_model = load_segmenter(small=small, override=override)
-            sp.update(count=1)
-        assert raw_model is not None
-        model = cast(_Predictor, raw_model)
-        return _YOLOHeatmap(model, label=label)
+            sp.update(total=1, count=0, job="Load", model=label_hint, current="segmenter")
+            with _progress_running_task("Load", f"segmenter:{label_hint}"):
+                wrapper.prepare()
+            sp.update(count=1, model=wrapper.descriptor())
+        return _YOLOHeatmap(wrapper, conf=0.25)
     except Exception:
         with _progress_simple_status("FALLBACK: laplacian-heatmap (no-ML)"):
             time.sleep(0.05)
@@ -813,18 +818,25 @@ def build_classify(
     small: bool = True,
     topk: int = 1,
     override: Optional[Union[str, Path]] = LIVE_CLASSIFY_OVERRIDE,
+    hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
-    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
-        label = _label_from_override_or_pick("classify", small, override)
+        candidates = candidate_weights("classify", small=small, override=override)
+        if not candidates:
+            raise RuntimeError("no-classify-weights")
+        label_hint = _label_from_override_or_pick("classify", small, override)
+        wrapper = ResilientYOLO(
+            candidates,
+            task="classify",
+            conf=0.25,
+            on_switch=hud_callback,
+        )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label, current="classifier")
-            with _progress_running_task("Load", f"classifier:{label}"):
-                raw_model = load_classifier(small=small, override=override)
-            sp.update(count=1)
-        assert raw_model is not None
-        model = cast(_Predictor, raw_model)
-        return _YOLOClassify(model, label=label, topk=topk)
+            sp.update(total=1, count=0, job="Load", model=label_hint, current="classifier")
+            with _progress_running_task("Load", f"classifier:{label_hint}"):
+                wrapper.prepare()
+            sp.update(count=1, model=wrapper.descriptor())
+        return _YOLOClassify(wrapper, topk=topk)
     except Exception:
         with _progress_simple_status("FALLBACK: simple-classify (no-ML)"):
             time.sleep(0.05)
@@ -835,18 +847,25 @@ def build_pose(
     small: bool = True,
     conf: float = 0.25,
     override: Optional[Union[str, Path]] = LIVE_POSE_OVERRIDE,
+    hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
-    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
-        label = _label_from_override_or_pick("pose", small, override)
+        candidates = candidate_weights("pose", small=small, override=override)
+        if not candidates:
+            raise RuntimeError("no-pose-weights")
+        label_hint = _label_from_override_or_pick("pose", small, override)
+        wrapper = ResilientYOLO(
+            candidates,
+            task="pose",
+            conf=conf,
+            on_switch=hud_callback,
+        )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label, current="pose")
-            with _progress_running_task("Load", f"pose:{label}"):
-                raw_model = load_pose(small=small, override=override)
-            sp.update(count=1)
-        assert raw_model is not None
-        model = cast(_Predictor, raw_model)
-        return _YOLOPose(model, label=label, conf=conf)
+            sp.update(total=1, count=0, job="Load", model=label_hint, current="pose")
+            with _progress_running_task("Load", f"pose:{label_hint}"):
+                wrapper.prepare()
+            sp.update(count=1, model=wrapper.descriptor())
+        return _YOLOPose(wrapper, conf=conf)
     except Exception:
         with _progress_simple_status("FALLBACK: simple-pose (no-ML)"):
             time.sleep(0.05)
@@ -858,19 +877,31 @@ def build_obb(
     conf: float = 0.25,
     iou: float = 0.45,
     override: Optional[Union[str, Path]] = LIVE_OBB_OVERRIDE,
+    hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
-    raw_model: Any = None  # quell “possibly unbound” for static analyzers
     try:
-        label = _label_from_override_or_pick("obb", small, override)
+        candidates = candidate_weights("obb", small=small, override=override)
+        if not candidates:
+            raise RuntimeError("no-obb-weights")
+        label_hint = _label_from_override_or_pick("obb", small, override)
+        wrapper = ResilientYOLO(
+            candidates,
+            task="obb",
+            conf=conf,
+            on_switch=hud_callback,
+        )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label, current="obb")
-            with _progress_running_task("Load", f"obb:{label}"):
-                raw_model = load_obb(small=small, override=override)
-            sp.update(count=1)
-        assert raw_model is not None
-        model = cast(_Predictor, raw_model)
-        return _YOLOOBB(model, label=label, conf=conf, iou=iou)
+            sp.update(total=1, count=0, job="Load", model=label_hint, current="obb")
+            with _progress_running_task("Load", f"obb:{label_hint}"):
+                wrapper.prepare()
+            sp.update(count=1, model=wrapper.descriptor())
+        return _YOLOOBB(wrapper, conf=conf, iou=iou)
     except Exception:
         with _progress_simple_status("FALLBACK: simple-obb (no-ML)"):
             time.sleep(0.05)
         return _SimpleOBB(conf=conf)
+
+
+
+
+

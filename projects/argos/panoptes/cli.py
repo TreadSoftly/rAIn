@@ -27,6 +27,13 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, Final, Iterable, Iterator, List, Literal, Optional, Protocol, cast
 
+try:
+    from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv
+
+    maybe_reexec_into_managed_venv()
+except Exception:
+    pass
+
 import typer
 
 from panoptes.logging_config import bind_context, current_run_dir, setup_logging

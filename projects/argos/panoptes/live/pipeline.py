@@ -62,6 +62,10 @@ class LivePipeline:
     iou: float = 0.45
     duration: Optional[float] = None  # seconds; None = until user closes
 
+    def __post_init__(self) -> None:
+        self._hud_notice: Optional[str] = None
+        self._hud_notice_until: float = 0.0
+
     def _build_source(self) -> FrameSource:
         if isinstance(self.source, str) and self.source.lower().startswith("synthetic"):
             return synthetic_source(size=self.size or (640, 480), fps=self.fps or 30)
@@ -73,18 +77,30 @@ class LivePipeline:
             fps=self.fps,
         )
 
+    def _register_toast(self, message: str) -> None:
+        _log("live.model.toast", task=self.task, message=message)
+        self._hud_notice = message
+        self._hud_notice_until = time.time() + 3.0
+
+    def _active_notice(self, now: float) -> Optional[str]:
+        if self._hud_notice and now <= self._hud_notice_until:
+            return self._hud_notice
+        if self._hud_notice and now > self._hud_notice_until:
+            self._hud_notice = None
+        return None
+
     def _build_task(self):
         t = self.task.lower()
         if t in ("d", "detect"):
-            return live_tasks.build_detect(small=self.prefer_small, conf=self.conf, iou=self.iou)
+            return live_tasks.build_detect(small=self.prefer_small, conf=self.conf, iou=self.iou, hud_callback=self._register_toast)
         if t in ("hm", "heatmap"):
-            return live_tasks.build_heatmap(small=self.prefer_small)
+            return live_tasks.build_heatmap(small=self.prefer_small, hud_callback=self._register_toast)
         if t in ("clf", "classify"):
-            return live_tasks.build_classify(small=self.prefer_small)
+            return live_tasks.build_classify(small=self.prefer_small, hud_callback=self._register_toast)
         if t in ("pose", "pse"):
-            return live_tasks.build_pose(small=self.prefer_small, conf=self.conf)
+            return live_tasks.build_pose(small=self.prefer_small, conf=self.conf, hud_callback=self._register_toast)
         if t in ("obb", "object"):
-            return live_tasks.build_obb(small=self.prefer_small, conf=self.conf, iou=self.iou)
+            return live_tasks.build_obb(small=self.prefer_small, conf=self.conf, iou=self.iou, hud_callback=self._register_toast)
         raise ValueError(f"Unknown live task: {self.task}")
 
     def _default_out_path(self) -> str:
@@ -122,8 +138,8 @@ class LivePipeline:
             hw = live_config.probe_hardware()
             _log("live.pipeline.hardware", arch=getattr(hw, "arch", None), gpu=getattr(hw, "gpu", None), ram=getattr(hw, "ram_gb", None))
             sel: ModelSelection = live_config.select_models_for_live(self.task, hw)
-            _log("live.pipeline.models", task=self.task, label=str(sel.get("label", "")))
             model_label = getattr(task, "label", "") or str(sel.get("label", ""))
+            _log("live.pipeline.models", task=self.task, label=model_label)
             sp.update(job="probe", current=hw.arch or "", model=model_label)
 
             src = self._build_source()
@@ -173,7 +189,11 @@ class LivePipeline:
                             video = VideoSink(saved_path, (w_px, h_px), float(self.fps or 30))
                         sinks = MultiSink(*(x for x in (display, video) if x is not None))
                         _log("live.pipeline.sinks", display=bool(display), video_path=saved_path if saved_path else None)
-                        sp.update(job="run", current=(Path(saved_path).name if saved_path else "live-only"))
+                        sp.update(
+                            job="run",
+                            current=(Path(saved_path).name if saved_path else "live-only"),
+                            model=model_label,
+                        )
 
                     # Inference → render
                     result = task.infer(frame_bgr)
@@ -185,7 +205,33 @@ class LivePipeline:
 
                     # HUD
                     device = hw.gpu or "CPU"
-                    hud(frame_anno, fps=fps_est, task=self.task, model=model_label, device=device)
+                    notice = self._active_notice(now)
+                    dynamic_label = model_label
+                    current_label_fn = getattr(task, "current_label", None)
+                    if callable(current_label_fn):
+                        try:
+                            dynamic_label = str(current_label_fn())
+                        except Exception:
+                            dynamic_label = model_label
+                    elif getattr(task, "label", None):
+                        try:
+                            dynamic_label = str(getattr(task, "label"))
+                        except Exception:
+                            dynamic_label = model_label
+                    if dynamic_label != model_label:
+                        model_label = dynamic_label
+                        try:
+                            sp.update(model=model_label)
+                        except Exception:
+                            pass
+                    hud(
+                        frame_anno,
+                        fps=fps_est,
+                        task=self.task,
+                        model=model_label,
+                        device=device,
+                        notice=notice,
+                    )
 
                     # Emit
                     assert sinks is not None
@@ -248,3 +294,7 @@ class LivePipeline:
         # Always return the path if saving was requested (file guards above ensure it exists and is non-empty)
         _log("live.pipeline.end", saved_path=saved_path)
         return saved_path
+
+
+
+

@@ -4,11 +4,13 @@ import contextlib
 import functools
 import importlib
 import logging
+import os
 import time
 from pathlib import Path
-from typing import Final, Optional, Union, Iterator
+from typing import Final, Iterable, Optional, Union, Iterator
 
 from .logging_config import bind_context
+from .runtime.backend_probe import ort_available, torch_available
 
 # ────────────────────────────────────────────────────────────────
 #  Logging (explicit, human-friendly, no stack noise)
@@ -170,39 +172,99 @@ def _candidate_weights(
     override: Optional[Union[str, Path]],
 ) -> Iterator[Path]:
     """
-    Yield candidate weight paths in priority order, de-duplicated, and including
-    the override (even if it does not exist yet).
-    """
-    seen: set[str] = set()
-    yield_path: list[Path] = []
-    missing: list[Path] = []
+    Yield candidate weight paths in preference order, de-duplicated.
 
-    def _push(path_like: Union[str, Path]) -> None:
+    Order rules:
+        - User override (if provided) first.
+        - Preferred size list (small vs. regular).
+        - Within each list, prefer ONNX only when the backend is available and
+          not explicitly de-prioritised via environment toggles.
+    """
+    prefer_onnx = os.environ.get("ARGOS_PREFER_ONNX", "1").strip().lower() not in {"0", "false", "no", "off"}
+    ort_ok, ort_reason = ort_available()
+    torch_ok = torch_available()
+
+    _log(
+        "weights.select.start",
+        task=task,
+        prefer_small=small,
+        prefer_onnx=int(prefer_onnx),
+        ort="OK" if ort_ok else ort_reason,
+        torch="OK" if torch_ok else "missing",
+    )
+
+    seen: set[str] = set()
+    ordered: list[Path] = []
+
+    def _normalise(path_like: Union[str, Path]) -> Path:
         path = Path(path_like).expanduser()
-        key = str(path.resolve())
-        if key in seen:
-            return
+        try:
+            return path.resolve(strict=False)
+        except Exception:
+            return path
+
+    def _add(path_like: Union[str, Path], *, force: bool = False) -> bool:
+        path = _normalise(path_like)
+        key = str(path).lower()
+        if not force and key in seen:
+            return False
         seen.add(key)
-        if path.exists():
-            yield_path.append(path)
-        else:
-            missing.append(path)
+        ordered.append(path)
+        return True
+
+    def _extend(paths: Iterable[Path]) -> tuple[int, int, int]:
+        deferred_onnx: list[Path] = []
+        added_total = 0
+        added_onnx = 0
+        added_non_onnx = 0
+
+        for p in paths:
+            suffix = p.suffix.lower()
+            if suffix == ".onnx":
+                if not ort_ok:
+                    _log("weights.select.skip", task=task, weight=str(p), reason=ort_reason)
+                    continue
+                if prefer_onnx:
+                    if _add(p):
+                        added_total += 1
+                        added_onnx += 1
+                else:
+                    deferred_onnx.append(p)
+                continue
+
+            if _add(p):
+                added_total += 1
+                added_non_onnx += 1
+
+        if not prefer_onnx:
+            for p in deferred_onnx:
+                if _add(p):
+                    added_total += 1
+                    added_onnx += 1
+
+        return added_total, added_onnx, added_non_onnx
 
     if override is not None:
-        _push(override)
+        override_path = _normalise(override)
+        _add(override_path, force=True)
+        if override_path.suffix.lower() == ".onnx" and not ort_ok:
+            _log(
+                "weights.select.warn",
+                task=task,
+                weight=str(override_path),
+                reason=f"ORT unavailable: {ort_reason}",
+            )
 
     if small:
-        for candidate in WEIGHT_PRIORITY.get(f"{task}_small", []):
-            _push(candidate)
+        _, _, small_non_onnx = _extend(WEIGHT_PRIORITY.get(f"{task}_small", []))
+        if small_non_onnx == 0:
+            _extend(WEIGHT_PRIORITY.get(task, []))
+    else:
+        _extend(WEIGHT_PRIORITY.get(task, []))
 
-    for candidate in WEIGHT_PRIORITY.get(task, []):
-        _push(candidate)
+    for candidate in ordered:
+        yield candidate
 
-    # Yield existing weights first, followed by any missing (to trigger a clear error)
-    for p in yield_path:
-        yield p
-    for p in missing:
-        yield p
 
 def _load_with_fallback(
     task: str,
@@ -215,11 +277,12 @@ def _load_with_fallback(
     candidates = list(_candidate_weights(task, small=small, override=override))
 
     if not candidates:
-        _log("weights.select", task=task, source=choice, weight=None)
+        _log("weights.select.fail_all", task=task, source=choice, reasons="no-candidates")
         return _require(None, task)
 
     last_exc: Exception | None = None
     last_weight: Optional[Path] = None
+    failure_reasons: list[str] = []
 
     for idx, weight in enumerate(candidates):
         event = "weights.select.retry" if idx else "weights.select"
@@ -230,9 +293,14 @@ def _load_with_fallback(
         except Exception as exc:
             last_exc = exc
             last_weight = Path(weight)
+            failure_reasons.append(f"{weight.name}: {exc}")
             continue
         if model is not None:
             return model
+        failure_reasons.append(f"{weight.name}: unavailable")
+
+    joined = "; ".join(failure_reasons) or "unknown"
+    _log("weights.select.fail_all", task=task, reasons=joined, source=choice)
 
     if last_exc is not None and last_weight is not None:
         raise RuntimeError(
@@ -386,6 +454,16 @@ def pick_weight(task: str, *, small: bool = False) -> Optional[Path]:
     return chosen
 
 
+def candidate_weights(
+    task: str,
+    *,
+    small: bool = False,
+    override: Optional[Union[str, Path]] = None,
+) -> list[Path]:
+    """Expose the ordered candidate list (used by live runtime wrappers)."""
+    return list(_candidate_weights(task, small=small, override=override))
+
+
 def load_detector(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
     return _load_with_fallback("detect", "detect", small=small, override=override)
 
@@ -409,6 +487,7 @@ def load_obb(*, small: bool = False, override: Optional[Union[str, Path]] = None
 __all__ = [
     "MODEL_DIR",
     "WEIGHT_PRIORITY",
+    "candidate_weights",
     "pick_weight",
     "load_detector",
     "load_segmenter",

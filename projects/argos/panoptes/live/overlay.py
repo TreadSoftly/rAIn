@@ -327,10 +327,13 @@ def hud(
     task: str,
     model: str,
     device: str,
+    notice: Optional[str] = None,
 ) -> None:
-    """Draw a tiny one-line HUD in the top-left corner."""
+    """Draw a tiny HUD in the top-left corner (optionally with a toast line)."""
     frame = _ensure_np(frame)
     if cv2 is None:
         return
     text = f"{fps:5.1f} FPS | {task} | {model} | {device}"
     cv2.putText(frame, text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 245, 200), 2)
+    if notice:
+        cv2.putText(frame, notice, (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 220, 200), 2)

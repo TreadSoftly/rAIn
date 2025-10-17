@@ -6,6 +6,13 @@ import os
 import sys
 from typing import List, Optional, Tuple, Union
 
+try:
+    from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv
+
+    maybe_reexec_into_managed_venv()
+except Exception:
+    pass
+
 import typer
 
 from panoptes.logging_config import bind_context, setup_logging
