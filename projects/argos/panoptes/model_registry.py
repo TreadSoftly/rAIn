@@ -6,7 +6,7 @@ import importlib
 import logging
 import time
 from pathlib import Path
-from typing import Final, Optional, Union
+from typing import Final, Optional, Union, Iterator
 
 from .logging_config import bind_context
 
@@ -163,6 +163,85 @@ def _first_existing(paths: list[Path]) -> Optional[Path]:
     """Return the first path that exists on disk or *None*."""
     return next((p for p in paths if p.exists()), None)
 
+def _candidate_weights(
+    task: str,
+    *,
+    small: bool,
+    override: Optional[Union[str, Path]],
+) -> Iterator[Path]:
+    """
+    Yield candidate weight paths in priority order, de-duplicated, and including
+    the override (even if it does not exist yet).
+    """
+    seen: set[str] = set()
+    yield_path: list[Path] = []
+    missing: list[Path] = []
+
+    def _push(path_like: Union[str, Path]) -> None:
+        path = Path(path_like).expanduser()
+        key = str(path.resolve())
+        if key in seen:
+            return
+        seen.add(key)
+        if path.exists():
+            yield_path.append(path)
+        else:
+            missing.append(path)
+
+    if override is not None:
+        _push(override)
+
+    if small:
+        for candidate in WEIGHT_PRIORITY.get(f"{task}_small", []):
+            _push(candidate)
+
+    for candidate in WEIGHT_PRIORITY.get(task, []):
+        _push(candidate)
+
+    # Yield existing weights first, followed by any missing (to trigger a clear error)
+    for p in yield_path:
+        yield p
+    for p in missing:
+        yield p
+
+def _load_with_fallback(
+    task: str,
+    runtime_task: str,
+    *,
+    small: bool,
+    override: Optional[Union[str, Path]],
+) -> object:
+    choice = "override" if override is not None else ("auto-small" if small else "auto")
+    candidates = list(_candidate_weights(task, small=small, override=override))
+
+    if not candidates:
+        _log("weights.select", task=task, source=choice, weight=None)
+        return _require(None, task)
+
+    last_exc: Exception | None = None
+    last_weight: Optional[Path] = None
+
+    for idx, weight in enumerate(candidates):
+        event = "weights.select.retry" if idx else "weights.select"
+        source = choice if idx == 0 else "fallback"
+        _log(event, task=task, source=source, weight=str(weight))
+        try:
+            model = _load(weight, task=runtime_task)
+        except Exception as exc:
+            last_exc = exc
+            last_weight = Path(weight)
+            continue
+        if model is not None:
+            return model
+
+    if last_exc is not None and last_weight is not None:
+        raise RuntimeError(
+            f"[model_registry] failed to load any weight for task '{task}'. "
+            f"Last attempt {last_weight}: {last_exc}"
+        ) from last_exc
+
+    return _require(None, task)
+
 
 def _resolve_yolo_class() -> Optional[type]:
     """
@@ -307,50 +386,24 @@ def pick_weight(task: str, *, small: bool = False) -> Optional[Path]:
     return chosen
 
 
-def _choose(task: str, *, small: bool, override: Optional[Union[str, Path]]) -> Optional[Path]:
-    if override is not None:
-        return Path(override).expanduser()
-    return pick_weight(task, small=small)
-
-
 def load_detector(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    chosen = _choose("detect", small=small, override=override)
-    choice = "override" if override is not None else ("auto-small" if small else "auto")
-    _log("weights.select", task="detect", source=choice, weight=(str(chosen) if chosen else None))
-    model = _load(chosen, task="detect")
-    return _require(model, "detect")
+    return _load_with_fallback("detect", "detect", small=small, override=override)
 
 
 def load_segmenter(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    chosen = _choose("heatmap", small=small, override=override)
-    choice = "override" if override is not None else ("auto-small" if small else "auto")
-    _log("weights.select", task="heatmap", source=choice, weight=(str(chosen) if chosen else None))
-    model = _load(chosen, task="segment")
-    return _require(model, "heatmap")
+    return _load_with_fallback("heatmap", "segment", small=small, override=override)
 
 
 def load_classifier(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    chosen = _choose("classify", small=small, override=override)
-    choice = "override" if override is not None else ("auto-small" if small else "auto")
-    _log("weights.select", task="classify", source=choice, weight=(str(chosen) if chosen else None))
-    model = _load(chosen, task="classify")
-    return _require(model, "classify")
+    return _load_with_fallback("classify", "classify", small=small, override=override)
 
 
 def load_pose(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    chosen = _choose("pose", small=small, override=override)
-    choice = "override" if override is not None else ("auto-small" if small else "auto")
-    _log("weights.select", task="pose", source=choice, weight=(str(chosen) if chosen else None))
-    model = _load(chosen, task="pose")
-    return _require(model, "pose")
+    return _load_with_fallback("pose", "pose", small=small, override=override)
 
 
 def load_obb(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
-    chosen = _choose("obb", small=small, override=override)
-    choice = "override" if override is not None else ("auto-small" if small else "auto")
-    _log("weights.select", task="obb", source=choice, weight=(str(chosen) if chosen else None))
-    model = _load(chosen, task="obb")
-    return _require(model, "obb")
+    return _load_with_fallback("obb", "obb", small=small, override=override)
 
 
 __all__ = [
