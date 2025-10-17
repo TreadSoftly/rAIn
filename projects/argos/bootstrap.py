@@ -381,6 +381,92 @@ def _ensure_sympy_alignment() -> None:
         capture=False,
     )
 
+
+def _probe_onnx_runtime() -> dict[str, object]:
+    """Inspect ONNX/ONNX Runtime availability inside the Argos venv."""
+    probe = r"""
+import json
+result = {
+    "onnx": False,
+    "onnxruntime": False,
+    "providers": None,
+    "error": None,
+}
+errors = []
+
+try:
+    import onnx  # noqa: F401
+    result["onnx"] = True
+except Exception as exc:  # pragma: no cover - diagnostics only
+    errors.append(f"onnx: {type(exc).__name__}: {exc}")
+
+try:
+    import onnxruntime as ort  # noqa: F401
+    result["onnxruntime"] = True
+    try:
+        result["providers"] = list(ort.get_available_providers())
+    except Exception as exc:  # pragma: no cover
+        errors.append(f"providers: {type(exc).__name__}: {exc}")
+except Exception as exc:
+    errors.append(f"onnxruntime: {type(exc).__name__}: {exc}")
+
+if errors:
+    result["error"] = "; ".join(errors)
+
+print(json.dumps(result))
+"""
+    cp = _run([str(VPY), "-c", probe], check=False, capture=True)
+    data: dict[str, object] = {}
+    try:
+        payload = (cp.stdout or "").strip()
+        if payload:
+            parsed = json.loads(payload)
+            if isinstance(parsed, dict):
+                data = parsed  # type: ignore[assignment]
+    except Exception:
+        data = {}
+    return data
+
+
+def _ensure_onnx_runtime_packages() -> None:
+    """Guarantee ONNX + ONNX Runtime are importable inside the venv."""
+    info = _probe_onnx_runtime()
+    onnx_ok = bool(info.get("onnx"))
+    ort_ok = bool(info.get("onnxruntime"))
+
+    if onnx_ok and ort_ok and info.get("providers"):
+        _print(f"→ onnxruntime providers detected: {info.get('providers')}")
+        return
+
+    _print(" ensuring onnx + onnxruntime inside venv .")
+
+    def _install(binary_only: bool) -> bool:
+        cmd = [str(VPY), "-m", "pip", "install", "--upgrade"]
+        if binary_only:
+            cmd.append("--only-binary=:all:")
+        cmd.extend(_constraints_args())
+        cmd.extend(["onnx", "onnxruntime"])
+        try:
+            _run(cmd, check=True, capture=False)
+            return True
+        except Exception:
+            return False
+
+    if not _install(binary_only=True):
+        _install(binary_only=False)
+
+    info = _probe_onnx_runtime()
+    providers = info.get("providers")
+    error = info.get("error")
+    onnx_ok = bool(info.get("onnx"))
+    ort_ok = bool(info.get("onnxruntime"))
+
+    if onnx_ok and ort_ok and providers:
+        _print(f"→ onnxruntime providers: {providers}")
+    else:
+        _print(f"??  ONNX setup incomplete (onnx={onnx_ok}, ort={ort_ok}) reason={error or 'unknown'}")
+
+
 def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str], list[str]]:
     import tempfile
     probe = r"""
@@ -847,6 +933,10 @@ def _ensure(
                 with_dev=with_dev,
                 extras=extras_tuple,
             ),
+        ),
+        (
+            "Ensure ONNX Runtime",
+            _ensure_onnx_runtime_packages,
         ),
         ("Align Torch deps", _ensure_sympy_alignment),
         (
