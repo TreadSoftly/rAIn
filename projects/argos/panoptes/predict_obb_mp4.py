@@ -39,6 +39,7 @@ from numpy.typing import NDArray
 
 from panoptes import ROOT  # type: ignore[import-not-found]
 from panoptes.model_registry import load_obb  # type: ignore[import-not-found]
+from .ffmpeg_utils import resolve_ffmpeg
 
 # ---- progress spinner (Halo-based) ------------------------------------------
 try:
@@ -259,7 +260,7 @@ def main(  # noqa: C901
         if use_local:
             _poke(sp_ctx, total=float(total + 1), count=0.0, item=file_lbl, job=f"frame 0/{total}", model=model_lbl)  # type: ignore[arg-type]
         else:
-            _poke(progress, item=file_lbl, job=f"frame 0/{total}", model=model_lbl)
+            _poke(progress, item=file_lbl, job=f"frame 0/{total}", model=model_lbl, total=total + 1, count=0)
 
         while True:
             ok, frame_raw = cap.read()
@@ -283,7 +284,14 @@ def main(  # noqa: C901
             if use_local:
                 _poke(sp_ctx, count=float(i), item=file_lbl, job=f"frame {min(i, total)}/{total}", model=model_lbl)  # type: ignore[arg-type]
             else:
-                _poke(progress, item=file_lbl, job=f"frame {min(i, total)}/{total}", model=model_lbl)
+                _poke(
+                    progress,
+                    item=file_lbl,
+                    job=f"frame {min(i, total)}/{total}",
+                    model=model_lbl,
+                    total=total + 1,
+                    count=min(i, total),
+                )
 
         cap.release()
         vw.release()
@@ -292,15 +300,19 @@ def main(  # noqa: C901
         if use_local:
             _poke(sp_ctx, item=file_lbl, job="encode mp4", model=model_lbl)  # type: ignore[arg-type]
         else:
-            _poke(progress, item=file_lbl, job="encode mp4", model=model_lbl)
+            _poke(progress, item=file_lbl, job="encode mp4", model=model_lbl, total=total + 1, count=total)
 
+        ffmpeg_path, ffmpeg_source = resolve_ffmpeg()
         try:
+            if not ffmpeg_path:
+                raise FileNotFoundError("ffmpeg not found")
             subprocess.run(
-                ["ffmpeg", "-y", "-i", str(avi), "-c:v", "libx264", "-crf", "23",
+                [ffmpeg_path, "-y", "-i", str(avi), "-c:v", "libx264", "-crf", "23",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(preferred)],
                 check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
             )
             avi.unlink(missing_ok=True)
+            _say(f"FFmpeg re-encode successful ({ffmpeg_source})")
             final = preferred
         except (FileNotFoundError, subprocess.CalledProcessError):
             ok_mp4 = _opencv_reencode_to_mp4(avi, preferred, fps=fps)
@@ -317,6 +329,6 @@ def main(  # noqa: C901
         if use_local:
             _poke(sp_ctx, count=float(total + 1), item=file_lbl, job="done", model=model_lbl)  # type: ignore[arg-type]
         else:
-            _poke(progress, item=file_lbl, job="done", model=model_lbl)
+            _poke(progress, item=file_lbl, job="done", model=model_lbl, total=total + 1, count=total + 1)
 
         return final

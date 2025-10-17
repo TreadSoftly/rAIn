@@ -42,6 +42,7 @@ import numpy as np
 
 from panoptes import ROOT  # type: ignore
 from panoptes.model_registry import load_detector  # type: ignore
+from .ffmpeg_utils import resolve_ffmpeg
 
 # optional progress (safe off-TTY)
 try:
@@ -176,12 +177,14 @@ def main(  # noqa: C901 - CLI glue
         ctx: ContextManager[None] = _Null()
 
     frame_idx = 0
+    total_for_progress = max(1, total_frames + 1)
+
     with ctx:
         if eng:
             eng.set_total(float(total_frames + 1))  # +1 for encode
             eng.set_current("frame 0")
         elif progress is not None:
-            progress.update(current=f"frame 0/{total_frames}")
+            progress.update(total=total_for_progress, count=0, job=f"frame 0/{total_frames}")
 
         # ── frame loop ───────────────────────────────────────────────────
         while True:
@@ -204,7 +207,11 @@ def main(  # noqa: C901 - CLI glue
             if eng:
                 eng.add(1.0, current_item=f"frame {min(frame_idx, total_frames)}/{total_frames}")
             elif progress is not None:
-                progress.update(current=f"frame {min(frame_idx, total_frames)}/{total_frames}")
+                progress.update(
+                    total=total_for_progress,
+                    count=min(frame_idx, total_frames),
+                    job=f"frame {min(frame_idx, total_frames)}/{total_frames}",
+                )
 
         cap.release()
         vw.release()
@@ -215,7 +222,8 @@ def main(  # noqa: C901 - CLI glue
         if eng:
             eng.set_current("encode mp4")
         elif progress is not None:
-            progress.update(current="encode mp4")
+            progress.update(total=total_for_progress, count=total_frames, job="encode mp4")
+        ffmpeg_path, ffmpeg_source = resolve_ffmpeg()
         try:
             if simple_status is not None and not ps_progress_active and use_local:
                 sp: ContextManager[None] = cast(ContextManager[None], simple_status("FFmpeg re-encode"))
@@ -224,16 +232,23 @@ def main(  # noqa: C901 - CLI glue
                     def __enter__(self) -> None: return None
                     def __exit__(self, et: type[BaseException] | None, ex: BaseException | None, tb: TracebackType | None) -> bool: return False
                 sp = _Null2()
+            if not ffmpeg_path:
+                raise FileNotFoundError("ffmpeg not found")
             with sp:
                 subprocess.run(
                     [
-                        "ffmpeg",
+                        ffmpeg_path,
                         "-y",
-                        "-i", str(avi),
-                        "-c:v", "libx264",
-                        "-crf", "23",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
+                        "-i",
+                        str(avi),
+                        "-c:v",
+                        "libx264",
+                        "-crf",
+                        "23",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
                         str(preferred),
                     ],
                     check=True,
@@ -241,6 +256,7 @@ def main(  # noqa: C901 - CLI glue
                     stderr=subprocess.STDOUT,
                 )
             avi.unlink(missing_ok=True)
+            _say(f"FFmpeg re-encode successful ({ffmpeg_source})")
             final = preferred
         except (FileNotFoundError, subprocess.CalledProcessError):
             # FFmpeg missing or failed - emit AVI instead
@@ -254,5 +270,5 @@ def main(  # noqa: C901 - CLI glue
         if eng:
             eng.add(1.0, current_item="done")
         elif progress is not None:
-            progress.update(current="done")
+            progress.update(total=total_for_progress, count=total_for_progress, job="done")
         return final

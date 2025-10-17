@@ -22,7 +22,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 if [[ "${1-}" == "argos" ]]; then shift; fi
 
 PY="$(command -v python3 || command -v python)"
-"$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes --reinstall
+"$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes --reinstall --with-dev --extras audio
 VPY="$("$PY" "$ROOT/projects/argos/bootstrap.py" --print-venv)"
 
 "$VPY" -m pip check || true
@@ -32,4 +32,17 @@ export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
 "$HERE/setup-path.sh" -y || true
 
 # IMPORTANT: Do NOT auto-feed "1" unless explicitly requested by the user.
-exec "$VPY" -m panoptes.tools.build_models "$@"
+build_status=0
+"$VPY" -m panoptes.tools.build_models "$@" || build_status=$?
+
+if [[ $build_status -eq 0 ]]; then
+  "$VPY" -m compileall "$ROOT/projects/argos" || build_status=$?
+  exit $build_status
+fi
+
+# Treat user exit (Typer Exit -> 1) as a no-op so the command ends quietly.
+if [[ $build_status -eq 1 ]]; then
+  exit 0
+fi
+
+exit $build_status

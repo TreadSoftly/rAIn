@@ -68,8 +68,19 @@ try:
     from panoptes.progress import percent_spinner as _percent_spinner  # type: ignore
     from panoptes.progress import simple_status as _simple_status  # type: ignore
 
+    @contextmanager
     def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
-        return _percent_spinner(*args, **kwargs)
+        prev_tail = os.environ.get("PANOPTES_PROGRESS_TAIL")
+        if prev_tail is None or prev_tail.strip().lower() == "none":
+            os.environ["PANOPTES_PROGRESS_TAIL"] = "full"
+        try:
+            with _percent_spinner(*args, **kwargs) as spinner:
+                yield spinner
+        finally:
+            if prev_tail is None:
+                os.environ.pop("PANOPTES_PROGRESS_TAIL", None)
+            else:
+                os.environ["PANOPTES_PROGRESS_TAIL"] = prev_tail
 
     def simple_status(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _simple_status(*args, **kwargs)
@@ -176,7 +187,14 @@ def _ensure_export_toolchain() -> None:
     if not _have("protobuf"):
         _pip_quiet("protobuf>=4.23,<5")
     if not _have("onnxslim"):
-        _pip_quiet("onnxslim<0.1.59")
+        enable_sl = os.getenv("ARGOS_ENABLE_ONNXSLIM", "").strip().lower() in {"1", "true", "yes"}
+        if enable_sl:
+            _pip_quiet("onnxslim<0.1.59")
+        else:
+            typer.secho(
+                "Skipping onnxslim install (set ARGOS_ENABLE_ONNXSLIM=1 to enable optional slimming).",
+                fg="yellow",
+            )
 
 
 # Ensure deps before we try to import YOLO

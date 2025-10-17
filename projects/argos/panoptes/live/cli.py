@@ -1,11 +1,30 @@
 # panoptes.live.cli — dedicated live/webcam entrypoint ("lv" / "live" / "livevideo")
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from typing import List, Optional, Tuple, Union
 
 import typer
+
+from panoptes.logging_config import bind_context, setup_logging
+
+try:
+    from panoptes.support_bundle import write_support_bundle
+except ImportError:  # pragma: no cover - fallback for direct package execution
+    from ..support_bundle import write_support_bundle  # type: ignore
+
+setup_logging()
+LOGGER = logging.getLogger(__name__)
+
+
+def _log_event(event: str, **info: object) -> None:
+    if info:
+        detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        LOGGER.info("%s %s", event, detail)
+    else:
+        LOGGER.info(event)
 
 from .pipeline import LivePipeline
 
@@ -86,8 +105,11 @@ def run(
     conf: float = typer.Option(0.25, "--conf", help="Detector confidence (detect/pose/obb where applicable)."),
     iou: float = typer.Option(0.45, "--iou", help="Detector IOU (detect/obb where applicable)."),
     small: bool = typer.Option(True, "--small/--no-small", help="Prefer small models for live."),
+    support_bundle: bool = typer.Option(False, "--support-bundle", help="Write a support bundle zip after the session"),
 ) -> None:
     """Launch the live webcam/video pipeline."""
+
+    _log_event("live.cli.start", tokens=",".join(tokens) if tokens else None, duration=duration, headless=headless, save=save)
 
     # Some environments + Click variadic args can mis-route option values.
     # If Typer didn't bind --save/-o, fall back to parsing sys.argv directly.
@@ -145,6 +167,9 @@ def run(
         # treat as filesystem path
         src = s
 
+    with bind_context(live_task=t, source=str(src)):
+        _log_event("live.cli.selection", task=t, source=str(src), small=small, save=save, headless=headless)
+
     size: Optional[Tuple[int, int]] = (width, height) if (width and height) else None
 
     # Short, non-nested progress note during pipeline construction (auto-disabled in live by progress_ux)
@@ -166,8 +191,19 @@ def run(
     assert pipe is not None
 
     out = pipe.run()
+    _log_event("live.cli.completed", task=t, source=str(src), output=out)
     if out:
         print(out)
+
+    bundle_path = None
+    if support_bundle:
+        try:
+            extras = [out] if out else None
+            bundle_path = write_support_bundle(extra_paths=extras)
+        except Exception as exc:
+            typer.secho(f"[bold red] failed to create support bundle: {exc}", err=True)
+    if bundle_path:
+        typer.echo(f"Support bundle written: {bundle_path}")
 
 
 def _prepend_argv(token: str) -> None:

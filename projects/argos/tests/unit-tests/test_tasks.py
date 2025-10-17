@@ -13,11 +13,12 @@ from typing import Any, Dict, List, Sequence
 
 # ── third-party ─────────────────────────────────────────────────────
 import boto3
-import cv2
 import numpy as np
 import pytest
 from PIL import Image
+cv2 = pytest.importorskip("cv2", reason="OpenCV not installed; install opencv-python to run Lambda inference tests")
 from ultralytics import YOLO  # type: ignore
+
 
 # Lambda under test (imported *via* the shim in repo root)
 from lambda_function import app as lam  # type: ignore

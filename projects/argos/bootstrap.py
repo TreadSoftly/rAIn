@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -47,6 +48,8 @@ from typing import (
     cast,
     overload,
 )
+
+from panoptes.logging_config import setup_logging
 
 # Diagnostics (always try to attach; never crash on failure)
 try:
@@ -73,6 +76,9 @@ APP = "rAIn"
 
 if os.name == "nt":
     os.environ.setdefault("PYTHONUTF8", "1")
+
+setup_logging()
+_LOG = logging.getLogger(__name__)
 
 StrPath = Union[str, PathLike[str]]
 
@@ -167,6 +173,19 @@ def _module_present(mod: str) -> bool:
     try:
         _run([str(VPY), "-c", code], check=True, capture=False)
         return True
+    except Exception:
+        return False
+
+def _has_distribution(name: str) -> bool:
+    try:
+        from importlib.metadata import PackageNotFoundError, distribution  # type: ignore
+    except Exception:  # pragma: no cover
+        from importlib_metadata import PackageNotFoundError, distribution  # type: ignore
+    try:
+        distribution(name)
+        return True
+    except PackageNotFoundError:
+        return False
     except Exception:
         return False
 
@@ -265,29 +284,24 @@ def _install_torch_if_needed(cpu_only: bool) -> None:
     raise RuntimeError("Torch/Torchvision installation failed after multiple attempts.")
 
 def _ensure_opencv_gui() -> None:
-    _print("→ ensuring OpenCV (GUI-capable) …")
-    try:
-        _run([str(VPY), "-m", "pip", "uninstall", "-y",
-              "opencv-python-headless", "opencv-contrib-python-headless"], check=False, capture=False)
-    except Exception:
-        pass
+    _print("\x1a ensuring OpenCV (GUI-capable) .")
+    uninstall_targets = [
+        pkg for pkg in ("opencv-python-headless", "opencv-contrib-python-headless")
+        if _has_distribution(pkg)
+    ]
+    if uninstall_targets:
+        _run([str(VPY), "-m", "pip", "uninstall", "-y", *uninstall_targets], check=False, capture=False)
     _run([str(VPY), "-m", "pip", "install", "--upgrade", *_constraints_args(), "opencv-python"], check=True, capture=False)
 
-def _pip_install_editable_if_needed(*, reinstall: bool = False, with_dev: bool = False) -> None:
+def _pip_install_editable_if_needed(
+    *,
+    reinstall: bool = False,
+    with_dev: bool = False,
+    extras: Optional[Sequence[str]] = None,
+) -> None:
     need = reinstall or (not _module_present("panoptes")) or (not _module_present("ultralytics"))
 
-    headless_present = False
-    try:
-        from importlib.metadata import PackageNotFoundError, distribution as ild_distribution  # type: ignore
-    except Exception:  # pragma: no cover
-        from importlib_metadata import PackageNotFoundError, distribution as ild_distribution  # type: ignore
-    try:
-        ild_distribution("opencv-python-headless")
-        headless_present = True
-    except PackageNotFoundError:
-        headless_present = False
-    except Exception:
-        headless_present = False
+    headless_present = _has_distribution("opencv-python-headless")
 
     if headless_present:
         need = True
@@ -297,9 +311,63 @@ def _pip_install_editable_if_needed(*, reinstall: bool = False, with_dev: bool =
     if not need:
         return
 
-    _print(f"→ installing Argos package (editable){' + dev' if with_dev else ''} …")
-    extra = "[dev]" if with_dev else ""
-    _run([str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + extra, *_constraints_args()], check=True, capture=False)
+    install_extras: list[str] = []
+    if extras:
+        for item in extras:
+            cleaned = item.strip()
+            if cleaned and cleaned not in install_extras:
+                install_extras.append(cleaned)
+    if with_dev and "dev" not in install_extras:
+        install_extras.append("dev")
+
+    suffix = ""
+    if install_extras:
+        suffix = " [" + ",".join(install_extras) + "]"
+    _print(f"→ installing Argos package (editable){suffix} …")
+
+    extra_token = ""
+    if install_extras:
+        extra_token = "[" + ",".join(install_extras) + "]"
+
+    _run(
+        [str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + extra_token, *_constraints_args()],
+        check=True,
+        capture=False,
+    )
+
+
+def _ensure_sympy_alignment() -> None:
+    try:
+        from importlib.metadata import PackageNotFoundError, version as pkg_version  # type: ignore
+    except Exception:  # pragma: no cover
+        from importlib_metadata import PackageNotFoundError, version as pkg_version  # type: ignore
+
+    try:
+        torch_version = pkg_version("torch")
+    except PackageNotFoundError:
+        return
+
+    required_sympy: Optional[str] = None
+    if torch_version.startswith("2.5."):
+        required_sympy = "1.13.1"
+
+    if not required_sympy:
+        return
+
+    try:
+        sympy_version = pkg_version("sympy")
+    except PackageNotFoundError:
+        sympy_version = None
+
+    if sympy_version == required_sympy:
+        return
+
+    _print(f"→ aligning sympy to {required_sympy} …")
+    _run(
+        [str(VPY), "-m", "pip", "install", f"sympy=={required_sympy}", *_constraints_args()],
+        check=True,
+        capture=False,
+    )
 
 def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str], list[str]]:
     import tempfile
@@ -737,12 +805,22 @@ def _ensure(
     skip_weights: bool = False,
     reinstall: bool = False,
     with_dev: bool = False,
+    extras: Optional[Sequence[str]] = None,
 ) -> None:
+    extras_tuple: tuple[str, ...] = tuple(x.strip() for x in (extras or []) if x.strip())
     steps: list[tuple[str, Callable[[], None]]] = [
         ("Create venv", _create_venv),
         ("Install Torch", lambda: _install_torch_if_needed(cpu_only)),
         ("Ensure OpenCV (GUI)", _ensure_opencv_gui),
-        ("Install Argos (editable)", lambda: _pip_install_editable_if_needed(reinstall=reinstall, with_dev=with_dev)),
+        (
+            "Install Argos (editable)",
+            lambda: _pip_install_editable_if_needed(
+                reinstall=reinstall,
+                with_dev=with_dev,
+                extras=extras_tuple,
+            ),
+        ),
+        ("Align Torch deps", _ensure_sympy_alignment),
         (
             "Ensure weights",
             (lambda: None)
@@ -778,6 +856,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--weights-preset", choices=["all", "default", "nano", "perception"], help="Preset for weights (overrides env)")
     p.add_argument("--reinstall", action="store_true", help="Force reinstall of Argos editable package")
     p.add_argument("--with-dev", action="store_true", help="Install Argos with [dev] extras as well")
+    p.add_argument(
+        "--extras",
+        help="Comma-separated Argos extras to install (e.g., audio,onnx-tools)",
+    )
     p.add_argument("--yes", action="store_true", help="Assume Yes to prompts (non-interactive)")
     args, _ = p.parse_known_args(argv)
     _ensure_dirs()
@@ -791,9 +873,27 @@ def main(argv: list[str]) -> int:
         args.with_dev or (os.getenv("ARGOS_WITH_DEV", "").strip().lower() in {"1", "true", "yes"})
     )
 
+    extras_sources: list[str] = []
+    env_extras = os.getenv("ARGOS_BOOTSTRAP_EXTRAS", "").strip()
+    if env_extras:
+        extras_sources.extend(env_extras.split(","))
+    if getattr(args, "extras", None):
+        extras_sources.extend(str(args.extras).split(","))
+    extras_list: list[str] = []
+    for item in extras_sources:
+        cleaned = item.strip()
+        if cleaned and cleaned not in extras_list:
+            extras_list.append(cleaned)
+
     if args.ensure:
         try:
-            _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall, with_dev=with_dev_flag)
+            _ensure(
+                cpu_only,
+                preset=args.weights_preset,
+                reinstall=args.reinstall,
+                with_dev=with_dev_flag,
+                extras=extras_list,
+            )
         except Exception as e:
             traceback.print_exc()
             _print(f"ensure failed: {e}")
@@ -814,7 +914,15 @@ def main(argv: list[str]) -> int:
             elif preset:
                 os.environ["ARGOS_WEIGHT_PRESET"] = preset
 
-            _ensure(cpu_only, preset=preset, weight_names=picks, skip_weights=skip, reinstall=args.reinstall, with_dev=with_dev_flag)
+            _ensure(
+                cpu_only,
+                preset=preset,
+                weight_names=picks,
+                skip_weights=skip,
+                reinstall=args.reinstall,
+                with_dev=with_dev_flag,
+                extras=extras_list,
+            )
             _create_launchers()
             _write_sentinel()
             _print_help(cpu_only)
@@ -822,7 +930,13 @@ def main(argv: list[str]) -> int:
             _print("Setup skipped. You can run later with:  python bootstrap.py --ensure")
         return 0
 
-    _ensure(cpu_only, preset=args.weights_preset, reinstall=args.reinstall, with_dev=with_dev_flag)
+    _ensure(
+        cpu_only,
+        preset=args.weights_preset,
+        reinstall=args.reinstall,
+        with_dev=with_dev_flag,
+        extras=extras_list,
+    )
     return 0
 
 if __name__ == "__main__":

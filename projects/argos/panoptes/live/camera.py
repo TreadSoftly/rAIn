@@ -9,6 +9,7 @@ quietly. Also provides a deterministic "synthetic" source for CI/headless runs.
 from __future__ import annotations
 
 import math
+import logging
 import sys
 import time
 from typing import Any, Iterator, Optional, Protocol, Tuple, Union, cast
@@ -35,6 +36,18 @@ except Exception:
     cv2 = None  # type: ignore
 
 from ._types import NDArrayU8
+from panoptes.logging_config import bind_context
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _log(event: str, **info: object) -> None:
+    if info:
+        detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        LOGGER.info("%s %s", event, detail)
+    else:
+        LOGGER.info(event)
 
 
 class FrameSource(Protocol):
@@ -81,6 +94,7 @@ class _CVCamera(FrameSource):
     ) -> None:
         if cv2 is None:
             raise RuntimeError("OpenCV not available for camera capture.")
+        self._source = str(source)
         # Allow "0", "-1" strings, or file/rtsp paths
         if isinstance(source, str):
             try:
@@ -93,30 +107,71 @@ class _CVCamera(FrameSource):
         # Try a few backends if index source; file/rtsp → default only
         backends = _guess_backend_ids() if isinstance(src_val, int) else [0]
 
-        last_err: Optional[Exception] = None
-        with _progress_simple_status(f"Opening source {source!r}"):
-            self.cap = None
-            for be in backends:
-                try:
-                    self.cap = cv2.VideoCapture(src_val, be) if be else cv2.VideoCapture(src_val)
-                    if self.cap and self.cap.isOpened():
-                        break
-                    if self.cap:
-                        self.cap.release()
+        context = bind_context(component="camera", source=self._source)
+        exc_info = (None, None, None)
+        context.__enter__()
+        selected_backend: Optional[int] = None
+        try:
+            _log(
+                "live.camera.open.start",
+                source=self._source,
+                backends=",".join(str(b) for b in backends),
+                width=width,
+                height=height,
+                fps=fps,
+            )
+            last_err: Optional[Exception] = None
+            with _progress_simple_status(f"Opening source {source!r}"):
+                self.cap = None
+                for be in backends:
+                    try:
+                        self.cap = cv2.VideoCapture(src_val, be) if be else cv2.VideoCapture(src_val)
+                        if self.cap and self.cap.isOpened():
+                            selected_backend = be
+                            break
+                        if self.cap:
+                            self.cap.release()
+                            self.cap = None
+                    except Exception as e:
+                        last_err = e
                         self.cap = None
-                except Exception as e:
-                    last_err = e
-                    self.cap = None
-            if not self.cap or not self.cap.isOpened():
-                raise RuntimeError(f"Failed to open camera/source: {source}") from last_err
+                if not self.cap or not self.cap.isOpened():
+                    raise RuntimeError(f"Failed to open camera/source: {source}") from last_err
 
-            # Try to set properties (best effort)
-            if width is not None:
-                self.cap.set(getattr(cv2, "CAP_PROP_FRAME_WIDTH", 3), float(width))
-            if height is not None:
-                self.cap.set(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4), float(height))
-            if fps is not None:
-                self.cap.set(getattr(cv2, "CAP_PROP_FPS", 5), float(fps))
+                if width is not None:
+                    self.cap.set(getattr(cv2, "CAP_PROP_FRAME_WIDTH", 3), float(width))
+                if height is not None:
+                    self.cap.set(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4), float(height))
+                if fps is not None:
+                    self.cap.set(getattr(cv2, "CAP_PROP_FPS", 5), float(fps))
+
+            actual_w = actual_h = None
+            actual_fps: Optional[float] = None
+            try:
+                actual_w = int(self.cap.get(getattr(cv2, "CAP_PROP_FRAME_WIDTH", 3)))
+                actual_h = int(self.cap.get(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4)))
+                actual_fps = float(self.cap.get(getattr(cv2, "CAP_PROP_FPS", 5)))
+            except Exception:
+                pass
+
+            _log(
+                "live.camera.open.success",
+                source=self._source,
+                backend=str(selected_backend),
+                width=actual_w,
+                height=actual_h,
+                fps=actual_fps,
+            )
+        except Exception as exc:
+            exc_info = sys.exc_info()
+            _log(
+                "live.camera.open.error",
+                source=self._source,
+                error=type(exc).__name__,
+            )
+            raise
+        finally:
+            context.__exit__(*exc_info)
 
     def frames(self) -> Iterator[tuple[NDArrayU8, float]]:
         assert cv2 is not None and np is not None
@@ -133,6 +188,7 @@ class _CVCamera(FrameSource):
                     # Give the device a moment and retry
                     time.sleep(0.01)
                     continue
+                _log("live.camera.read.error", source=getattr(self, "_source", "unknown"), warmups=warmups)
                 break
             # Ensure dtype=uint8 and narrow the type for the checker
             if getattr(frame, "dtype", None) is not None and frame.dtype != np.uint8:
@@ -159,6 +215,7 @@ class _SyntheticSource(FrameSource):
             self.fps = max(1, int(fps))
             self._t0 = time.time()
             self._n = 0
+        _log("live.camera.synthetic", size=f"{self.w}x{self.h}", fps=self.fps)
 
     def frames(self) -> Iterator[tuple[NDArrayU8, float]]:
         assert np is not None
@@ -197,6 +254,7 @@ def open_camera(
     Open a camera/video source, using OS-specific backend hints when available.
     If OpenCV is unavailable, raises. Use `synthetic_source()` for CI/headless.
     """
+    _log("live.camera.request", source=str(source), width=width, height=height, fps=fps)
     if cv2 is None:
         raise RuntimeError("OpenCV not available. Install opencv-python (not headless) or use synthetic_source().")
     return _CVCamera(source, width=width, height=height, fps=fps)

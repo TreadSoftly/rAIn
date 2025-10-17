@@ -9,10 +9,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, ContextManager, Iterable, Optional, Protocol, Union, cast
 
-import cv2
 import numpy as np
 from numpy.typing import NDArray
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from .model_registry import load_segmenter
 
@@ -46,11 +45,50 @@ _LOG.setLevel(logging.WARNING)
 def _dbg(msg: str) -> None:
     _LOG.debug(f"[panoptes] {msg}")
 
-# ─────────────────────────── model (hard‑fail) ─────────────────────────
-_seg_model = load_segmenter()  # may raise RuntimeError — by design
-_dbg("heatmap module init: segmenter ready (see registry log for weight)")
+# ─────────────────────────── model (lazy) ─────────────────────────
+_SEG_MODEL: Any | None = None
+_SEG_ERROR: Optional[Exception] = None
+
+
+def _get_segmenter() -> Any | None:
+    global _SEG_MODEL, _SEG_ERROR
+    if _SEG_MODEL is not None:
+        return _SEG_MODEL
+    if _SEG_ERROR is not None:
+        return None
+    try:
+        from .model_registry import load_segmenter
+
+        _SEG_MODEL = load_segmenter()
+        _dbg("heatmap segmenter ready (see registry log for weight)")
+    except Exception as exc:  # pragma: no cover - weights genuinely unavailable
+        _SEG_ERROR = exc
+        _LOG.warning(
+            "heatmap segmenter unavailable; falling back to bounding boxes (%s)",
+            exc,
+        )
+        _SEG_MODEL = None
+    return _SEG_MODEL
+
 
 __all__ = ["heatmap_overlay"]
+
+_CV2: Any | bool | None = None
+
+
+def _get_cv2() -> Any | None:
+    global _CV2
+    if _CV2 is False:
+        return None
+    if _CV2 is not None:
+        return cast(Any, _CV2)
+    try:  # pragma: no cover - exercised when OpenCV available
+        import cv2 as _cv2  # type: ignore
+    except Exception:  # pragma: no cover
+        _CV2 = False
+        return None
+    _CV2 = _cv2
+    return _cv2
 
 # ---------------------------------------------------------------------- #
 # helper - normalise *img* into a BGR ndarray we can paint on            #
@@ -69,6 +107,18 @@ def _to_bgr(img: Image.Image | np.ndarray[Any, Any] | str | Path | tuple[int, in
         w, h = img
         return np.zeros((h, w, 3), np.uint8)
     raise TypeError(f"Unsupported image type: {type(img)}")
+
+
+def _resize_mask(mask: NDArray[np.float32], width: int, height: int, cv2_mod: Any | None) -> NDArray[np.float32]:
+    if cv2_mod is not None:
+        return np.asarray(
+            cv2_mod.resize(mask, (width, height), interpolation=cv2_mod.INTER_NEAREST), dtype=np.float32
+        )
+    # Pillow fallback – convert to 8-bit for resize, then normalise back to [0, 1]
+    scaled = np.clip(mask, 0.0, 1.0)
+    pil_mask = Image.fromarray((scaled * 255.0).astype(np.uint8), mode="L")
+    resized = pil_mask.resize((width, height), Image.NEAREST)
+    return np.asarray(resized, dtype=np.float32) / 255.0
 
 
 # ---------------------------------------------------------------------- #
@@ -92,6 +142,7 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
     """
     bgr: NDArray[np.uint8] = _to_bgr(img)
     h, w = bgr.shape[:2]
+    cv2_mod = _get_cv2()
 
     # progress wiring (best‑effort; **disabled** unless user opts in)
     eng: Optional[ProgressLike]
@@ -110,12 +161,18 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
             eng.set_current("segment")
 
         # ─────────────────────── SEGMENTATION PATH ────────────────────────
-        try:
-            res: Any = _seg_model.predict(bgr, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
-            mdat: Optional[Any] = getattr(getattr(res if isinstance(res, object) else None, "masks", None), "data", None)
-        except Exception:
-            res = None
-            mdat = None
+        seg_model = _get_segmenter()
+        res: Optional[Any] = None
+        mdat: Optional[Any] = None
+        if seg_model is not None:
+            try:
+                res = seg_model.predict(bgr, imgsz=640, conf=0.25, verbose=False)[0]  # type: ignore[index]
+                mdat = getattr(getattr(res if isinstance(res, object) else None, "masks", None), "data", None)
+            except Exception:
+                res = None
+                mdat = None
+        else:
+            _dbg("segmenter unavailable; using fallback")
 
         if mdat is not None and res is not None:
             if eng is not None:
@@ -133,7 +190,7 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
                 masks_np = np.asarray(mdat, dtype=np.float32)
 
             overlay: NDArray[np.float32] = bgr.astype(np.float32)
-            names_obj: object = getattr(_seg_model, "names", {})
+            names_obj: object = getattr(seg_model, "names", {})
             # Ultralytics may provide a dict[int,str] or list[str]; normalise with safe typing
             if isinstance(names_obj, Mapping):
                 names_map = cast(Mapping[Union[int, str], object], names_obj)
@@ -159,7 +216,7 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
             for idx, m_raw in enumerate(masks_np):
                 m: NDArray[np.float32] = cast(NDArray[np.float32], m_raw)
                 if m.shape != (h, w):
-                    m = np.asarray(cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST), dtype=np.float32)
+                    m = _resize_mask(m, w, h, cv2_mod)
 
                 mask_bool: NDArray[np.bool_] = m >= 0.5
 
@@ -190,12 +247,43 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
                         xyxy = np.asarray(xyxy, dtype=float).reshape(-1)
                         text: str = f"{_name_for(cls_id)} {conf:.2f}"
 
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        (tw, th), _ = cv2.getTextSize(text, font, 0.5, 1)  # type: ignore[arg-type]
                         x1: int = int(xyxy[0])
-                        y1: int = max(0, int(xyxy[1]) - int(th) - 4)
-                        cv2.rectangle(overlay, (x1, y1), (x1 + int(tw) + 2, y1 + int(th) + 4), colour_u8, -1)
-                        cv2.putText(overlay, text, (x1 + 1, y1 + int(th) + 2), font, 0.5, (255, 255, 255), 1)
+                        y1: int = max(0, int(xyxy[1]) - 12)
+                        if cv2_mod is not None:
+                            font = cv2_mod.FONT_HERSHEY_SIMPLEX  # type: ignore[attr-defined]
+                            (tw, th), _ = cv2_mod.getTextSize(text, font, 0.5, 1)  # type: ignore[arg-type]
+                            y1 = max(0, int(xyxy[1]) - int(th) - 4)
+                            cv2_mod.rectangle(
+                                overlay, (x1, y1), (x1 + int(tw) + 2, y1 + int(th) + 4), colour_u8, -1
+                            )
+                            cv2_mod.putText(
+                                overlay,
+                                text,
+                                (x1 + 1, y1 + int(th) + 2),
+                                font,
+                                0.5,
+                                (255, 255, 255),
+                                1,
+                            )
+                        else:
+                            try:
+                                overlay_rgb = Image.fromarray(overlay.astype(np.uint8)[:, :, ::-1])
+                                draw = ImageDraw.Draw(overlay_rgb, "RGBA")
+                                font = ImageFont.load_default()
+                                try:
+                                    bbox = draw.textbbox((0, 0), text, font=font)
+                                    tw = bbox[2] - bbox[0]
+                                    th = bbox[3] - bbox[1]
+                                except Exception:  # pragma: no cover - textbbox not everywhere
+                                    tw, th = draw.textsize(text, font=font)
+                                y1 = max(0, int(xyxy[1]) - int(th) - 4)
+                                rect_coords = (x1, y1, x1 + int(tw) + 2, y1 + int(th) + 4)
+                                rgb_col = (colour_u8[2], colour_u8[1], colour_u8[0], 255)
+                                draw.rectangle(rect_coords, fill=rgb_col)
+                                draw.text((x1 + 1, y1 + 1), text, fill=(255, 255, 255), font=font)
+                                overlay = np.asarray(overlay_rgb)[:, :, ::-1].astype(np.float32)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 

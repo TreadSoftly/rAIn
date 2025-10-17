@@ -4,36 +4,31 @@ import contextlib
 import functools
 import importlib
 import logging
-import sys
+import time
 from pathlib import Path
 from typing import Final, Optional, Union
+
+from .logging_config import bind_context
 
 # ────────────────────────────────────────────────────────────────
 #  Logging (explicit, human-friendly, no stack noise)
 # ────────────────────────────────────────────────────────────────
-_LOG = logging.getLogger("panoptes.model_registry")
-if not _LOG.handlers:
-    _h = logging.StreamHandler(sys.stderr)
-    _h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(_h)
-_LOG.setLevel(logging.WARNING)
+# — Logging helpers
+LOGGER = logging.getLogger(__name__)
 
-
-def _say(msg: str) -> None:
-    _LOG.info(f"[panoptes] {msg}")
-
+def _log(event: str, **info: object) -> None:
+    if info:
+        detail = ' '.join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        LOGGER.info("%s %s", event, detail)
+    else:
+        LOGGER.info("%s", event)
 
 def set_log_level(level: int) -> None:
-    """Set registry logger level (e.g., logging.INFO for verbose)."""
-    _LOG.setLevel(level)
-
+    LOGGER.setLevel(level)
 
 def set_verbose(enabled: bool = True) -> None:
-    """Convenience: True -> INFO, False -> WARNING."""
     set_log_level(logging.INFO if enabled else logging.WARNING)
 
-
-# ────────────────────────────────────────────────────────────────
 #  Model folder(s)
 # ────────────────────────────────────────────────────────────────
 _ROOT: Final[Path] = Path(__file__).resolve().parent            # …/panoptes
@@ -218,16 +213,66 @@ def _load(
     """
     yolo_cls = _resolve_yolo_class()
     if yolo_cls is None or weight is None:
+        if weight is None:
+            _log("weights.load.skip", task=task, reason="weight-missing")
+        else:
+            _log("weights.load.skip", task=task, reason="ultralytics-missing")
         return None
 
-    _say(f"init YOLO: task={task} path={weight}")
-
-    with contextlib.nullcontext():
+    weight_str = str(weight)
+    with bind_context(model_task=task, weight_path=weight_str):
+        start = time.perf_counter()
         try:
-            return yolo_cls(str(weight), task=task)  # type: ignore[call-arg]
-        except TypeError:
-            # Some releases don't accept task=...
-            return yolo_cls(str(weight))            # type: ignore[call-arg]
+            _log("weights.load.start", task=task, weight=weight_str)
+            with contextlib.nullcontext():
+                try:
+                    model = yolo_cls(str(weight), task=task)  # type: ignore[call-arg]
+                except TypeError:
+                    model = yolo_cls(str(weight))  # type: ignore[call-arg]
+        except Exception:
+            _log("weights.load.error", task=task, weight=weight_str)
+            raise
+        else:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            runtime = getattr(model, "task", task)
+            model_type = type(model).__name__
+            provider = None
+            try:
+                predictor = getattr(model, "predictor", None)
+                provider = getattr(predictor, "provider", None)
+                if provider is None:
+                    providers = getattr(predictor, "providers", None)
+                    if providers:
+                        provider = ",".join(map(str, providers))
+            except Exception:
+                provider = None
+            device = None
+            for attr in ("device", "model"):
+                candidate = getattr(model, attr, None)
+                device_attr = getattr(candidate, "device", None)
+                if device_attr is not None:
+                    try:
+                        device = str(device_attr)
+                        break
+                    except Exception:
+                        continue
+                if attr == "device" and candidate is not None:
+                    try:
+                        device = str(candidate)
+                        break
+                    except Exception:
+                        continue
+            _log(
+                "weights.load.success",
+                task=task,
+                weight=weight_str,
+                runtime=runtime,
+                model=model_type,
+                provider=provider,
+                device=device,
+                ms=f"{elapsed_ms:.1f}",
+            )
+            return model
 
 
 def _require(model: Optional[object], task: str) -> object:
@@ -249,11 +294,17 @@ def pick_weight(task: str, *, small: bool = False) -> Optional[Path]:
     """
     if small:
         pref = WEIGHT_PRIORITY.get(f"{task}_small", [])
-        chosen = _first_existing(pref)
-        if chosen is not None:
-            return chosen
+        chosen_small = _first_existing(pref)
+        if chosen_small is not None:
+            _log("weights.pick", task=task, small=small, weight=str(chosen_small))
+            return chosen_small
     paths = WEIGHT_PRIORITY.get(task, [])
-    return _first_existing(paths)
+    chosen = _first_existing(paths)
+    if chosen is None:
+        _log("weights.pick.missing", task=task, small=small)
+    else:
+        _log("weights.pick", task=task, small=small, weight=str(chosen))
+    return chosen
 
 
 def _choose(task: str, *, small: bool, override: Optional[Union[str, Path]]) -> Optional[Path]:
@@ -264,35 +315,40 @@ def _choose(task: str, *, small: bool, override: Optional[Union[str, Path]]) -> 
 
 def load_detector(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
     chosen = _choose("detect", small=small, override=override)
-    _say(f"task=detect small={small} {'override' if override else 'weight'}={chosen}")
+    choice = "override" if override is not None else ("auto-small" if small else "auto")
+    _log("weights.select", task="detect", source=choice, weight=(str(chosen) if chosen else None))
     model = _load(chosen, task="detect")
     return _require(model, "detect")
 
 
 def load_segmenter(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
     chosen = _choose("heatmap", small=small, override=override)
-    _say(f"task=heatmap small={small} {'override' if override else 'weight'}={chosen}")
+    choice = "override" if override is not None else ("auto-small" if small else "auto")
+    _log("weights.select", task="heatmap", source=choice, weight=(str(chosen) if chosen else None))
     model = _load(chosen, task="segment")
     return _require(model, "heatmap")
 
 
 def load_classifier(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
     chosen = _choose("classify", small=small, override=override)
-    _say(f"task=classify small={small} {'override' if override else 'weight'}={chosen}")
+    choice = "override" if override is not None else ("auto-small" if small else "auto")
+    _log("weights.select", task="classify", source=choice, weight=(str(chosen) if chosen else None))
     model = _load(chosen, task="classify")
     return _require(model, "classify")
 
 
 def load_pose(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
     chosen = _choose("pose", small=small, override=override)
-    _say(f"task=pose small={small} {'override' if override else 'weight'}={chosen}")
+    choice = "override" if override is not None else ("auto-small" if small else "auto")
+    _log("weights.select", task="pose", source=choice, weight=(str(chosen) if chosen else None))
     model = _load(chosen, task="pose")
     return _require(model, "pose")
 
 
 def load_obb(*, small: bool = False, override: Optional[Union[str, Path]] = None) -> object:
     chosen = _choose("obb", small=small, override=override)
-    _say(f"task=obb small={small} {'override' if override else 'weight'}={chosen}")
+    choice = "override" if override is not None else ("auto-small" if small else "auto")
+    _log("weights.select", task="obb", source=choice, weight=(str(chosen) if chosen else None))
     model = _load(chosen, task="obb")
     return _require(model, "obb")
 

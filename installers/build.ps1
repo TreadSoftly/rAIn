@@ -191,7 +191,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 
 # --- Bootstrap venv (ensure) ---
 $scriptPath = Join-Path $ROOT 'projects\argos\bootstrap.py'
-& $script:pyExe @script:pyArgs $scriptPath --ensure --yes
+& $script:pyExe @script:pyArgs $scriptPath --ensure --yes --reinstall --with-dev --extras audio
 if ($LASTEXITCODE -ne 0) { throw "bootstrap failed ($LASTEXITCODE)" }
 
 # --- Resolve venv Python ---
@@ -207,4 +207,19 @@ Remove-Item Env:ARGOS_SKIP_WEIGHTS -ErrorAction SilentlyContinue
 
 # --- Launch the *model selector* (user picks pack, fetches, exports, THEN smoke check prompts once) ---
 & $vpy -m panoptes.model._fetch_models @BuildArgs
-if ($LASTEXITCODE -ne 0) { throw "model selector failed ($LASTEXITCODE)" }
+$buildExit = $LASTEXITCODE
+if ($buildExit -eq 0) {
+  & $vpy -m compileall (Join-Path $ROOT 'projects\argos')
+  if ($LASTEXITCODE -ne 0) { throw "compileall failed ($LASTEXITCODE)" }
+  exit 0
+}
+
+# Typer Exit with code 1 means the user chose "Exit" from the selector; treat as success.
+if ($buildExit -eq 1) { exit 0 }
+
+exit $buildExit
+
+# --- Compile all project sources to validate syntax ---
+$compileTarget = Join-Path $ROOT 'projects\argos'
+& $vpy -m compileall $compileTarget
+if ($LASTEXITCODE -ne 0) { throw "compileall failed ($LASTEXITCODE)" }

@@ -11,6 +11,7 @@ path so callers that expect that exact filename still find a non-empty file.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from typing import Optional, Protocol, cast
@@ -36,6 +37,18 @@ except Exception:
     _np = None  # type: ignore
 
 from ._types import NDArrayU8
+from panoptes.logging_config import bind_context
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _log(event: str, **info: object) -> None:
+    if info:
+        detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        LOGGER.info("%s %s", event, detail)
+    else:
+        LOGGER.info(event)
 
 
 class _VideoWriterLike(Protocol):
@@ -72,6 +85,7 @@ class DisplaySink:
         # Defer backend decision until first frame (lets us catch HighGUI errors)
         if not self._forced_headless:
             self._backend = "cv2" if cv2 is not None else "none"
+        _log("live.display.init", backend=self._backend, headless=self._forced_headless)
 
     # ----------------- public API -----------------
 
@@ -171,6 +185,7 @@ class DisplaySink:
         except Exception:
             # Most common path: opencv-python-headless → imshow not implemented
             self._backend = "tk"
+            _log("live.display.fallback", backend="tk", reason="cv2-imshow-failed")
             self._init_tk_fallback()
 
     def _init_tk_fallback(self) -> None:
@@ -192,6 +207,7 @@ class DisplaySink:
             self._tk_label = tk.Label(self._tk_root)
             self._tk_label.pack()
             self._tk_alive = True
+            _log("live.display.backend", backend="tk")
         except Exception:
             # Could not init Tk either → give up
             self._backend = "none"
@@ -199,6 +215,7 @@ class DisplaySink:
             self._tk_root = None
             self._tk_label = None
             self._tk_alive = False
+            _log("live.display.fallback", backend="none", reason="tk-init-failed")
 
     def _on_tk_close(self) -> None:
         self._tk_alive = False
@@ -247,6 +264,7 @@ class VideoSink:
         self.path = path
         self.size = (int(size[0]), int(size[1]))
         self.fps = float(max(1.0, fps))
+        _log("live.sink.video.init", path=self.path, size=f"{self.size[0]}x{self.size[1]}", fps=self.fps)
         self._writer: Optional[_VideoWriterLike] = None
         self._actual_path: str = path  # may differ when AVI fallback is used
 
@@ -263,11 +281,13 @@ class VideoSink:
                     # Try MP4 codecs on the requested path
                     for name in ("mp4v", "avc1", "H264", "X264"):
                         try:
+                            _log("live.sink.video.try", path=self.path, codec=name)
                             fourcc = int(getattr(cv2, "VideoWriter_fourcc")(*name))  # type: ignore[attr-defined]
                             wr = cv2.VideoWriter(self.path, fourcc, self.fps, self.size)  # type: ignore[call-arg]
                             if wr.isOpened():
                                 self._writer = cast(_VideoWriterLike, wr)
                                 self._actual_path = self.path
+                                _log("live.sink.video.opened", path=self._actual_path, codec=name)
                                 break
                         except Exception:
                             pass
@@ -280,6 +300,7 @@ class VideoSink:
                             if wr2.isOpened():
                                 self._writer = cast(_VideoWriterLike, wr2)
                                 self._actual_path = self.path
+                                _log("live.sink.video.opened", path=self._actual_path, codec="MJPG")
                         except Exception:
                             pass
 
@@ -303,10 +324,14 @@ class VideoSink:
                                     pass
                                 self._writer = cast(_VideoWriterLike, wr3)
                                 self._actual_path = avi_path
+                                _log("live.sink.video.fallback", path=avi_path, codec="MJPG", target=self.path)
                         except Exception:
                             pass
                 except Exception:
                     self._writer = None
+
+        else:
+            _log("live.sink.video.disabled", path=self.path, reason="opencv-missing")
 
     @property
     def opened(self) -> bool:
@@ -352,6 +377,12 @@ class VideoSink:
                         f.write(b"\x00")  # ensure >0 bytes
         except Exception:
             pass
+
+        try:
+            final_size = os.path.getsize(self.path) if os.path.exists(self.path) else None
+        except Exception:
+            final_size = None
+        _log("live.sink.video.closed", path=self.path, actual_path=self._actual_path, size=final_size)
 
 
 class MultiSink:

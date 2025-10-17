@@ -119,10 +119,10 @@ def _compute_results_dir() -> Path:
     # 3) Argos repo root → tests/results
     root = _detect_argos_root()
     if root:
-        return (root / "tests" / "results").resolve()
+        return (root / "tests" / "results" / "logs").resolve()
 
     # 4) Per-user fallback under data dir
-    return (_platform_data_dir() / "tests" / "results").resolve()
+    return (_platform_data_dir() / "tests" / "results" / "logs").resolve()
 
 
 def _compute_log_path() -> Path:
@@ -141,7 +141,14 @@ def _compute_log_path() -> Path:
     res_dir = _compute_results_dir()
     try:
         res_dir.mkdir(parents=True, exist_ok=True)
-        return res_dir / "argos_diagnostics.log"
+        target = res_dir / "argos_diagnostics.log"
+        legacy = res_dir.parent / "argos_diagnostics.log"
+        if legacy.exists() and legacy != target:
+            try:
+                legacy.unlink()
+            except Exception:
+                pass
+        return target
     except Exception:
         # Ultimate fallback: system temp dir
         tmp = Path(tempfile.gettempdir())
@@ -302,11 +309,13 @@ def _log_env_snapshot() -> None:
             import cv2  # type: ignore
             _say("OPENCV", f"cv2.__version__={getattr(cv2, '__version__', '?')}")
             try:
-                info = cv2.getBuildInformation()
-                ffm = "UNKNOWN"
-                gst = "UNKNOWN"
+                # Make Pyright/mypy happy: cv2 has no stubs; treat as Any and coerce to str
+                cv2_any = cast(Any, cv2)
+                info: str = str(cv2_any.getBuildInformation())
+                ffm: str = "UNKNOWN"
+                gst: str = "UNKNOWN"
                 for ln in info.splitlines():
-                    t = ln.strip()
+                    t: str = ln.strip()
                     if t.startswith("FFMPEG:"):
                         ffm = t.split(":", 1)[1].strip()
                     if t.startswith("GStreamer:"):

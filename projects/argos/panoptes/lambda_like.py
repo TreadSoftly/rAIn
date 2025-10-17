@@ -47,8 +47,30 @@ except ImportError:                # pragma: no cover
     _has_yolo = False
 
 # Preload primary models once (respecting the central registry)
-_det_model: Any = load_detector(small=False)
-_seg_model: Any = load_segmenter(small=True)
+def _safe_load(
+    loader,
+    *,
+    task: str,
+    small: Optional[bool] = None,
+    override: Optional[Union[str, Path]] = None,
+    fallback: Any = None,
+) -> Any:
+    try:
+        kwargs: dict[str, Any] = {}
+        if small is not None:
+            kwargs["small"] = small
+        if override is not None:
+            kwargs["override"] = override
+        model = loader(**kwargs)
+        _say(f"loaded {task} model ({'small' if small else 'full'})")
+        return model
+    except Exception as exc:  # pragma: no cover - weight genuinely absent
+        _LOG.warning("model load failed for %s: %s", task, exc)
+        return fallback
+
+
+_det_model: Any | None = _safe_load(load_detector, task="detect", small=False)
+_seg_model: Any | None = _safe_load(load_segmenter, task="heatmap", small=True)
 
 
 def reinit_models(
@@ -64,11 +86,19 @@ def reinit_models(
     """
     global _det_model, _seg_model
     if detect_small is not None or det_override is not None:
-        _det_model = load_detector(small=bool(detect_small), override=det_override)
-        _say(f"reinit detector small={bool(detect_small)}")
+        _det_model = _safe_load(
+            load_detector,
+            task="detect",
+            small=detect_small,
+            override=det_override,
+        )
     if segment_small is not None or seg_override is not None:
-        _seg_model = load_segmenter(small=bool(segment_small), override=seg_override)
-        _say(f"reinit segmenter small={bool(segment_small)}")
+        _seg_model = _safe_load(
+            load_segmenter,
+            task="heatmap",
+            small=segment_small,
+            override=seg_override,
+        )
     return _det_model, _seg_model
 
 
@@ -82,7 +112,7 @@ def run_inference(
     Run detection using the preloaded detector. This function never opens
     its own progress UI and remains silent except for explicit logging.
     """
-    if not _has_yolo:
+    if not _has_yolo or _det_model is None:
         raise RuntimeError("Ultralytics YOLO is not installed in this environment.")
     res_list = _det_model.predict(img, imgsz=640, conf=conf_thr, verbose=False)  # type: ignore
     if not res_list:

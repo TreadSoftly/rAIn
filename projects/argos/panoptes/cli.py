@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 try:
-    # Python 3.11+ — already present
+    # Python 3.11+ - already present
     from typing import Self as _ArgosTypingSelf  # type: ignore
 except Exception:
     try:
@@ -14,9 +14,9 @@ except Exception:
     setattr(_argos_typing_mod, "Self", _ArgosTypingSelf)
 
 import fnmatch
+import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,6 +28,21 @@ from types import TracebackType
 from typing import Any, Callable, Final, Iterable, Iterator, List, Literal, Optional, Protocol, cast
 
 import typer
+
+from panoptes.logging_config import bind_context, current_run_dir, setup_logging
+from .ffmpeg_utils import resolve_ffmpeg
+from .support_bundle import write_support_bundle
+
+setup_logging()
+LOGGER = logging.getLogger(__name__)
+
+
+def _log_event(event: str, **info: object) -> None:
+    if info:
+        detail = ' '.join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        LOGGER.info("%s %s", event, detail)
+    else:
+        LOGGER.info("%s", event)
 
 # Diagnostics (always attach; best-effort — never crash if missing)
 try:
@@ -163,38 +178,6 @@ def _register_media_plugins(*, verbose_flag: bool) -> None:
     except Exception as exc:
         _log_media(f"HEIF/HEIC plugin not available: {exc!s}", verbose_flag=verbose_flag)
 
-def _find_ffmpeg_exe(*, verbose_flag: bool) -> Optional[str]:
-    """
-    Resolve an ffmpeg executable.
-    Order:
-      1) FFMPEG_BINARY env var
-      2) 'ffmpeg' on PATH
-      3) imageio-ffmpeg bundled binary
-    """
-    env = os.environ.get("FFMPEG_BINARY", "").strip()
-    if env:
-        _log_media(f"FFmpeg from FFMPEG_BINARY={env}", verbose_flag=verbose_flag)
-        return env
-
-    exe = shutil.which("ffmpeg")
-    if exe:
-        _log_media(f"FFmpeg found on PATH: {exe}", verbose_flag=verbose_flag)
-        return exe
-
-    try:
-        import imageio_ffmpeg  # type: ignore
-        raw = imageio_ffmpeg.get_ffmpeg_exe()  # type: ignore[attr-defined]
-        exe2: Optional[str]
-        exe2 = raw if isinstance(raw, str) else None
-        if exe2 and Path(exe2).exists():
-            _log_media(f"FFmpeg via imageio-ffmpeg: {exe2}", verbose_flag=verbose_flag)
-            return exe2
-    except Exception as exc:
-        _log_media(f"imageio-ffmpeg not usable: {exc!s}", verbose_flag=verbose_flag)
-
-    _log_media("FFmpeg not found", verbose_flag=verbose_flag)
-    return None
-
 def _pil_can_open(path: Path) -> bool:
     try:
         from PIL import Image as _PILImage  # type: ignore
@@ -223,10 +206,11 @@ def _maybe_transcode_to_png_if_unreadable(src: str, *, verbose_flag: bool) -> st
             _log_media(f"{p.name}: Pillow can decode; no transcode", verbose_flag=verbose_flag)
             return src
 
-        ff = _find_ffmpeg_exe(verbose_flag=verbose_flag)
+        ff, ff_source = resolve_ffmpeg()
         if not ff:
             _log_media(f"{p.name}: not decodable; FFmpeg unavailable → proceed with original (may fail)", verbose_flag=verbose_flag)
             return src
+        _log_media(f"{p.name}: using FFmpeg ({ff_source}) for transcoding ({ff})", verbose_flag=verbose_flag)
 
         cache_dir = Path(tempfile.gettempdir()) / "argos_media_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -817,6 +801,9 @@ def _maybe_spinner(prefix: str, *, final_newline: bool = True) -> Iterator[Spinn
         raise typer.Exit(2)
 
     stream = getattr(sys, "__stderr__", sys.stdout)  # keep progress visible even with stdout redirection
+    prev_tail = os.environ.get("PANOPTES_PROGRESS_TAIL")
+    if prev_tail is None or prev_tail.strip().lower() == "none":
+        os.environ["PANOPTES_PROGRESS_TAIL"] = "full"
     sp: SpinnerLike = _spinner_factory(prefix=prefix, stream=stream, final_newline=final_newline)  # type: ignore[call-arg]
 
     # Guard against nested/local spinners
@@ -830,6 +817,10 @@ def _maybe_spinner(prefix: str, *, final_newline: bool = True) -> Iterator[Spinn
             os.environ.pop("PANOPTES_PROGRESS_ACTIVE", None)
         else:
             os.environ["PANOPTES_PROGRESS_ACTIVE"] = prev_env
+        if prev_tail is None:
+            os.environ.pop("PANOPTES_PROGRESS_TAIL", None)
+        else:
+            os.environ["PANOPTES_PROGRESS_TAIL"] = prev_tail
 
 # ────────────────────────────────────────────────────────────
 #  lightweight wrappers for lazy imports
@@ -891,6 +882,16 @@ class _JobAwareProxy:
     def __init__(self, spinner: SpinnerLike) -> None:
         self._sp = spinner
 
+    @staticmethod
+    def _pop_int(kw: dict[str, Any], key: str) -> int | None:
+        if key not in kw:
+            return None
+        try:
+            return int(kw.pop(key))
+        except Exception:
+            kw.pop(key, None)
+            return None
+
     def update(self, **kw: Any) -> "_JobAwareProxy":
         # Map legacy 'current' to 'job'
         cur = kw.pop("current", None)
@@ -937,6 +938,26 @@ class _JobAwareProxy:
                     val = kw.pop(k)
                     kw["model"] = Path(val).name if k != "model" else str(val)
                     break
+
+        nested_total = self._pop_int(kw, "total")
+        nested_count = self._pop_int(kw, "count")
+        if nested_total is None:
+            nested_total = self._pop_int(kw, "progress_total")
+        if nested_count is None:
+            nested_count = self._pop_int(kw, "progress_count")
+
+        if (nested_total is not None) or (nested_count is not None):
+            job_val = kw.get("job")
+            if isinstance(job_val, str) and job_val:
+                if (nested_total is not None) and (nested_count is not None) and ("/" not in job_val):
+                    kw["job"] = f"{job_val} ({nested_count}/{nested_total})"
+            elif (nested_total is not None) or (nested_count is not None):
+                left = "?" if nested_count is None else str(nested_count)
+                right = "?" if nested_total is None else str(nested_total)
+                kw["job"] = f"{left}/{right}"
+
+        if not kw:
+            return self
 
         self._sp.update(**kw)
         return self
@@ -1036,6 +1057,7 @@ def target(  # noqa: C901
     out_dir: Optional[Path] = typer.Option(None, "--out-dir", help="Write image overlay outputs to this directory (defaults to tests/results)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Chatty logs (disables single-line-only mode)"),
     quiet: bool = typer.Option(True, "--quiet", "-q", help="Single-line progress only (default)"),
+    support_bundle: bool = typer.Option(False, "--support-bundle", help="Write a support bundle zip for this run"),
 ) -> None:
     """Batch-process images / videos with zero manual weight fiddling."""
 
@@ -1123,6 +1145,8 @@ def target(  # noqa: C901
 
     # normalize/resolve (supports ALL/globs)
     norm_inputs = _expand_tokens(positional, task_final)
+    with bind_context(cli_task=task_final, mode="offline", small=small, dry_run=dry_run or None, out_dir=(str(out_dir) if out_dir else None)):
+        _log_event("cli.run.start", task=task_final, inputs=len(norm_inputs), small=small, dry_run=dry_run or None, out_dir=(str(out_dir) if out_dir else None))
 
     if not norm_inputs:
         typer.secho("[bold red]  no usable inputs found", err=True)
@@ -1145,6 +1169,8 @@ def target(  # noqa: C901
                 typer.echo(f"  url:     {item}")
             else:
                 typer.echo(f"  image:   {item}")
+        with bind_context(cli_task=task_final, mode="offline", small=small, dry_run=True):
+            _log_event("cli.run.dry", task=task_final, inputs=len(norm_inputs), sample=",".join(to_show[:3]))
         raise typer.Exit(0)
 
     # ── Heavy stuff starts here ──
@@ -1181,6 +1207,7 @@ def target(  # noqa: C901
     produced: list[Path] = []         # all outputs from this run
     per_input_outs: dict[str, list[Path]] = {}  # optional grouping
     printed_json = False              # if True, suppress trailing summary on stdout
+    bundle_path: Optional[Path] = None
 
     prefix = task_final.upper()
     with _maybe_spinner(prefix=f"ARGOS {prefix}", final_newline=True) as sp:
@@ -1190,6 +1217,9 @@ def target(  # noqa: C901
         for item in norm_inputs:
             low = item.lower()
             label = ("URL" if _is_url(item) else Path(item).name)
+            media_kind = "video" if low.endswith(tuple(_VIDEO_EXTS)) else ("url" if _is_url(item) else "image")
+            with bind_context(cli_task=task_final, input=item, kind=media_kind):
+                _log_event("cli.item.start", input=item, kind=media_kind)
             sp.update(item=label)  # pin FILE explicitly so child 'current' can become JOB via proxy
 
             # snapshot results so we can diff per item (cover both default and custom out dirs)
@@ -1217,6 +1247,9 @@ def target(  # noqa: C901
                     weight = Path(obb_override) if obb_override is not None else None
                 else:
                     weight = None
+
+                with bind_context(cli_task=task_final, input=item, kind="video", weight=(str(weight) if weight else None)):
+                    _log_event("cli.video.config", input=item, weight=(str(weight) if weight else None), small=small, task=task_final)
 
                 if not quiet:
                     typer.secho(
@@ -1389,6 +1422,8 @@ def target(  # noqa: C901
 
                 produced.extend(outs)
                 per_input_outs[label] = outs
+                with bind_context(cli_task=task_final, input=item):
+                    _log_event("cli.item.outputs", input=item, count=len(outs), outputs=",".join(p.name for p in outs) if outs else None)
 
                 done += 1
                 sp.update(count=done)
@@ -1396,6 +1431,9 @@ def target(  # noqa: C901
 
             typer.secho(f"[bold red] unsupported input: {item}", err=True)
             raise typer.Exit(2)
+
+        with bind_context(cli_task=task_final, mode="offline", small=small, dry_run=dry_run or None, out_dir=(str(out_dir) if out_dir else None)):
+            _log_event("cli.run.complete", task=task_final, produced=len(produced), inputs=len(norm_inputs))
 
     # ── Final summary with clickable file names ──────────────────────────────
     # If we already printed GeoJSON to stdout (URL case), do NOT print any summary text.
@@ -1412,6 +1450,14 @@ def target(  # noqa: C901
             typer.echo("")  # spacer
             typer.echo("No new result files were detected.")
 
+    if support_bundle and bundle_path is None:
+        try:
+            bundle_path = write_support_bundle(extra_paths=produced)
+        except Exception as exc:
+            typer.secho(f"[bold red] failed to create support bundle: {exc}", err=True)
+    if bundle_path:
+        typer.echo(f"Support bundle written: {bundle_path}")
+
 # ────────────────────────────────────────────────────────────
 #  entry-point glue
 # ────────────────────────────────────────────────────────────
@@ -1422,6 +1468,7 @@ def main() -> None:  # pragma: no cover
     try:
         app()
     except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("cli.run.error", exc_info=True)
         typer.echo(f"[bold red]Unhandled error: {exc}", err=True)
         sys.exit(1)
 

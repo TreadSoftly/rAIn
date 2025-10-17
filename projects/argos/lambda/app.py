@@ -42,8 +42,9 @@ import logging
 import os
 import urllib.request
 import uuid
+import time
 from types import TracebackType
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Sequence, Optional
 
 # ── third-party ────────────────────────────────────────────────────────
 import boto3  # type: ignore
@@ -58,6 +59,7 @@ from .heatmap import heatmap_overlay  # type: ignore
 from panoptes.model_registry import (  # type: ignore
     load_detector,  # single source-of-truth
 )
+from panoptes.logging_config import bind_context, setup_logging
 
 # If present, GeoJSON sink (kept as in original)
 from .geo_sink import to_geojson  # type: ignore
@@ -73,33 +75,16 @@ except Exception:  # pragma: no cover
     simple_status = None  # type: ignore
 
 # ───────────────────────── logging ────────────────────────────────────
-_LOG = logging.getLogger("panoptes.lambda.app")
-if not _LOG.handlers:
-    import sys
-
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(h)
-_LOG.setLevel(logging.INFO)
+setup_logging()
+LOGGER = logging.getLogger(__name__)
 
 
-def _say(msg: str) -> None:
-    _LOG.info(f"[panoptes] {msg}")
-
-
-# tiny no-op ctx for when progress is unavailable
-class _Null:
-    def __enter__(self) -> None:  # noqa: D401
-        return None
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> bool:
-        return False
-
+def _log(event: str, **info: object) -> None:
+    if info:
+        detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        LOGGER.info("%s %s", event, detail)
+    else:
+        LOGGER.info(event)
 
 def _lp_ctx(prefix: str):
     if live_percent is not None and ProgressEngine is not None:  # type: ignore
@@ -135,19 +120,32 @@ def _init_detector() -> Any:
     # Prefer small/fast for Lambda cold starts
     with _status_ctx("init detector (small)"):
         try:
+            _log("lambda.model.init.start", small=True)
             m = load_detector(small=True)
-            _say("lambda init: detector small=True")
+            _log("lambda.model.init.success", small=True, model=type(m).__name__)
             return m
         except Exception as e_small:
-            _say(f"lambda init: detector small=True unavailable ({e_small!s}); trying full-size")
+            _log(
+                "lambda.model.init.failure",
+                small=True,
+                error=type(e_small).__name__,
+                message=str(e_small),
+            )
     with _status_ctx("init detector (full)"):
         try:
+            _log("lambda.model.init.start", small=False)
             m = load_detector(small=False)
-            _say("lambda init: detector small=False")
+            _log("lambda.model.init.success", small=False, model=type(m).__name__)
             return m
         except Exception as e_full:
-            _say(f"lambda init: detector full-size unavailable ({e_full!s}); using DummyDetector")
-            return _DummyDetector()
+            _log(
+                "lambda.model.init.failure",
+                small=False,
+                error=type(e_full).__name__,
+                message=str(e_full),
+            )
+    _log("lambda.model.init.dummy", reason="no-weights")
+    return _DummyDetector()
 
 
 # ───────────────────────── model initialisation ───────────────────────
@@ -218,86 +216,169 @@ def _draw_boxes(img: Image.Image, boxes: Sequence[Sequence[Any]]) -> Image.Image
 
 # ───────────────────────── Lambda handler ─────────────────────────────
 def handler(event: Dict[str, Any], _ctx: Any) -> Dict[str, Any]:
-    # coarse request-level progress (safe no-op in Lambda)
-    lp = _lp_ctx("LAMBDA")
-    # try to access engine to set totals if available
-    eng = getattr(lp, "engine", None) if hasattr(lp, "engine") else None  # type: ignore[attr-defined]
+    request_id: str | None = None
+    rc = event.get("requestContext")
+    if isinstance(rc, dict):
+        request_id = rc.get("requestId") or rc.get("request_id")
+    if not request_id:
+        headers = event.get("headers") or {}
+        if isinstance(headers, dict):
+            request_id = (
+                headers.get("x-request-id")
+                or headers.get("x-amzn-trace-id")
+                or headers.get("x-amzn-requestid")
+            )
+    if not request_id:
+        request_id = str(uuid.uuid4())
 
-    with lp:
-        try:
-            if eng:
-                eng.set_total(5.0)
-                eng.set_current("parse body")
-            body = json.loads(event["body"])
-            src = body["image_url"]
-            task = body.get("task", "detect").lower()
-            _say(f"lambda request: task={task}")
+    with bind_context(lambda_request_id=request_id):
+        _log("lambda.request.start")
+        # coarse request-level progress (safe no-op in Lambda)
+        lp = _lp_ctx("LAMBDA")
+        eng = getattr(lp, "engine", None) if hasattr(lp, "engine") else None  # type: ignore[attr-defined]
 
-            # ── GeoJSON only ───────────────────────────────────────────────
-            if task == "geojson":
+        with lp:
+            try:
                 if eng:
-                    eng.set_total(3.0)
-                    eng.set_current("compose geojson")
-                geo = to_geojson(src, None)  # type: ignore[arg-type]
-                geo["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+                    eng.set_total(5.0)
+                    eng.set_current("parse body")
 
-                if eng:
-                    eng.add(1.0, current_item="upload s3")
-                with _status_ctx("s3 put geojson"):
+                body_raw = event.get("body")
+                if body_raw is None:
+                    raise ValueError("missing body")
+                parse_start = time.perf_counter()
+                body = json.loads(body_raw)
+                task = body.get("task", "detect").lower()
+                src = body["image_url"]
+                parse_ms = (time.perf_counter() - parse_start) * 1000.0
+                _log("lambda.phase.parse", task=task, source=src, ms=f"{parse_ms:.1f}")
+
+                # ── GeoJSON only ───────────────────────────────────────────
+                if task == "geojson":
+                    if eng:
+                        eng.set_total(3.0)
+                        eng.set_current("compose geojson")
+                    compose_start = time.perf_counter()
+                    geo = to_geojson(src, None)  # type: ignore[arg-type]
+                    geo["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+                    _log("lambda.phase.geojson.compose", ms=f"{(time.perf_counter() - compose_start) * 1000.0:.1f}")
+
+                    bucket = os.getenv("GEO_BUCKET", "out")
                     key = f"detections/{_dt.date.today()}/{uuid.uuid4()}.geojson"
-                    boto3.client("s3").put_object(  # type: ignore[attr-defined]
-                        Bucket=os.getenv("GEO_BUCKET", "out"),
-                        Key=key,
-                        Body=json.dumps(geo).encode(),
-                        ContentType="application/geo+json",
+                    if eng:
+                        eng.add(1.0, current_item="upload s3")
+                    put_start = time.perf_counter()
+                    with _status_ctx("s3 put geojson"):
+                        boto3.client("s3").put_object(  # type: ignore[attr-defined]
+                            Bucket=bucket,
+                            Key=key,
+                            Body=json.dumps(geo).encode(),
+                            ContentType="application/geo+json",
+                        )
+                    _log(
+                        "lambda.phase.s3.put",
+                        bucket=bucket,
+                        key=key,
+                        ms=f"{(time.perf_counter() - put_start) * 1000.0:.1f}",
                     )
+                    if eng:
+                        eng.add(1.0, current_item="done")
+                    _log("lambda.request.complete", status=201, task=task)
+                    return {"statusCode": 201, "body": json.dumps({"s3_key": key})}
+
+                # ── fetch image ────────────────────────────────────────────
                 if eng:
-                    eng.add(1.0, current_item="done")
-                return {"statusCode": 201, "body": json.dumps({"s3_key": key})}
+                    eng.set_current("fetch image")
+                fetch_start = time.perf_counter()
+                img = _fetch_image(src)
+                fetch_ms = (time.perf_counter() - fetch_start) * 1000.0
+                try:
+                    w, h = img.size  # type: ignore[attr-defined]
+                except Exception:
+                    w = h = None
+                _log("lambda.phase.fetch", ms=f"{fetch_ms:.1f}", width=w, height=h)
 
-            # ── fetch + detect ────────────────────────────────────────────
-            if eng:
-                eng.set_current("fetch image")
-            img = _fetch_image(src)
-
-            if eng:
-                eng.add(1.0, current_item="detect")
-            boxes = run_inference(img)
-
-            # ── heat-map (segmentation overlay) ───────────────────────────
-            if task == "heatmap":
+                # ── inference ──────────────────────────────────────────────
                 if eng:
-                    eng.set_current("render heatmap")
-                # heatmap_overlay returns BGR ndarray; convert → RGB PIL for JPEG
-                bgr = heatmap_overlay(img)
-                rgb = bgr[:, :, ::-1]  # BGR → RGB
+                    eng.add(1.0, current_item="detect")
+                infer_start = time.perf_counter()
+                boxes = run_inference(img)
+                infer_ms = (time.perf_counter() - infer_start) * 1000.0
+                det_count: Optional[int]
+                try:
+                    det_count = int(getattr(boxes, "shape", [0])[0])
+                except Exception:
+                    try:
+                        det_count = len(boxes)  # type: ignore[arg-type]
+                    except Exception:
+                        det_count = None
+                _log("lambda.phase.inference.success", ms=f"{infer_ms:.1f}", detections=det_count, task=task)
+
+                # ── heat-map (segmentation overlay) ───────────────────────
+                if task == "heatmap":
+                    if eng:
+                        eng.set_current("render heatmap")
+                    render_start = time.perf_counter()
+                    # heatmap_overlay returns BGR ndarray; convert → RGB PIL for JPEG
+                    bgr = heatmap_overlay(img)
+                    rgb = bgr[:, :, ::-1]  # BGR → RGB
+                    render_ms = (time.perf_counter() - render_start) * 1000.0
+                    if eng:
+                        eng.add(1.0, current_item="encode")
+                    encode_start = time.perf_counter()
+                    buf = io.BytesIO()
+                    Image.fromarray(rgb).save(buf, format="JPEG")
+                    payload = buf.getvalue()
+                    encode_ms = (time.perf_counter() - encode_start) * 1000.0
+                    _log(
+                        "lambda.phase.encode",
+                        task=task,
+                        render_ms=f"{render_ms:.1f}",
+                        ms=f"{encode_ms:.1f}",
+                        bytes=len(payload),
+                    )
+                    if eng:
+                        eng.add(1.0, current_item="done")
+                    _log("lambda.request.complete", status=200, task=task)
+                    return {
+                        "statusCode": 200,
+                        "body": base64.b64encode(payload).decode(),
+                        "isBase64Encoded": True,
+                    }
+
+                # ── detect (default) ──────────────────────────────────────
+                if eng:
+                    eng.set_current("draw boxes")
+                draw_start = time.perf_counter()
+                out = _draw_boxes(img.copy(), boxes.tolist())
+                draw_ms = (time.perf_counter() - draw_start) * 1000.0
                 if eng:
                     eng.add(1.0, current_item="encode")
+                encode_start = time.perf_counter()
                 buf = io.BytesIO()
-                Image.fromarray(rgb).save(buf, format="JPEG")
+                out.save(buf, format="JPEG")
+                payload = buf.getvalue()
+                encode_ms = (time.perf_counter() - encode_start) * 1000.0
+                _log(
+                    "lambda.phase.encode",
+                    task=task,
+                    render_ms=f"{draw_ms:.1f}",
+                    ms=f"{encode_ms:.1f}",
+                    bytes=len(payload),
+                )
                 if eng:
                     eng.add(1.0, current_item="done")
+                _log("lambda.request.complete", status=200, task=task)
                 return {
                     "statusCode": 200,
-                    "body": base64.b64encode(buf.getvalue()).decode(),
+                    "body": base64.b64encode(payload).decode(),
                     "isBase64Encoded": True,
                 }
 
-            # ── detect (default) ─────────────────────────────────────────
-            if eng:
-                eng.set_current("draw boxes")
-            out = _draw_boxes(img.copy(), boxes.tolist())
-            if eng:
-                eng.add(1.0, current_item="encode")
-            buf = io.BytesIO()
-            out.save(buf, format="JPEG")
-            if eng:
-                eng.add(1.0, current_item="done")
-            return {
-                "statusCode": 200,
-                "body": base64.b64encode(buf.getvalue()).decode(),
-                "isBase64Encoded": True,
-            }
-
-        except Exception as exc:  # pragma: no cover
-            return {"statusCode": 500, "body": str(exc)}
+            except Exception as exc:  # pragma: no cover
+                _log(
+                    "lambda.request.error",
+                    error=type(exc).__name__,
+                    message=str(exc),
+                )
+                return {"statusCode": 500, "body": str(exc)}

@@ -6,6 +6,7 @@ Keeps progress UX similar to other ARGOS tasks and returns the saved path (if an
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Optional, Tuple, Union
 import time
@@ -16,6 +17,7 @@ from .overlay import hud
 from . import tasks as live_tasks
 from . import config as live_config
 from .config import ModelSelection
+from panoptes.logging_config import bind_context
 
 # Live progress spinner (robust fallback)
 try:
@@ -27,6 +29,15 @@ except Exception:  # pragma: no cover
             def __exit__(self, *_: object) -> bool: return False
             def update(self, **__: object): return self
         return _N()
+
+LOGGER = logging.getLogger(__name__)
+
+def _log(event: str, **info: object) -> None:
+    if info:
+        detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        LOGGER.info("%s %s", event, detail)
+    else:
+        LOGGER.info(event)
 
 
 def _results_dir() -> Path:
@@ -85,6 +96,16 @@ class LivePipeline:
         Run the pipeline. Returns path of saved video if a VideoSink was used,
         else None. Press 'q' or 'Esc' in the preview window to exit (when GUI available).
         """
+        with bind_context(live_task=self.task, source=str(self.source)):
+            _log(
+                "live.pipeline.start",
+                task=self.task,
+                source=str(self.source),
+                autosave=self.autosave,
+                out_path=self.out_path,
+                prefer_small=self.prefer_small,
+            )
+
         # Estimate a target frame count if duration is bounded (for % UX)
         est_fps = float(self.fps or 30)
         total_frames = int(max(1.0, (self.duration or 1.0) * est_fps)) if self.duration is not None else 1
@@ -99,7 +120,9 @@ class LivePipeline:
             # Build task / model selection
             task = self._build_task()
             hw = live_config.probe_hardware()
+            _log("live.pipeline.hardware", arch=getattr(hw, "arch", None), gpu=getattr(hw, "gpu", None), ram=getattr(hw, "ram_gb", None))
             sel: ModelSelection = live_config.select_models_for_live(self.task, hw)
+            _log("live.pipeline.models", task=self.task, label=str(sel.get("label", "")))
             model_label = getattr(task, "label", "") or str(sel.get("label", ""))
             sp.update(job="probe", current=hw.arch or "", model=model_label)
 
@@ -149,6 +172,7 @@ class LivePipeline:
                                 w_px = self.size[0] if self.size else 640
                             video = VideoSink(saved_path, (w_px, h_px), float(self.fps or 30))
                         sinks = MultiSink(*(x for x in (display, video) if x is not None))
+                        _log("live.pipeline.sinks", display=bool(display), video_path=saved_path if saved_path else None)
                         sp.update(job="run", current=(Path(saved_path).name if saved_path else "live-only"))
 
                     # Inference → render
@@ -170,15 +194,19 @@ class LivePipeline:
                     # Update spinner count/tail
                     frames_done += 1
                     sp.update(count=frames_done)
+                    if frames_done % max(1, int(self.fps or inst_fps or 30)) == 0:
+                        _log("live.pipeline.fps", frames=frames_done, fps=f"{fps_est:.2f}", inst=f"{inst_fps:.2f}")
 
                     # Quit conditions: duration, window closed, or keypress (q/ESC)
                     if self.duration is not None and (now - t0) >= self.duration:
+                        _log("live.pipeline.stop", reason="duration", frames=frames_done)
                         break
 
                     if display is not None:
                         # If the window was closed in any backend, stop.
                         try:
                             if not display.is_open():
+                                _log("live.pipeline.stop", reason="window-closed", frames=frames_done)
                                 break
                         except Exception:
                             pass
@@ -186,6 +214,7 @@ class LivePipeline:
                         try:
                             key = display.poll_key()
                             if key in (ord("q"), 27):
+                                _log("live.pipeline.stop", reason="user-exit", frames=frames_done)
                                 break
                         except Exception:
                             pass
@@ -214,5 +243,8 @@ class LivePipeline:
                     except Exception:
                         pass
 
+                _log("live.pipeline.cleanup", saved_path=saved_path, frames=frames_done)
+
         # Always return the path if saving was requested (file guards above ensure it exists and is non-empty)
+        _log("live.pipeline.end", saved_path=saved_path)
         return saved_path

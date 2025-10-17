@@ -50,6 +50,7 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
 <div align="center">
 
 ###### NOTE: Once You Run The .\build Or ./build Command You Can Rerun A Regular "build" Command To Get To The Build Selection Process Again.
+###### The build flow also runs `python -m compileall projects/argos` so every source file is syntax-checked automatically during setup.
 
 </div>
 

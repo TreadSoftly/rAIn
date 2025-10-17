@@ -14,10 +14,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, List, Optional, cast
 
-import cv2
 import numpy as np
 import pytest
 from PIL import Image
+
+cv2 = pytest.importorskip("cv2", reason="OpenCV not installed; install opencv-python for video smoke tests")
 
 
 def _repo_root() -> Path:
