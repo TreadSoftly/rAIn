@@ -51,6 +51,11 @@ from typing import (
 
 from panoptes.logging_config import setup_logging
 
+try:
+    from panoptes.model_registry import WEIGHT_PRIORITY as _BOOTSTRAP_WEIGHT_PRIORITY
+except Exception:  # pragma: no cover - bootstrap still works even if registry import fails
+    _BOOTSTRAP_WEIGHT_PRIORITY: dict[str, list[Path]] = {}
+
 # Diagnostics (always try to attach; never crash on failure)
 try:
     import importlib
@@ -495,6 +500,22 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
             "perception": perception_names,
         }[choice]
 
+    live_small_names: list[str] = []
+    for key in ("detect_small", "heatmap_small"):
+        for p in _BOOTSTRAP_WEIGHT_PRIORITY.get(key, []):
+            path_obj = Path(p)
+            if path_obj.suffix.lower() == ".onnx":
+                live_small_names.append(path_obj.name)
+    if live_small_names:
+        combined = [*want_names, *live_small_names]
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for name in combined:
+            if name and name not in seen:
+                seen.add(name)
+                deduped.append(name)
+        want_names = deduped
+
     need = [n for n in want_names if n and not (model_dir / n).exists()]
     if not need:
         _print("→ model weights present.")
@@ -737,7 +758,7 @@ def _first_run_menu() -> tuple[Optional[str], Optional[list[str]], bool]:
     _print("\nModel weights will be placed under: " + str(model_dir))
     _print("\nChoose what to fetch now:")
     _print("  [1] All listed weights")
-    _print("  [2] Default pair (first detect + first heatmap)  ← recommended")
+    _print("  [2] Default bundle (detect/heatmap + live ONNX)  ← recommended")
     _print("  [3] Nano pair (fastest for laptops & CI)")
     _print("  [4] Perception set (detect + heatmap + pose + obb)")
     _print("  [5] Pick from list")
