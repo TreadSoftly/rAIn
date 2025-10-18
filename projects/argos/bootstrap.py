@@ -616,7 +616,8 @@ def ensure_onnxruntime(
         summary["onnx_version"] = data.get("onnx_version")
         summary["providers"] = data.get("providers")
         summary["error"] = None
-        log(f"→ onnxruntime ready (v{data.get('version') or '?'}, providers={data.get('providers') or []})")
+        os.environ.pop("ARGOS_DISABLE_ONNX", None)
+        log(f"-> onnxruntime ready (v{data.get('version') or '?'}, providers={data.get('providers') or []})")
         return summary
 
     if _probe_onnx_success(info):
@@ -628,6 +629,16 @@ def ensure_onnxruntime(
     summary["onnx_version"] = info.get("onnx_version")
     performed_heal = False
 
+    if os.name == "nt":
+        initial_missing = _windows_missing_runtime_dlls()
+        if initial_missing:
+            summary["dlls_missing"] = list(initial_missing)
+            record("msvc-scan-initial", {"missing": list(initial_missing)})
+            log(f"-> missing MSVC runtime DLLs detected: {list(initial_missing)}")
+            log("-> installing Microsoft Visual C++ Redistributable (x64).")
+            if _install_windows_vcredist(log, lambda act, details: record(act, details)):
+                performed_heal = True
+                summary["dlls_missing"] = _windows_missing_runtime_dlls()
     install_packages(["pip", "setuptools", "wheel"], label="pip-upgrade", binary_only=False)
     if install_packages(["onnx"], label="pip-onnx"):
         performed_heal = True
@@ -639,6 +650,16 @@ def ensure_onnxruntime(
         result = _succeed(info, healed=performed_heal)
         _LAST_ONNX_SUMMARY = result
         return result
+
+    def _error_indicates_vcredist(error: Optional[object]) -> bool:
+        if not error:
+            return False
+        text = str(error).lower()
+        if "dll load failed" in text and "onnxruntime_pybind11_state" in text:
+            return True
+        if "initialization routine failed" in text and "onnxruntime" in text:
+            return True
+        return False
 
     reinstall_attempted = False
     if uninstall_packages(["onnxruntime", "onnxruntime-gpu"], label="pip-uninstall-onnxruntime"):
@@ -656,18 +677,21 @@ def ensure_onnxruntime(
         missing = _windows_missing_runtime_dlls()
         summary["dlls_missing"] = missing
         record("msvc-scan", {"missing": missing})
-        if missing:
-            log(f"→ missing MSVC runtime DLLs detected: {missing}")
+        needs_redist = bool(missing) or _error_indicates_vcredist(info.get("error"))
+        if needs_redist:
+            if missing:
+                log(f"-> missing MSVC runtime DLLs detected: {missing}")
+            log("-> installing Microsoft Visual C++ Redistributable (x64).")
             if _install_windows_vcredist(log, lambda act, details: record(act, details)):
                 performed_heal = True
-            summary["dlls_missing"] = _windows_missing_runtime_dlls()
-            if install_packages([ort_spec], label="pip-onnxruntime-postvcredist"):
-                performed_heal = True
-            info = run_probe("probe-after-vcredist")
-            if _probe_onnx_success(info):
-                result = _succeed(info, healed=True)
-                _LAST_ONNX_SUMMARY = result
-                return result
+                summary["dlls_missing"] = _windows_missing_runtime_dlls()
+                if install_packages([ort_spec], label="pip-onnxruntime-postvcredist"):
+                    performed_heal = True
+                info = run_probe("probe-after-vcredist")
+                if _probe_onnx_success(info):
+                    result = _succeed(info, healed=True)
+                    _LAST_ONNX_SUMMARY = result
+                    return result
 
     summary["error"] = info.get("error")
     summary["providers"] = info.get("providers")
