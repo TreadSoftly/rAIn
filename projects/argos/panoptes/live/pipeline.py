@@ -8,7 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, TypeAlias
+import threading
+from queue import Empty, Full, Queue
 import time
 
 from .camera import FrameSource, open_camera, synthetic_source
@@ -17,6 +19,7 @@ from .overlay import hud
 from . import tasks as live_tasks
 from . import config as live_config
 from .config import ModelSelection
+from ._types import NDArrayU8
 from panoptes.logging_config import bind_context # type: ignore[import]
 
 # Live progress spinner (robust fallback)
@@ -31,6 +34,8 @@ except Exception:  # pragma: no cover
         return _N()
 
 LOGGER = logging.getLogger(__name__)
+
+FramePacket: TypeAlias = Tuple[NDArrayU8, float]
 
 def _log(event: str, **info: object) -> None:
     if info:
@@ -197,6 +202,8 @@ class LivePipeline:
         ts = time.strftime("%Y%m%d-%H%M%S")
         return str(_results_dir() / f"live_{self.task}_{ts}.mp4")
 
+
+
     def run(self) -> Optional[str]:
         """
         Run the pipeline. Returns path of saved video if a VideoSink was used,
@@ -212,18 +219,15 @@ class LivePipeline:
                 prefer_small=self.prefer_small,
             )
 
-        # Estimate a target frame count if duration is bounded (for % UX)
         est_fps = float(self.fps or 30)
         total_frames = int(max(1.0, (self.duration or 1.0) * est_fps)) if self.duration is not None else 1
 
-        video: Optional[VideoSink] = None  # for .opened check at the end
+        video: Optional[VideoSink] = None
         saved_path: Optional[str] = None
 
-        # Main progress spinner: single line with [File:], [Job:], [Model:], tail with done/total and %
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=total_frames, count=0, current="", job="init", model="")
 
-            # Build task / model selection
             task = self._build_task()
             hw = live_config.probe_hardware()
             _log("live.pipeline.hardware", arch=getattr(hw, "arch", None), gpu=getattr(hw, "gpu", None), ram=getattr(hw, "ram_gb", None))
@@ -232,51 +236,75 @@ class LivePipeline:
             _log("live.pipeline.models", task=self.task, label=model_label)
             sp.update(job="probe", current=hw.arch or "", model=model_label)
 
-            src = self._build_source()
+            src: FrameSource = self._build_source()
             sp.update(job="open-src", current=str(self.source))
 
             display: Optional[DisplaySink] = None if self.headless else DisplaySink("ARGOS Live", headless=False)
-
-            # Decide if we will write video; path may be lazily resolved on first frame (size/fps).
             saved_path = self.out_path or (self._default_out_path() if self.autosave and self.out_path is None else None)
-
-            # Pre-create a non-empty sentinel when saving was requested.
-            if saved_path:
-                try:
-                    sp.update(job="prepare-out", current=Path(saved_path).name)
-                    spath = Path(saved_path)
-                    spath.parent.mkdir(parents=True, exist_ok=True)
-                    if not spath.exists() or spath.stat().st_size == 0:
-                        spath.write_bytes(b"\x00")
-                except Exception:
-                    pass
-
-            sinks: Optional[MultiSink] = None  # created after first frame (size known)
+            sinks: Optional[MultiSink] = None
 
             t0 = time.time()
             fps_est = 0.0
             last = t0
             frames_done = 0
 
+            stop_event = threading.Event()
+            frame_queue: Queue[Optional[FramePacket]] = Queue(maxsize=5)
+
+            def _capture_loop() -> None:
+                try:
+                    for frame_bgr, ts in src.frames():
+                        if stop_event.is_set():
+                            break
+                        try:
+                            frame_queue.put((frame_bgr, ts), timeout=0.1)
+                        except Full:
+                            continue
+                except Exception as exc:
+                    _log("live.pipeline.capture.error", error=type(exc).__name__, message=str(exc))
+                finally:
+                    stop_event.set()
+                    try:
+                        frame_queue.put_nowait(None)
+                    except Full:
+                        pass
+
+            capture_thread = threading.Thread(target=_capture_loop, name="argos-live-capture", daemon=True)
+            capture_thread.start()
+
             try:
-                for frame_bgr, _ts in src.frames():
-                    # Update FPS (EMA for HUD only)
+                while True:
+                    try:
+                        item = frame_queue.get(timeout=0.1)
+                    except Empty:
+                        if stop_event.is_set() and frame_queue.empty():
+                            break
+                        continue
+
+                    if item is None:
+                        break
+
+                    frame_bgr, _ts = item
                     now = time.time()
                     dt = max(1e-6, now - last)
                     inst_fps = 1.0 / dt
                     fps_est = 0.9 * fps_est + 0.1 * inst_fps if fps_est > 0 else inst_fps
                     last = now
 
-                    # Create sinks once we know the first frame size
                     if sinks is None:
                         if saved_path:
                             Path(saved_path).parent.mkdir(parents=True, exist_ok=True)
                             try:
-                                h_px, w_px = frame_bgr.shape[:2]  # (H, W, 3)
+                                h_px, w_px = frame_bgr.shape[:2]
                             except Exception:
                                 h_px = self.size[1] if self.size else 480
                                 w_px = self.size[0] if self.size else 640
-                            video = VideoSink(saved_path, (w_px, h_px), float(self.fps or 30))
+                            try:
+                                video = VideoSink(saved_path, (w_px, h_px), float(self.fps or 30))
+                                saved_path = video.output_path
+                            except Exception as exc:
+                                _log("live.pipeline.video_init.error", error=type(exc).__name__, message=str(exc))
+                                raise
                         sinks = MultiSink(*(x for x in (display, video) if x is not None))
                         _log("live.pipeline.sinks", display=bool(display), video_path=saved_path if saved_path else None)
                         sp.update(
@@ -285,15 +313,9 @@ class LivePipeline:
                             model=model_label,
                         )
 
-                    # Inference → render
                     result = task.infer(frame_bgr)
-                    try:
-                        frame_for_draw = frame_bgr.copy()
-                    except Exception:
-                        frame_for_draw = frame_bgr
-                    frame_anno = task.render(frame_for_draw, result)
+                    frame_anno = task.render(frame_bgr, result)
 
-                    # HUD
                     device = hw.gpu or "CPU"
                     notice = self._active_notice(now)
                     dynamic_label = model_label
@@ -323,38 +345,38 @@ class LivePipeline:
                         notice=notice,
                     )
 
-                    # Emit
                     assert sinks is not None
                     sinks.write(frame_anno)
 
-                    # Update spinner count/tail
                     frames_done += 1
                     sp.update(count=frames_done)
                     if frames_done % max(1, int(self.fps or inst_fps or 30)) == 0:
                         _log("live.pipeline.fps", frames=frames_done, fps=f"{fps_est:.2f}", inst=f"{inst_fps:.2f}")
 
-                    # Quit conditions: duration, window closed, or keypress (q/ESC)
                     if self.duration is not None and (now - t0) >= self.duration:
                         _log("live.pipeline.stop", reason="duration", frames=frames_done)
+                        stop_event.set()
                         break
 
                     if display is not None:
-                        # If the window was closed in any backend, stop.
                         try:
                             if not display.is_open():
                                 _log("live.pipeline.stop", reason="window-closed", frames=frames_done)
+                                stop_event.set()
                                 break
                         except Exception:
                             pass
-                        # Poll for 'q' / ESC on OpenCV backend (tk backend returns -1)
                         try:
                             key = display.poll_key()
                             if key in (ord("q"), 27):
                                 _log("live.pipeline.stop", reason="user-exit", frames=frames_done)
+                                stop_event.set()
                                 break
                         except Exception:
                             pass
             finally:
+                stop_event.set()
+                capture_thread.join(timeout=1.0)
                 try:
                     src.release()
                 except Exception:
@@ -370,21 +392,8 @@ class LivePipeline:
                     except Exception:
                         pass
 
-                if saved_path:
-                    try:
-                        spath = Path(saved_path)
-                        spath.parent.mkdir(parents=True, exist_ok=True)
-                        if not spath.exists() or spath.stat().st_size == 0:
-                            spath.write_bytes(b"\x00")
-                    except Exception:
-                        pass
-
                 _log("live.pipeline.cleanup", saved_path=saved_path, frames=frames_done)
 
-        # Always return the path if saving was requested (file guards above ensure it exists and is non-empty)
         _log("live.pipeline.end", saved_path=saved_path)
         return saved_path
-
-
-
 

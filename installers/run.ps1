@@ -56,6 +56,9 @@ try { $null = $PSStyle; $PSStyle.OutputRendering = 'Ansi' } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 
 function Install-VcRedistIfMissing {
+  param(
+    [bool]$AllowInstall = $true
+  )
   if ($env:OS -ne 'Windows_NT') { return }
   try {
     $sys = Join-Path $env:WINDIR 'System32'
@@ -65,10 +68,25 @@ function Install-VcRedistIfMissing {
     if ($has1 -and $has2 -and $has3) { return }
   }
   catch { }
-  Write-Host "Installing Microsoft Visual C++ Redistributable (x64)..." -ForegroundColor Yellow
+  if (-not $AllowInstall) {
+    throw @"
+Microsoft Visual C++ Redistributable (x64) not detected.
+Install it manually from https://aka.ms/vs/17/release/vc_redist.x64.exe or re-run with:
+  --auto-vcredist              (CLI flag)
+  set ARGOS_AUTO_INSTALL_VCREDIST=1 (environment variable)
+Or disable auto-install with:
+  --no-auto-vcredist / --skip-vcredist
+  set ARGOS_DISABLE_VCREDIST=1
+"@
+  }
+  Write-Verbose "Installing Microsoft Visual C++ Redistributable (x64)..."
   $tmp = Join-Path $env:TEMP 'vc_redist.x64.exe'
   try {
     Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $tmp
+    $sig = Get-AuthenticodeSignature -FilePath $tmp
+    if ($sig.Status -ne 'Valid' -or -not ($sig.SignerCertificate.Subject -like '*Microsoft*')) {
+      throw "Authenticode signature validation failed for vc_redist.x64.exe."
+    }
     $installerArgs = '/quiet', '/norestart'
     $p = Start-Process -FilePath $tmp -ArgumentList $installerArgs -PassThru -Wait
     if ($p.ExitCode -ne 0) { throw "vc_redist failed with code $($p.ExitCode)" }
@@ -155,6 +173,8 @@ $sawBuild = $false
 $liveMode = $false
 $foundL = $false
 $foundV = $false
+$forceVcRedistFlag = $false
+$skipVcRedistFlag = $false
 
 foreach ($a in ($ArgList | ForEach-Object { $_ })) {
   $la = $a.ToLowerInvariant()
@@ -162,6 +182,8 @@ foreach ($a in ($ArgList | ForEach-Object { $_ })) {
   elseif ($la -in @('build', 'package', 'pack')) { $sawBuild = $true }
   elseif ($la -in @('argos', 'argos:run', 'run:argos', 'argos:build', 'build:argos')) { $proj = 'argos' }
   elseif ($la -in @('lv', 'livevideo', 'live', 'video', 'ldv', 'lvd')) { $liveMode = $true }
+  elseif ($la -in @('--auto-vcredist', '-auto-vcredist')) { $forceVcRedistFlag = $true }
+  elseif ($la -in @('--no-auto-vcredist', '--skip-vcredist', '-no-auto-vcredist', '-skip-vcredist')) { $skipVcRedistFlag = $true }
   else {
     if ($la -eq 'l') { $foundL = $true }
     if ($la -eq 'v') { $foundV = $true }
@@ -227,6 +249,26 @@ if (-not $proj) {
 
 Enable-GitLfs
 
+# Determine VC++ install policy (default: install automatically)
+$truthy = @('1', 'true', 'yes', 'on')
+$falsy  = @('0', 'false', 'no', 'off')
+$installVcRedist = $true
+if ($skipVcRedistFlag) { $installVcRedist = $false }
+if ($forceVcRedistFlag) { $installVcRedist = $true }
+
+$envDisable = $env:ARGOS_DISABLE_VCREDIST
+if ($envDisable) {
+  $val = $envDisable.Trim().ToLowerInvariant()
+  if ($val -in $truthy) { $installVcRedist = $false }
+}
+
+$envAuto = $env:ARGOS_AUTO_INSTALL_VCREDIST
+if ($envAuto) {
+  $val = $envAuto.Trim().ToLowerInvariant()
+  if ($val -in $truthy) { $installVcRedist = $true }
+  elseif ($val -in $falsy) { $installVcRedist = $false }
+}
+
 # ---------- If user asked to (re)build, chain to build.ps1 ----------
 if ($sawBuild) {
   & (Join-Path $ROOT 'installers\build.ps1') $proj @([string[]]$tokens)
@@ -261,12 +303,12 @@ if (-not $vpy) { throw "could not resolve venv python" }
 if (-not (Test-Path -LiteralPath $vpy)) { throw "venv python missing at $vpy" }
 
 $venvRoot = Split-Path -Parent (Split-Path -Parent $vpy)
-Write-Host "[Argos] python: $vpy (venv=$venvRoot)"
+Write-Verbose "[Argos] python: $vpy (venv=$venvRoot)"
 $env:PANOPTES_VENV_ROOT = $venvRoot
 
 $env:PYTHONPYCACHEPREFIX = Join-Path $env:LOCALAPPDATA "rAIn\pycache"
 
-Install-VcRedistIfMissing
+Install-VcRedistIfMissing -AllowInstall:$installVcRedist
 
 # ---------- Ensure OpenCV (GUI) in the venv ----------
 Install-OpenCvPackage -Vpy $vpy -NeedsGui:$true

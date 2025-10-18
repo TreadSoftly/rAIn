@@ -7,7 +7,6 @@ import shutil
 import sys
 import tempfile
 import threading
-import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +93,17 @@ def _pick_logs_root() -> Path:
     raise RuntimeError("Unable to create a writable runs directory for logging output.")
 
 
+def _clean_old_run_dirs(logs_root: Path) -> None:
+    """
+    Remove timestamped run directories under *logs_root* so we keep a single
+    consolidated log location. Legacy runs populated sub-directories like
+    ``20250101-010101_abcd1234`` that are no longer needed.
+    """
+    for child in logs_root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+
+
 def _now_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
@@ -128,11 +138,16 @@ class JsonFormatter(logging.Formatter):
             "tid": record.thread,
         }
         ctx = _current_context()
+        context_dict: Dict[str, object] = {}
         if ctx:
-            data["context"] = ctx
+            context_dict = dict(ctx)
+            data["context"] = context_dict
         run_id = current_run_id()
         if run_id:
-            data.setdefault("context", {}).update({"run_id": run_id})
+            if not context_dict:
+                context_dict = {}
+            context_dict.update({"run_id": run_id})
+            data["context"] = context_dict
         if record.exc_info:
             data["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(data, ensure_ascii=False)
@@ -222,9 +237,10 @@ def setup_logging(
         console_fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 
         logs_root = _pick_logs_root()
-        run_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}_{uuid.uuid4().hex[:8]}"
-        run_dir = logs_root / run_id
+        _clean_old_run_dirs(logs_root)
+        run_dir = logs_root
         run_dir.mkdir(parents=True, exist_ok=True)
+        run_id = "current"
 
         legacy_runs = logs_root / "runs"
         if legacy_runs.exists() and legacy_runs.is_dir():
@@ -237,15 +253,15 @@ def setup_logging(
             log_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             log_path = run_dir / "argos.log"
-            aggregate_path = logs_root / "argos.log"
+            aggregate_path = None
 
         _BASE_CONTEXT.set({"run_id": run_id, "run_dir": str(run_dir)})
         _EXTRA_CONTEXT.set({})
         _RUN_DIR.set(run_dir)
         _RUN_ID.set(run_id)
 
-        _configure_handlers(level, console_level, console_fmt, use_json_console, log_path, file_mode="w")
-        if aggregate_path is not None:
+        _configure_handlers(level, console_level, console_fmt, use_json_console, log_path, file_mode="a")
+        if aggregate_path is not None and aggregate_path != log_path:
             try:
                 aggregate_handler = logging.FileHandler(aggregate_path, encoding="utf-8", mode="a")
                 aggregate_handler.setLevel(level)
@@ -253,6 +269,11 @@ def setup_logging(
                 logging.getLogger().addHandler(aggregate_handler)
             except Exception:
                 logging.getLogger(__name__).debug("Failed to attach aggregate log handler", exc_info=True)
+            try:
+                (logs_root / "latest_run.txt").write_text(run_id, encoding="utf-8")
+            except Exception:
+                logging.getLogger(__name__).debug("Failed to update latest run pointer", exc_info=True)
+        else:
             try:
                 (logs_root / "latest_run.txt").write_text(run_id, encoding="utf-8")
             except Exception:
@@ -267,5 +288,8 @@ def setup_logging(
     except Exception:
         logging.getLogger(__name__).debug("Failed to write environment snapshot", exc_info=True)
 
+    logging.getLogger("ultralytics").setLevel(logging.WARNING)
+    logging.getLogger("ultralytics.yolo.engine.model").setLevel(logging.WARNING)
+    logging.getLogger("ultralytics.yolo.utils").setLevel(logging.WARNING)
     logging.getLogger(__name__).debug("Logging initialised", extra={"run_dir": str(run_dir)})
     return run_dir

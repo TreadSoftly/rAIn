@@ -34,10 +34,13 @@ Key change (2025-08-18):
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict, Callable
+from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict, Callable, Iterator
 from pathlib import Path
+from contextlib import contextmanager
+import logging
 import math
 import time
+import warnings
 
 # ─────────────────────────────────────────────────────────────────────
 # Progress helpers (percent spinner preferred, safe fallbacks if missing)
@@ -65,6 +68,7 @@ except Exception:  # pragma: no cover
     def _progress_running_task(*_a: object, **_k: object):
         return _progress_simple_status()
 
+
 # ─────────────────────────────────────────────────────────────────────
 # Optional heavy deps (import-safe)
 # ─────────────────────────────────────────────────────────────────────
@@ -90,12 +94,71 @@ except Exception:  # pragma: no cover
     u8 = cast(Any, "uint8")
 
 from ._types import NDArrayU8, Boxes, Names
+
 try:
     from panoptes.runtime.resilient_yolo import ResilientYOLO as ResilientYOLORuntime  # type: ignore[import]
 except Exception:  # pragma: no cover
     class ResilientYOLORuntime:  # type: ignore[no-redef]
         def __init__(self, *_: Any, **__: Any) -> None:
             raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+        def prepare(self) -> None:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+        def predict(self, frame: NDArrayU8, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+        def descriptor(self) -> str:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+        def active_model(self) -> Any:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+@contextmanager
+def _silence_ultralytics() -> Iterator[None]:
+    """
+    Temporarily silence Ultralytics loggers so they don't spam the console.
+    """
+    targets = [
+        "ultralytics",
+        "ultralytics.yolo.engine.model",
+        "ultralytics.yolo.utils",
+        "ultralytics.nn.autobackend",
+    ]
+    saved: list[tuple[logging.Logger, int, bool]] = []
+    for name in targets:
+        logger = logging.getLogger(name)
+        saved.append((logger, logger.level, logger.disabled))
+        logger.disabled = True
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=FutureWarning)
+            warnings.simplefilter("ignore", category=DeprecationWarning)
+            warnings.simplefilter("ignore", category=UserWarning)
+            yield
+    finally:
+        for logger, level, disabled in saved:
+            logger.setLevel(level)
+            logger.disabled = disabled
+
+def _ensure_contiguous(frame: NDArrayU8) -> NDArrayU8:
+    """Return a C-contiguous view of *frame* without unnecessary copies."""
+    if np is None:
+        return frame
+    flags = getattr(frame, "flags", None)
+    if flags is not None and getattr(flags, "c_contiguous", False):
+        return frame
+    return np.ascontiguousarray(frame)
+
+def _warmup_wrapper(model: "ResilientYOLOProtocol", *, task: str, **kwargs: Any) -> None:
+    """Run a single dummy inference so first real frame is fast."""
+    if np is None:
+        return
+    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+    try:
+        model.predict(dummy, verbose=False, **kwargs)
+    except Exception:
+        return
 # ─────────────────────────────────────────────────────────────────────
 # Central model registry (single source of truth) — guarded import
 # ─────────────────────────────────────────────────────────────────────
@@ -296,7 +359,7 @@ class _YOLODetect(TaskAdapter):
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[int, int, int, int, float, Optional[int]]]:
         np_ = cast(Any, np)
         assert np_ is not None
-        inp = frame_bgr.copy() if hasattr(frame_bgr, "copy") else frame_bgr
+        inp = _ensure_contiguous(frame_bgr)
         res_any: Any = self.model.predict(inp, conf=self.conf, iou=self.iou, verbose=False)
         if isinstance(res_any, (list, tuple)):
             res_obj: object = cast(Sequence[object], res_any)[0]
@@ -365,7 +428,7 @@ class _YOLOHeatmap(TaskAdapter):
         """
         np_ = cast(Any, np)
         assert np_ is not None
-        inp = frame_bgr.copy() if hasattr(frame_bgr, "copy") else frame_bgr
+        inp = _ensure_contiguous(frame_bgr)
         res_any: Any = self.model.predict(inp, conf=self.conf, verbose=False)
         if isinstance(res_any, (list, tuple)):
             res_obj: object = cast(Sequence[object], res_any)[0]
@@ -435,7 +498,7 @@ class _YOLOClassify(TaskAdapter):
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[str, float]]:
         np_ = cast(Any, np)
         assert np_ is not None
-        inp = frame_bgr.copy() if hasattr(frame_bgr, "copy") else frame_bgr
+        inp = _ensure_contiguous(frame_bgr)
         res_any: Any = self.model.predict(inp, verbose=False)
 
         # Ultralytics results often expose .probs with .topk etc.
@@ -529,7 +592,7 @@ class _YOLOPose(TaskAdapter):
     def infer(self, frame_bgr: NDArrayU8) -> List[List[List[float]]]:
         np_ = cast(Any, np)
         assert np_ is not None
-        inp = frame_bgr.copy() if hasattr(frame_bgr, "copy") else frame_bgr
+        inp = _ensure_contiguous(frame_bgr)
         res_any: Any = self.model.predict(inp, conf=self.conf, verbose=False)
         if isinstance(res_any, (list, tuple)):
             res_obj: object = cast(Sequence[object], res_any)[0]
@@ -658,7 +721,7 @@ class _YOLOOBB(TaskAdapter):
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[List[Tuple[int, int]], float, Optional[int]]]:
         np_ = cast(Any, np)
         assert np_ is not None
-        inp = frame_bgr.copy() if hasattr(frame_bgr, "copy") else frame_bgr
+        inp = _ensure_contiguous(frame_bgr)
         res_any: Any = self.model.predict(inp, conf=self.conf, iou=self.iou, verbose=False)
         if isinstance(res_any, (list, tuple)):
             res_obj: object = cast(Sequence[object], res_any)[0]
@@ -791,8 +854,11 @@ def build_detect(
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="detector")
             with _progress_running_task("Load", f"detector:{label_hint}"):
-                wrapper.prepare()
-            sp.update(count=1, model=wrapper.descriptor())
+                with _silence_ultralytics():
+                    wrapper.prepare()
+            sp.update(job="warmup", model=wrapper.descriptor())
+            _warmup_wrapper(wrapper, task="detect", conf=conf, iou=iou)
+            sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLODetect(wrapper, conf=conf, iou=iou)
     except Exception:
         with _progress_simple_status("FALLBACK: fast-contour (no-ML)"):
@@ -822,8 +888,11 @@ def build_heatmap(
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="segmenter")
             with _progress_running_task("Load", f"segmenter:{label_hint}"):
-                wrapper.prepare()
-            sp.update(count=1, model=wrapper.descriptor())
+                with _silence_ultralytics():
+                    wrapper.prepare()
+            sp.update(job="warmup", model=wrapper.descriptor())
+            _warmup_wrapper(wrapper, task="heatmap", conf=0.25)
+            sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLOHeatmap(wrapper, conf=0.25)
     except Exception:
         with _progress_simple_status("FALLBACK: laplacian-heatmap (no-ML)"):
@@ -854,8 +923,11 @@ def build_classify(
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="classifier")
             with _progress_running_task("Load", f"classifier:{label_hint}"):
-                wrapper.prepare()
-            sp.update(count=1, model=wrapper.descriptor())
+                with _silence_ultralytics():
+                    wrapper.prepare()
+            sp.update(job="warmup", model=wrapper.descriptor())
+            _warmup_wrapper(wrapper, task="classify")
+            sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLOClassify(wrapper, topk=topk)
     except Exception:
         with _progress_simple_status("FALLBACK: simple-classify (no-ML)"):
@@ -886,8 +958,11 @@ def build_pose(
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="pose")
             with _progress_running_task("Load", f"pose:{label_hint}"):
-                wrapper.prepare()
-            sp.update(count=1, model=wrapper.descriptor())
+                with _silence_ultralytics():
+                    wrapper.prepare()
+            sp.update(job="warmup", model=wrapper.descriptor())
+            _warmup_wrapper(wrapper, task="pose", conf=conf)
+            sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLOPose(wrapper, conf=conf)
     except Exception:
         with _progress_simple_status("FALLBACK: simple-pose (no-ML)"):
@@ -919,8 +994,11 @@ def build_obb(
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="obb")
             with _progress_running_task("Load", f"obb:{label_hint}"):
-                wrapper.prepare()
-            sp.update(count=1, model=wrapper.descriptor())
+                with _silence_ultralytics():
+                    wrapper.prepare()
+            sp.update(job="warmup", model=wrapper.descriptor())
+            _warmup_wrapper(wrapper, task="obb", conf=conf, iou=iou)
+            sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLOOBB(wrapper, conf=conf, iou=iou)
     except Exception:
         with _progress_simple_status("FALLBACK: simple-obb (no-ML)"):

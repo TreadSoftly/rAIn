@@ -33,10 +33,12 @@ class ProgressLike(Protocol):
     def set_current(self, label: str) -> None: ...
     def add(self, units: float, *, current_item: str | None = None) -> None: ...
 
-# Nested spinners are disabled unless PANOPTES_NESTED_PROGRESS is truthy.
-_ENABLE_NESTED = os.getenv("PANOPTES_NESTED_PROGRESS", "").strip().lower() in {
-    "1", "true", "yes", "on"
-}
+
+def _nested_enabled() -> bool:
+    """Return True when nested spinners are explicitly requested."""
+    return os.getenv("PANOPTES_NESTED_PROGRESS", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 try:  # local import so this file still loads if progress deps are missing
     from .progress import ProgressEngine  # type: ignore
     from .progress.bridges import live_percent  # type: ignore
@@ -157,7 +159,7 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
     # progress wiring (best‑effort; **disabled** unless user opts in)
     eng: Optional[ProgressLike]
     cm: ContextManager[Any]
-    if _ENABLE_NESTED and ProgressEngine is not None and live_percent is not None:  # type: ignore[truthy-bool]
+    if _nested_enabled() and ProgressEngine is not None and live_percent is not None:  # type: ignore[truthy-bool]
         eng_any = ProgressEngine()  # type: ignore[call-arg]
         eng = cast(ProgressLike, eng_any)
         cm = cast(ContextManager[Any], live_percent(eng, prefix="HEATMAP"))  # type: ignore[misc]

@@ -5,15 +5,13 @@ Output sinks:
   • VideoSink    : MP4 writer with codec fallback (mp4v -> avc1/H264/X264 -> MJPG/AVI),
   • MultiSink    : broadcast to multiple sinks.
 
-Final fallback always yields a file: if MP4 encoders are unavailable, we write
-MJPG into an AVI container and, on close, mirror a copy to the requested .mp4
-path so callers that expect that exact filename still find a non-empty file.
+When MP4 encoders are unavailable the AVI fallback is kept intact. Callers
+should consult ``VideoSink.output_path`` to learn which container was produced.
 """
 from __future__ import annotations
 
 import logging
 import os
-import shutil
 from typing import Optional, Protocol, cast
 
 # Short status spinner when opening a writer (will no-op under live spinner)
@@ -250,35 +248,27 @@ class DisplaySink:
             self._on_tk_close()
 
 
-class VideoSink:
-    """
-    Try MP4 codecs, then fall back to MJPG/AVI. If we had to use AVI,
-    we copy the resulting file to the requested .mp4 path on close.
 
-    As a final guard, if we couldn't open any writer at all (or produced a
-    zero-byte file), we still ensure a non-empty file exists at the requested
-    path so callers that rely on its existence won't fail.
-    """
+class VideoSink:
+    """Try MP4 codecs, then fall back to MJPG/AVI (emit whatever container succeeds)."""
+
     def __init__(self, path: str, size: tuple[int, int], fps: float) -> None:
-        """Create video writer. If OpenCV is missing, this becomes a no-op."""
         self.path = path
         self.size = (int(size[0]), int(size[1]))
         self.fps = float(max(1.0, fps))
         _log("live.sink.video.init", path=self.path, size=f"{self.size[0]}x{self.size[1]}", fps=self.fps)
         self._writer: Optional[_VideoWriterLike] = None
-        self._actual_path: str = path  # may differ when AVI fallback is used
+        self._actual_path = path
 
-        # Ensure destination directory exists
         try:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         except Exception:
             pass
 
+        success = False
         if cv2 is not None:
-            # Keep this whole codec probing phase under a tiny status spinner
             with _progress_simple_status(f"Opening writer {self.size[0]}x{self.size[1]}@{self.fps:.0f}"):
                 try:
-                    # Try MP4 codecs on the requested path
                     for name in ("mp4v", "avc1", "H264", "X264"):
                         try:
                             _log("live.sink.video.try", path=self.path, codec=name)
@@ -288,50 +278,45 @@ class VideoSink:
                                 self._writer = cast(_VideoWriterLike, wr)
                                 self._actual_path = self.path
                                 _log("live.sink.video.opened", path=self._actual_path, codec=name)
+                                success = True
                                 break
                         except Exception:
-                            pass
-
-                    # If none of the MP4 codecs opened, try MJPG on the same path…
-                    if self._writer is None:
-                        try:
-                            fourcc = int(getattr(cv2, "VideoWriter_fourcc")(*"MJPG"))  # type: ignore[attr-defined]
-                            wr2 = cv2.VideoWriter(self.path, fourcc, self.fps, self.size)  # type: ignore[call-arg]
-                            if wr2.isOpened():
-                                self._writer = cast(_VideoWriterLike, wr2)
-                                self._actual_path = self.path
-                                _log("live.sink.video.opened", path=self._actual_path, codec="MJPG")
-                        except Exception:
-                            pass
-
-                    # …and if that still failed, create an AVI fallback path
-                    if self._writer is None:
-                        avi_path = os.path.splitext(self.path)[0] + ".avi"
-                        try:
-                            fourcc = int(getattr(cv2, "VideoWriter_fourcc")(*"MJPG"))  # type: ignore[attr-defined]
-                            wr3 = cv2.VideoWriter(avi_path, fourcc, self.fps, self.size)  # type: ignore[call-arg]
-                            if wr3.isOpened():
-                                # Warn to stderr only if available
-                                try:
-                                    import sys
-                                    stream = getattr(sys, "__stderr__", None)
-                                    if stream is not None and hasattr(stream, "write"):
-                                        stream.write(
-                                            " [panoptes.live] warning: MP4 encoders not available; "
-                                            "using MJPG/AVI fallback and mirroring to requested .mp4.\n"
-                                        )
-                                except Exception:
-                                    pass
-                                self._writer = cast(_VideoWriterLike, wr3)
-                                self._actual_path = avi_path
-                                _log("live.sink.video.fallback", path=avi_path, codec="MJPG", target=self.path)
-                        except Exception:
-                            pass
+                            continue
                 except Exception:
                     self._writer = None
 
+                if not success:
+                    try:
+                        fourcc = int(getattr(cv2, "VideoWriter_fourcc")(*"MJPG"))  # type: ignore[attr-defined]
+                        wr2 = cv2.VideoWriter(self.path, fourcc, self.fps, self.size)  # type: ignore[call-arg]
+                        if wr2.isOpened():
+                            self._writer = cast(_VideoWriterLike, wr2)
+                            self._actual_path = self.path
+                            _log("live.sink.video.opened", path=self._actual_path, codec="MJPG")
+                            success = True
+                    except Exception:
+                        pass
+
+                if not success:
+                    avi_path = os.path.splitext(self.path)[0] + ".avi"
+                    try:
+                        fourcc = int(getattr(cv2, "VideoWriter_fourcc")(*"MJPG"))  # type: ignore[attr-defined]
+                        wr3 = cv2.VideoWriter(avi_path, fourcc, self.fps, self.size)  # type: ignore[call-arg]
+                        if wr3.isOpened():
+                            self._writer = cast(_VideoWriterLike, wr3)
+                            self._actual_path = avi_path
+                            _log("live.sink.video.fallback", path=avi_path, codec="MJPG", target=self.path)
+                            success = True
+                    except Exception:
+                        pass
         else:
             _log("live.sink.video.disabled", path=self.path, reason="opencv-missing")
+
+        if self._writer is None:
+            raise RuntimeError(
+                "Unable to open any video writer. Install a GUI-capable build of OpenCV "
+                "or supply a valid mp4/avi encoder."
+            )
 
     @property
     def opened(self) -> bool:
@@ -340,6 +325,10 @@ class VideoSink:
             return bool(w and w.isOpened())
         except Exception:
             return False
+
+    @property
+    def output_path(self) -> str:
+        return self._actual_path
 
     def write(self, frame_bgr: NDArrayU8) -> None:
         w = self._writer
@@ -358,31 +347,11 @@ class VideoSink:
             except Exception:
                 pass
 
-        # If we wrote to a fallback .avi, mirror the bytes to the requested .mp4
-        if self._actual_path != self.path:
-            try:
-                if os.path.exists(self._actual_path):
-                    shutil.copyfile(self._actual_path, self.path)
-            except Exception:
-                pass
-
-        # Final guard: ensure a non-empty file exists at the requested path
         try:
-            if not os.path.exists(self.path):
-                with open(self.path, "wb") as f:
-                    f.write(b"\x00")  # non-empty sentinel
-            else:
-                if os.path.getsize(self.path) == 0:
-                    with open(self.path, "ab") as f:
-                        f.write(b"\x00")  # ensure >0 bytes
-        except Exception:
-            pass
-
-        try:
-            final_size = os.path.getsize(self.path) if os.path.exists(self.path) else None
+            final_size = os.path.getsize(self._actual_path) if os.path.exists(self._actual_path) else None
         except Exception:
             final_size = None
-        _log("live.sink.video.closed", path=self.path, actual_path=self._actual_path, size=final_size)
+        _log("live.sink.video.closed", requested=self.path, path=self._actual_path, size=final_size)
 
 
 class MultiSink:

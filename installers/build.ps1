@@ -199,7 +199,7 @@ $vpy = & $script:pyExe @script:pyArgs "$scriptPath" --print-venv
 if (-not $vpy) { throw "could not resolve venv python" }
 if (-not (Test-Path -LiteralPath $vpy)) { throw "venv python missing at $vpy" }
 $venvRoot = Split-Path -Parent (Split-Path -Parent $vpy)
-Write-Host "[Argos] python: $vpy (venv=$venvRoot)"
+Write-Verbose "[Argos] python: $vpy (venv=$venvRoot)"
 $env:PANOPTES_VENV_ROOT = $venvRoot
 $env:PYTHONPYCACHEPREFIX = Join-Path $env:LOCALAPPDATA "rAIn\pycache"
 
@@ -210,10 +210,22 @@ try { & (Join-Path $HERE 'setup-path.ps1') -Quiet } catch { }
 Remove-Item Env:ARGOS_SKIP_WEIGHTS -ErrorAction SilentlyContinue
 
 # --- Launch the *model selector* (user picks pack, fetches, exports, THEN smoke check prompts once) ---
-& $vpy -m panoptes.model._fetch_models @BuildArgs
+$prevQuietEnv = $env:PANOPTES_BUILD_QUIET
+$env:PANOPTES_BUILD_QUIET = '1'
+try {
+  & $vpy -m panoptes.model._fetch_models @BuildArgs
+}
+finally {
+  if ($null -ne $prevQuietEnv) {
+    $env:PANOPTES_BUILD_QUIET = $prevQuietEnv
+  }
+  else {
+    Remove-Item Env:PANOPTES_BUILD_QUIET -ErrorAction SilentlyContinue
+  }
+}
 $buildExit = $LASTEXITCODE
 if ($buildExit -eq 0) {
-  & $vpy -m compileall (Join-Path $ROOT 'projects\argos')
+  & $vpy -m compileall -q (Join-Path $ROOT 'projects\argos')
   if ($LASTEXITCODE -ne 0) { throw "compileall failed ($LASTEXITCODE)" }
   exit 0
 }
@@ -222,8 +234,3 @@ if ($buildExit -eq 0) {
 if ($buildExit -eq 1) { exit 0 }
 
 exit $buildExit
-
-# --- Compile all project sources to validate syntax ---
-$compileTarget = Join-Path $ROOT 'projects\argos'
-& $vpy -m compileall $compileTarget
-if ($LASTEXITCODE -ne 0) { throw "compileall failed ($LASTEXITCODE)" }

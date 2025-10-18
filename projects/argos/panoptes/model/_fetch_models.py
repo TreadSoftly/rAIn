@@ -288,8 +288,12 @@ def _dedupe(names: Iterable[str]) -> List[str]:
     return sorted({n.strip(): None for n in names if n and n.strip()}.keys())
 
 
+QUIET = os.environ.get("PANOPTES_BUILD_QUIET", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _ok(msg: str) -> None:
-    typer.secho(msg, fg="green")
+    if not QUIET:
+        typer.secho(msg, fg="green")
 
 
 def _warn(msg: str) -> None:
@@ -829,7 +833,8 @@ def _quick_check() -> None:
             except Exception:
                 pass
 
-    typer.secho("Smoke check completed.", fg="green")
+    if not QUIET:
+        typer.secho("Smoke check completed.", fg="green")
 
 # ---------------------------------------------------------------------
 # Entry (interactive)
@@ -884,4 +889,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except typer.Exit as exc:
+        raise SystemExit(exc.exit_code) from None

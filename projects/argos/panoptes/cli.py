@@ -22,10 +22,17 @@ import sys
 import tempfile
 import textwrap
 import urllib.parse
+import warnings
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, Final, Iterable, Iterator, List, Literal, Optional, Protocol, cast
+
+# Force nested progress off for all offline CLI commands before any internal modules import.
+os.environ["PANOPTES_NESTED_PROGRESS"] = "0"
+# Suppress noisy third-party warnings that would otherwise break the pinned progress line.
+warnings.filterwarnings("ignore", category=FutureWarning, module="onnxscript")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="onnxscript")
 
 try:
     from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv # type: ignore[import]
@@ -34,11 +41,11 @@ try:
 except Exception:
     pass
 
-import typer
+import typer # type: ignore[import]
 
 from panoptes.logging_config import bind_context, current_run_dir, setup_logging # type: ignore[import]
-from .ffmpeg_utils import resolve_ffmpeg
-from .support_bundle import write_support_bundle
+from .ffmpeg_utils import resolve_ffmpeg # type: ignore[import]
+from .support_bundle import write_support_bundle # type: ignore[import]
 
 setup_logging()
 LOGGER = logging.getLogger(__name__)
@@ -144,6 +151,13 @@ _SEARCH_DIRS: list[Path] = [
 ]
 _NOISE = {"argos", "run", "me"}
 _GLOB_CHARS = set("*?[]")
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
 
 # ────────────────────────────────────────────────────────────
 #  media plugin registration + fallback transcode
@@ -732,23 +746,30 @@ def _as_file_uri(p: Path) -> str:
     # Path.as_uri() handles Windows + encoding, but requires absolute path.
     return p.resolve().as_uri()
 
-def _osc8(label: str, target_uri: str, *, yellow: bool = True) -> str:
+def _osc8(label: str, target_uri: str) -> str:
     ESC   = "\x1b"
-    BR_YE = "\x1b[93m"   # bright yellow
-    BOLD  = "\x1b[1m"
-    RST   = "\x1b[0m"
-    colored = f"{BR_YE}{BOLD}{label}{RST}" if yellow else label
-    return f"{ESC}]8;;{target_uri}{ESC}\\{colored}{ESC}]8;;{ESC}\\"
+    open_link = f"{ESC}]8;;{target_uri}{ESC}\\"
+    close_link = f"{ESC}]8;;{ESC}\\"
+    return f"{open_link}{label}{close_link}"
 
 def _clickable_basename(p: Path) -> str:
     """
-    In VS Code terminal, return a plain absolute path so Ctrl+Click opens.
-    Else, return a bright-yellow OSC-8 link with a short label.
+    Return an OSC-8 link using only the file name (plus extension) with blue styling.
     """
-    is_vscode = (os.environ.get("TERM_PROGRAM", "").lower() == "vscode") or bool(os.environ.get("VSCODE_PID"))
-    if is_vscode:
-        return str(p.resolve())  # VS Code link detector picks this up
-    return _osc8(p.name, _as_file_uri(p), yellow=True)
+    link = _osc8(p.name, _as_file_uri(p))
+    return f"\x1b[94m\x1b[1m{link}\x1b[0m"
+
+
+def _open_in_system(path: Path) -> None:
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(path)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(path)], check=False)
+    except Exception as exc:
+        LOGGER.debug("results.open_external_failed", exc_info=True, extra={"path": str(path), "error": str(exc)})
 
 # ────────────────────────────────────────────────────────────────────────────
 #  progress (Halo/Rich only — hard-required)
@@ -1029,6 +1050,11 @@ def target(  # noqa: C901
     examples_flag: bool = typer.Option(False, "--examples", help="Show examples and exit"),
     tutorial_flag: bool = typer.Option(False, "--tutorial", help="Show a short tutorial and exit"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Explain what would run, then exit"),
+    open_results: bool = typer.Option(
+        _env_flag("ARGOS_OPEN_RESULTS", False),
+        "--open-results/--no-open-results",
+        help="Open each produced result in the default OS viewer.",
+    ),
     # model (cosmetic placeholder for compatibility)
     model: str = typer.Option(_DEFAULT_MODEL, "--model", "-m"),
     # heat-map + general tuning
@@ -1451,8 +1477,10 @@ def target(  # noqa: C901
             for p in produced:
                 try:
                     typer.echo(f"  - {_clickable_basename(p)}")
+                    if open_results:
+                        _open_in_system(p)
                 except Exception:
-                    typer.echo(f"  - {p.name}  ({str(p)})")
+                    typer.echo(f"  - {p.name}")
         else:
             typer.echo("")  # spacer
             typer.echo("No new result files were detected.")

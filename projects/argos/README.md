@@ -92,13 +92,23 @@ argos ?
 
 </div>
 
+<br>
+
+> Using the 'all' flag at the end of a command will run the command against all media files in the raw folder
+
+<div>
+
+> OR Simply typing the name of the media file you want to process at the end of a command will only process that one media file
+
+</div>
+
 ```
-d mildrone
+d all
 
 ```
 
 ```
-detect assets
+detect mildrone
 
 ```
 
@@ -123,12 +133,22 @@ pose all
 ```
 
 ```
-clf assets
+clf subdrones
 
 ```
 
 ```
 classify robodog
+
+```
+
+```
+obb all
+
+```
+
+```
+obb bunny
 
 ```
 
