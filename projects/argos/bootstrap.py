@@ -50,6 +50,7 @@ from typing import (
 )
 
 from panoptes.logging_config import setup_logging
+from panoptes.runtime.onnx_spec import desired_ort_spec
 
 try:
     from panoptes.model_registry import WEIGHT_PRIORITY as _BOOTSTRAP_WEIGHT_PRIORITY
@@ -526,7 +527,6 @@ def _install_windows_vcredist(
             return False
 
 
-ORT_VERSION_LADDER: list[str] = ["1.19.2", "1.19.1", "1.19.0", "1.18.1", "1.18.0", "1.17.3"]
 _LAST_ONNX_SUMMARY: Optional[dict[str, object]] = None
 
 
@@ -553,6 +553,8 @@ def ensure_onnxruntime(
         "dlls_missing": [],
     }
     attempts: list[dict[str, object]] = summary["attempts"]  # type: ignore[assignment]
+    ort_spec = desired_ort_spec()
+    summary["spec"] = ort_spec
 
     def record(action: str, info: Optional[dict[str, object]] = None) -> None:
         entry: dict[str, object] = {"action": action}
@@ -587,6 +589,24 @@ def ensure_onnxruntime(
             )
             return False
 
+    def uninstall_packages(packages: Sequence[str], *, label: str) -> bool:
+        cmd = [str(py), "-m", "pip", "uninstall", "-y"]
+        cmd.extend(list(packages))
+        try:
+            _run(cmd, check=True, capture=False)
+            record(label, {"status": "ok", "packages": list(packages)})
+            return True
+        except Exception as exc:
+            record(
+                label,
+                {
+                    "status": "error",
+                    "packages": list(packages),
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            return False
+
     info = run_probe("probe-initial")
 
     def _succeed(data: dict[str, object], healed: bool) -> dict[str, object]:
@@ -611,7 +631,7 @@ def ensure_onnxruntime(
     install_packages(["pip", "setuptools", "wheel"], label="pip-upgrade", binary_only=False)
     if install_packages(["onnx"], label="pip-onnx"):
         performed_heal = True
-    if install_packages(["onnxruntime"], label="pip-onnxruntime"):
+    if install_packages([ort_spec], label="pip-onnxruntime"):
         performed_heal = True
 
     info = run_probe("probe-after-pip")
@@ -619,6 +639,18 @@ def ensure_onnxruntime(
         result = _succeed(info, healed=performed_heal)
         _LAST_ONNX_SUMMARY = result
         return result
+
+    reinstall_attempted = False
+    if uninstall_packages(["onnxruntime", "onnxruntime-gpu"], label="pip-uninstall-onnxruntime"):
+        reinstall_attempted = True
+        if install_packages([ort_spec], label="pip-onnxruntime-reinstall"):
+            performed_heal = True
+    if reinstall_attempted:
+        info = run_probe("probe-after-reinstall")
+        if _probe_onnx_success(info):
+            result = _succeed(info, healed=True)
+            _LAST_ONNX_SUMMARY = result
+            return result
 
     if os.name == "nt":
         missing = _windows_missing_runtime_dlls()
@@ -629,17 +661,9 @@ def ensure_onnxruntime(
             if _install_windows_vcredist(log, lambda act, details: record(act, details)):
                 performed_heal = True
             summary["dlls_missing"] = _windows_missing_runtime_dlls()
+            if install_packages([ort_spec], label="pip-onnxruntime-postvcredist"):
+                performed_heal = True
             info = run_probe("probe-after-vcredist")
-            if _probe_onnx_success(info):
-                result = _succeed(info, healed=True)
-                _LAST_ONNX_SUMMARY = result
-                return result
-
-    for ver in ORT_VERSION_LADDER:
-        log(f"→ attempting onnxruntime=={ver}")
-        if install_packages([f"onnxruntime=={ver}"], label=f"pip-onnxruntime-{ver}"):
-            performed_heal = True
-            info = run_probe(f"probe-onnxruntime-{ver}")
             if _probe_onnx_success(info):
                 result = _succeed(info, healed=True)
                 _LAST_ONNX_SUMMARY = result
@@ -653,11 +677,10 @@ def ensure_onnxruntime(
         os.environ["ARGOS_DISABLE_ONNX"] = "1"
     log(
         f"?? onnxruntime unavailable after automated healing: {summary['error'] or 'unknown'}; "
-        'ARGOS_DISABLE_ONNX=1'
+        "ARGOS_DISABLE_ONNX=1"
     )
     _LAST_ONNX_SUMMARY = summary
     return summary
-
 
 def get_last_onnx_summary() -> Optional[dict[str, object]]:
     """Return the most recent ONNX Runtime summary captured by bootstrap ensure."""

@@ -1,6 +1,9 @@
+import platform
+import sys
 from pathlib import Path
 
 import panoptes.model_registry as mr
+from panoptes.runtime.onnx_spec import desired_ort_spec
 
 
 def _write_weight(path: Path) -> Path:
@@ -55,3 +58,12 @@ def test_ort_available_failure(monkeypatch):
     assert version is None
     assert providers is None
     assert reason == "ImportError: missing"
+
+
+def test_desired_ort_spec_matches_packaging():
+    spec = desired_ort_spec()
+    if sys.version_info >= (3, 10):
+        expected = "onnxruntime>=1.22,<1.23" if platform.system() == "Windows" else "onnxruntime>=1.22,<1.24"
+    else:
+        expected = "onnxruntime==1.19.2"
+    assert spec == expected
