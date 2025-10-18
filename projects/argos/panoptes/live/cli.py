@@ -7,7 +7,7 @@ import sys
 from typing import List, Optional, Tuple, Union
 
 try:
-    from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv
+    from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv # type: ignore[import]
 
     maybe_reexec_into_managed_venv()
 except Exception:
@@ -15,11 +15,11 @@ except Exception:
 
 import typer
 
-from panoptes.logging_config import bind_context, setup_logging
-from panoptes.runtime.backend_probe import ort_available, torch_available
+from panoptes.logging_config import bind_context, setup_logging # type: ignore[import]
+from panoptes.runtime.backend_probe import ort_available, torch_available # type: ignore[import]
 
 try:
-    from panoptes.support_bundle import write_support_bundle
+    from panoptes.support_bundle import write_support_bundle # type: ignore[import]
 except ImportError:  # pragma: no cover - fallback for direct package execution
     from ..support_bundle import write_support_bundle  # type: ignore
 
@@ -34,7 +34,7 @@ def _log_event(event: str, **info: object) -> None:
     else:
         LOGGER.info(event)
 
-from .pipeline import LivePipeline
+from .pipeline import LivePipeline # noqa: E402
 
 # Ensure live-friendly progress behavior even when invoked via the console script.
 os.environ.setdefault("PANOPTES_LIVE", "1")
@@ -189,7 +189,7 @@ def run(
     except Exception as exc:
         opencv_desc = f"missing ({type(exc).__name__}: {exc})"
 
-    capabilities = {
+    capabilities = { # type: ignore[var-annotated]
         "ort": {
             "ok": bool(ort_ok and ort_providers and not ort_reason),
             "version": ort_version,
@@ -199,7 +199,7 @@ def run(
         "torch": {"ok": bool(torch_ok)},
         "opencv": opencv_desc,
     }
-    _log_event("live.capabilities", **capabilities)
+    _log_event("live.capabilities", **capabilities) # type: ignore[arg-type]
 
     # Short, non-nested progress note during pipeline construction (auto-disabled in live by progress_ux)
     pipe: Optional[LivePipeline] = None

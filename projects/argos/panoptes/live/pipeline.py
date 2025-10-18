@@ -17,7 +17,7 @@ from .overlay import hud
 from . import tasks as live_tasks
 from . import config as live_config
 from .config import ModelSelection
-from panoptes.logging_config import bind_context
+from panoptes.logging_config import bind_context # type: ignore[import]
 
 # Live progress spinner (robust fallback)
 try:
@@ -103,29 +103,30 @@ class LivePipeline:
             return synthetic
 
     def _should_use_synthetic_fallback(self) -> bool:
-        if isinstance(self.source, str) and self.source.lower().startswith("synthetic"):
+        numeric_source = self._numeric_source()
+        if numeric_source is not None:
+            return numeric_source == 0
+
+        source_text = str(self.source).strip()
+        if source_text.lower().startswith("synthetic"):
             return False
-        if isinstance(self.source, int):
-            return self.source == 0
-        if isinstance(self.source, str):
-            token = self.source.strip()
-            if token.lstrip("+-").isdigit():
-                try:
-                    return int(token) == 0
-                except ValueError:
-                    return False
+        if source_text.lstrip("+-").isdigit():
+            try:
+                return int(source_text) == 0
+            except ValueError:
+                return False
         return False
 
     def _numeric_source(self) -> Optional[int]:
-        if isinstance(self.source, int):
-            return self.source
-        if isinstance(self.source, str):
-            token = self.source.strip()
-            if token.lstrip("+-").isdigit():
-                try:
-                    return int(token)
-                except ValueError:
-                    return None
+        source = self.source
+        if isinstance(source, int):
+            return source
+        token = str(source).strip()
+        if token.lstrip("+-").isdigit():
+            try:
+                return int(token)
+            except ValueError:
+                return None
         return None
 
     def _autoprobe_camera(self, error: RuntimeError) -> Optional[FrameSource]:

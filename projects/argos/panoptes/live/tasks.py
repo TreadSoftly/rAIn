@@ -90,7 +90,12 @@ except Exception:  # pragma: no cover
     u8 = cast(Any, "uint8")
 
 from ._types import NDArrayU8, Boxes, Names
-from panoptes.runtime.resilient_yolo import ResilientYOLO
+try:
+    from panoptes.runtime.resilient_yolo import ResilientYOLO as ResilientYOLORuntime  # type: ignore[import]
+except Exception:  # pragma: no cover
+    class ResilientYOLORuntime:  # type: ignore[no-redef]
+        def __init__(self, *_: Any, **__: Any) -> None:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
 # ─────────────────────────────────────────────────────────────────────
 # Central model registry (single source of truth) — guarded import
 # ─────────────────────────────────────────────────────────────────────
@@ -165,6 +170,12 @@ class TaskAdapter(Protocol):
 class _Predictor(Protocol):
     names: Any
     def predict(self, img: Any, *args: Any, **kwargs: Any) -> Any: ...
+
+class ResilientYOLOProtocol(Protocol):
+    def prepare(self) -> None: ...
+    def predict(self, frame: NDArrayU8, *args: Any, **kwargs: Any) -> Any: ...
+    def descriptor(self) -> str: ...
+    def active_model(self) -> _Predictor: ...
 
 
 # ---------------------------
@@ -272,7 +283,7 @@ class _LaplacianHeatmap(TaskAdapter):
 class _YOLODetect(TaskAdapter):
     """YOLO-based detector adapter for live mode (boxes)."""
 
-    def __init__(self, model: ResilientYOLO, *, conf: float = 0.25, iou: float = 0.45) -> None:
+    def __init__(self, model: ResilientYOLOProtocol, *, conf: float = 0.25, iou: float = 0.45) -> None:
         self.model = model
         self.conf = float(conf)
         self.iou = float(iou)
@@ -327,7 +338,7 @@ class _YOLOHeatmap(TaskAdapter):
     color each instance distinctly (and label it), matching offline heatmap behavior.
     """
 
-    def __init__(self, model: ResilientYOLO, *, conf: float = 0.25) -> None:
+    def __init__(self, model: ResilientYOLOProtocol, *, conf: float = 0.25) -> None:
         self.model = model
         self.conf = float(conf)
         self.names = _names_from_model(model.active_model())
@@ -412,7 +423,7 @@ class _YOLOHeatmap(TaskAdapter):
 # ---------------------------
 
 class _YOLOClassify(TaskAdapter):
-    def __init__(self, model: ResilientYOLO, *, topk: int = 1) -> None:
+    def __init__(self, model: ResilientYOLOProtocol, *, topk: int = 1) -> None:
         self.model = model
         self.label = model.descriptor()
         self.topk = max(1, int(topk))
@@ -506,7 +517,7 @@ class _SimpleClassify(TaskAdapter):
 # ---------------------------
 
 class _YOLOPose(TaskAdapter):
-    def __init__(self, model: ResilientYOLO, *, conf: float = 0.25) -> None:
+    def __init__(self, model: ResilientYOLOProtocol, *, conf: float = 0.25) -> None:
         self.model = model
         self.conf = float(conf)
         self.label = model.descriptor()
@@ -634,7 +645,7 @@ def _rotrect_to_pts(cx: float, cy: float, w: float, h: float, theta_deg: float) 
     return out
 
 class _YOLOOBB(TaskAdapter):
-    def __init__(self, model: ResilientYOLO, *, conf: float = 0.25, iou: float = 0.45) -> None:
+    def __init__(self, model: ResilientYOLOProtocol, *, conf: float = 0.25, iou: float = 0.45) -> None:
         self.model = model
         self.conf = float(conf)
         self.iou = float(iou)
@@ -768,11 +779,14 @@ def build_detect(
         if not candidates:
             raise RuntimeError("no-detect-weights")
         label_hint = _label_from_override_or_pick("detect", small, override)
-        wrapper = ResilientYOLO(
-            candidates,
-            task="detect",
-            conf=conf,
-            on_switch=hud_callback,
+        wrapper = cast(
+            ResilientYOLOProtocol,
+            ResilientYOLORuntime(
+                candidates,
+                task="detect",
+                conf=conf,
+                on_switch=hud_callback,
+            ),
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="detector")
@@ -796,11 +810,14 @@ def build_heatmap(
         if not candidates:
             raise RuntimeError("no-heatmap-weights")
         label_hint = _label_from_override_or_pick("heatmap", small, override)
-        wrapper = ResilientYOLO(
-            candidates,
-            task="heatmap",
-            conf=0.25,
-            on_switch=hud_callback,
+        wrapper = cast(
+            ResilientYOLOProtocol,
+            ResilientYOLORuntime(
+                candidates,
+                task="heatmap",
+                conf=0.25,
+                on_switch=hud_callback,
+            ),
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="segmenter")
@@ -825,11 +842,14 @@ def build_classify(
         if not candidates:
             raise RuntimeError("no-classify-weights")
         label_hint = _label_from_override_or_pick("classify", small, override)
-        wrapper = ResilientYOLO(
-            candidates,
-            task="classify",
-            conf=0.25,
-            on_switch=hud_callback,
+        wrapper = cast(
+            ResilientYOLOProtocol,
+            ResilientYOLORuntime(
+                candidates,
+                task="classify",
+                conf=0.25,
+                on_switch=hud_callback,
+            ),
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="classifier")
@@ -854,11 +874,14 @@ def build_pose(
         if not candidates:
             raise RuntimeError("no-pose-weights")
         label_hint = _label_from_override_or_pick("pose", small, override)
-        wrapper = ResilientYOLO(
-            candidates,
-            task="pose",
-            conf=conf,
-            on_switch=hud_callback,
+        wrapper = cast(
+            ResilientYOLOProtocol,
+            ResilientYOLORuntime(
+                candidates,
+                task="pose",
+                conf=conf,
+                on_switch=hud_callback,
+            ),
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="pose")
@@ -884,11 +907,14 @@ def build_obb(
         if not candidates:
             raise RuntimeError("no-obb-weights")
         label_hint = _label_from_override_or_pick("obb", small, override)
-        wrapper = ResilientYOLO(
-            candidates,
-            task="obb",
-            conf=conf,
-            on_switch=hud_callback,
+        wrapper = cast(
+            ResilientYOLOProtocol,
+            ResilientYOLORuntime(
+                candidates,
+                task="obb",
+                conf=conf,
+                on_switch=hud_callback,
+            ),
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
             sp.update(total=1, count=0, job="Load", model=label_hint, current="obb")
@@ -900,8 +926,3 @@ def build_obb(
         with _progress_simple_status("FALLBACK: simple-obb (no-ML)"):
             time.sleep(0.05)
         return _SimpleOBB(conf=conf)
-
-
-
-
-

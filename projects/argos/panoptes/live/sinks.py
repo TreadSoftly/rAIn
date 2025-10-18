@@ -37,7 +37,7 @@ except Exception:
     _np = None  # type: ignore
 
 from ._types import NDArrayU8
-from panoptes.logging_config import bind_context
+from panoptes.logging_config import bind_context # type: ignore[import]
 
 
 LOGGER = logging.getLogger(__name__)
