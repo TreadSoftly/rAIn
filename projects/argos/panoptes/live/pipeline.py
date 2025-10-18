@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Union, TypeAlias
+from typing import Optional, Tuple, Union
 import threading
 from queue import Empty, Full, Queue
 import time
@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
 
 LOGGER = logging.getLogger(__name__)
 
-FramePacket: TypeAlias = Tuple[NDArrayU8, float]
+FramePacket = Tuple[NDArrayU8, float]
 
 def _log(event: str, **info: object) -> None:
     if info:
