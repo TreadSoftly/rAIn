@@ -22,8 +22,22 @@ ROOT="$(cd "$HERE/.." && pwd)"
 if [[ "${1-}" == "argos" ]]; then shift; fi
 
 PY="$(command -v python3 || command -v python)"
-"$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes --reinstall --with-dev --extras audio
-VPY="$("$PY" "$ROOT/projects/argos/bootstrap.py" --print-venv)"
+BOOTSTRAP="$ROOT/projects/argos/bootstrap.py"
+
+if ! "$PY" "$BOOTSTRAP" --ensure --yes --reinstall --with-dev --extras audio; then
+  echo "Argos bootstrap failed. See logs above." >&2
+  exit 1
+fi
+
+VPY="$("$PY" "$BOOTSTRAP" --print-venv)"
+if [[ -z "$VPY" || ! -x "$VPY" ]]; then
+  echo "Could not resolve Argos venv python." >&2
+  exit 1
+fi
+
+VENV_ROOT="$(cd "$(dirname "$VPY")/.." && pwd)"
+echo "[Argos] python: $VPY (venv=$VENV_ROOT)"
+export PANOPTES_VENV_ROOT="$VENV_ROOT"
 
 "$VPY" -m pip check || true
 export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"

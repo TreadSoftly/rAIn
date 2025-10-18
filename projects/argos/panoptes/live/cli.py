@@ -16,6 +16,7 @@ except Exception:
 import typer
 
 from panoptes.logging_config import bind_context, setup_logging
+from panoptes.runtime.backend_probe import ort_available, torch_available
 
 try:
     from panoptes.support_bundle import write_support_bundle
@@ -175,9 +176,30 @@ def run(
         src = s
 
     with bind_context(live_task=t, source=str(src)):
-        _log_event("live.cli.selection", task=t, source=str(src), small=small, save=save, headless=headless)
+            _log_event("live.cli.selection", task=t, source=str(src), small=small, save=save, headless=headless)
 
     size: Optional[Tuple[int, int]] = (width, height) if (width and height) else None
+
+    ort_ok, ort_version, ort_providers, ort_reason = ort_available()
+    torch_ok = torch_available()
+    try:
+        import cv2  # type: ignore
+
+        opencv_desc = getattr(cv2, "__version__", "unknown")
+    except Exception as exc:
+        opencv_desc = f"missing ({type(exc).__name__}: {exc})"
+
+    capabilities = {
+        "ort": {
+            "ok": bool(ort_ok and ort_providers and not ort_reason),
+            "version": ort_version,
+            "providers": ort_providers,
+            "reason": ort_reason,
+        },
+        "torch": {"ok": bool(torch_ok)},
+        "opencv": opencv_desc,
+    }
+    _log_event("live.capabilities", **capabilities)
 
     # Short, non-nested progress note during pipeline construction (auto-disabled in live by progress_ux)
     pipe: Optional[LivePipeline] = None

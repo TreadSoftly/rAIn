@@ -258,8 +258,13 @@ finally {
   $ErrorActionPreference = $prev
 }
 if (-not $vpy) { throw "could not resolve venv python" }
+if (-not (Test-Path -LiteralPath $vpy)) { throw "venv python missing at $vpy" }
 
-$env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
+$venvRoot = Split-Path -Parent (Split-Path -Parent $vpy)
+Write-Host "[Argos] python: $vpy (venv=$venvRoot)"
+$env:PANOPTES_VENV_ROOT = $venvRoot
+
+$env:PYTHONPYCACHEPREFIX = Join-Path $env:LOCALAPPDATA "rAIn\pycache"
 
 Install-VcRedistIfMissing
 

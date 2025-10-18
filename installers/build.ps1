@@ -197,7 +197,11 @@ if ($LASTEXITCODE -ne 0) { throw "bootstrap failed ($LASTEXITCODE)" }
 # --- Resolve venv Python ---
 $vpy = & $script:pyExe @script:pyArgs "$scriptPath" --print-venv
 if (-not $vpy) { throw "could not resolve venv python" }
-$env:PYTHONPYCACHEPREFIX = "$env:LOCALAPPDATA\rAIn\pycache"
+if (-not (Test-Path -LiteralPath $vpy)) { throw "venv python missing at $vpy" }
+$venvRoot = Split-Path -Parent (Split-Path -Parent $vpy)
+Write-Host "[Argos] python: $vpy (venv=$venvRoot)"
+$env:PANOPTES_VENV_ROOT = $venvRoot
+$env:PYTHONPYCACHEPREFIX = Join-Path $env:LOCALAPPDATA "rAIn\pycache"
 
 # Add installers/ to PATH (session + profile) non-interactively (parity with Bash build)
 try { & (Join-Path $HERE 'setup-path.ps1') -Quiet } catch { }

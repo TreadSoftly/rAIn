@@ -181,15 +181,23 @@ def _candidate_weights(
           not explicitly de-prioritised via environment toggles.
     """
     prefer_onnx = os.environ.get("ARGOS_PREFER_ONNX", "1").strip().lower() not in {"0", "false", "no", "off"}
-    ort_ok, ort_reason = ort_available()
+    ort_ok, ort_version, ort_providers, ort_reason = ort_available()
     torch_ok = torch_available()
+    ort_ready = bool(ort_ok and ort_providers and not ort_reason)
+    if ort_providers:
+        ort_status = ",".join(ort_providers)
+    elif ort_reason:
+        ort_status = ort_reason
+    else:
+        ort_status = "OK" if ort_ready else "unavailable"
 
     _log(
         "weights.select.start",
         task=task,
         prefer_small=small,
         prefer_onnx=int(prefer_onnx),
-        ort="OK" if ort_ok else ort_reason,
+        ort=ort_status,
+        ort_version=ort_version or "?",
         torch="OK" if torch_ok else "missing",
     )
 
@@ -221,8 +229,8 @@ def _candidate_weights(
         for p in paths:
             suffix = p.suffix.lower()
             if suffix == ".onnx":
-                if not ort_ok:
-                    _log("weights.select.skip", task=task, weight=str(p), reason=ort_reason)
+                if not ort_ready:
+                    _log("weights.select.skip", task=task, weight=str(p), reason=ort_reason or "onnxruntime unavailable")
                     continue
                 if prefer_onnx:
                     if _add(p):
@@ -247,7 +255,7 @@ def _candidate_weights(
     if override is not None:
         override_path = _normalise(override)
         _add(override_path, force=True)
-        if override_path.suffix.lower() == ".onnx" and not ort_ok:
+        if override_path.suffix.lower() == ".onnx" and not ort_ready:
             _log(
                 "weights.select.warn",
                 task=task,
@@ -285,19 +293,22 @@ def _load_with_fallback(
     failure_reasons: list[str] = []
 
     for idx, weight in enumerate(candidates):
-        event = "weights.select.retry" if idx else "weights.select"
         source = choice if idx == 0 else "fallback"
-        _log(event, task=task, source=source, weight=str(weight))
+        _log("weights.select.try", task=task, source=source, weight=str(weight), index=idx)
         try:
             model = _load(weight, task=runtime_task)
         except Exception as exc:
             last_exc = exc
             last_weight = Path(weight)
-            failure_reasons.append(f"{weight.name}: {exc}")
+            reason = f"{type(exc).__name__}: {exc}"
+            failure_reasons.append(f"{weight.name}: {reason}")
+            _log("weights.select.fail", task=task, source=source, weight=str(weight), reason=reason)
             continue
         if model is not None:
+            _log("weights.select.hit", task=task, source=source, weight=str(weight))
             return model
         failure_reasons.append(f"{weight.name}: unavailable")
+        _log("weights.select.fail", task=task, source=source, weight=str(weight), reason="unavailable")
 
     joined = "; ".join(failure_reasons) or "unknown"
     _log("weights.select.fail_all", task=task, reasons=joined, source=choice)

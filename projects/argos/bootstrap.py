@@ -116,7 +116,24 @@ VENVS: Path = DATA / "venvs"
 SENTINEL: Path = CFG / "first_run.json"
 
 VENV: Path = VENVS / f"py{sys.version_info.major}{sys.version_info.minor}-argos"
-VPY: Path = VENV / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+
+
+def _venv_executable_path() -> Path:
+    """Return the path where the Argos venv Python should live (may not exist yet)."""
+    return VENV / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+
+
+def venv_python(*, ensure: bool = True) -> Path:
+    """
+    Resolve the Argos venv interpreter path, creating the venv if requested and missing.
+
+    Args:
+        ensure: When True, `_create_venv()` is invoked if the interpreter is absent.
+    """
+    py = _venv_executable_path()
+    if ensure and not py.exists():
+        _create_venv()
+    return py
 
 def _print(msg: object = "") -> None:
     s = str(msg)
@@ -176,7 +193,7 @@ def _ensure_dirs() -> None:
 def _module_present(mod: str) -> bool:
     code = f"import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('{mod}') else 1)"
     try:
-        _run([str(VPY), "-c", code], check=True, capture=False)
+        _run([str(venv_python()), "-c", code], check=True, capture=False)
         return True
     except Exception:
         return False
@@ -209,11 +226,12 @@ def _constraints_args() -> list[str]:
     return ["-c", str(c)] if c.exists() else []
 
 def _create_venv() -> None:
-    if VENV.exists() and VPY.exists():
+    py = _venv_executable_path()
+    if VENV.exists() and py.exists():
         return
     _print("→ creating virtual environment (outside repo)…")
     _run([sys.executable, "-m", "venv", str(VENV)], check=True, capture=False)
-    _run([str(VPY), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], check=True, capture=False)
+    _run([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], check=True, capture=False)
 
 def _torch_pins_from_requirements() -> Tuple[str, str]:
     torch_spec = "torch"
@@ -244,7 +262,7 @@ def _ensure_numpy_floor_for_torch() -> None:
         spec = "numpy>=1.26,<2.0"
         note = "NumPy >=1.26,<2.0"
     _print(f" ensuring {note} for Torch/Tv .")
-    _run([str(VPY), "-m", "pip", "install", "--upgrade", *_constraints_args(), spec], check=True, capture=False)
+    _run([str(venv_python()), "-m", "pip", "install", "--upgrade", *_constraints_args(), spec], check=True, capture=False)
 
 def _install_torch_if_needed(cpu_only: bool) -> None:
     """
@@ -259,7 +277,8 @@ def _install_torch_if_needed(cpu_only: bool) -> None:
     torch_spec, tv_spec = _torch_pins_from_requirements()
 
     # Use CPU wheels index on Win/Linux when CPU-only; macOS uses default (MPS wheels).
-    base_cmd = [str(VPY), "-m", "pip", "install"]
+    vpy = str(venv_python())
+    base_cmd = [vpy, "-m", "pip", "install"]
     idx: list[str] = []
     if cpu_only and (os.name == "nt" or sys.platform.startswith("linux")):
         idx = ["--index-url", "https://download.pytorch.org/whl/cpu"]
@@ -302,8 +321,8 @@ def _ensure_opencv_gui() -> None:
         if _has_distribution(pkg)
     ]
     if uninstall_targets:
-        _run([str(VPY), "-m", "pip", "uninstall", "-y", *uninstall_targets], check=False, capture=False)
-    _run([str(VPY), "-m", "pip", "install", "--upgrade", *_constraints_args(), "opencv-python"], check=True, capture=False)
+        _run([str(venv_python()), "-m", "pip", "uninstall", "-y", *uninstall_targets], check=False, capture=False)
+    _run([str(venv_python()), "-m", "pip", "install", "--upgrade", *_constraints_args(), "opencv-python"], check=True, capture=False)
 
 def _pip_install_editable_if_needed(
     *,
@@ -318,7 +337,7 @@ def _pip_install_editable_if_needed(
     if headless_present:
         need = True
         _print("→ removing opencv-python-headless (if installed) …")
-        _run([str(VPY), "-m", "pip", "uninstall", "-y", "opencv-python-headless"], check=False, capture=False)
+        _run([str(venv_python()), "-m", "pip", "uninstall", "-y", "opencv-python-headless"], check=False, capture=False)
 
     if not need:
         return
@@ -342,7 +361,7 @@ def _pip_install_editable_if_needed(
         extra_token = "[" + ",".join(install_extras) + "]"
 
     _run(
-        [str(VPY), "-m", "pip", "install", "-e", str(ARGOS) + extra_token, *_constraints_args()],
+        [str(venv_python()), "-m", "pip", "install", "-e", str(ARGOS) + extra_token, *_constraints_args()],
         check=True,
         capture=False,
     )
@@ -376,19 +395,21 @@ def _ensure_sympy_alignment() -> None:
 
     _print(f"→ aligning sympy to {required_sympy} …")
     _run(
-        [str(VPY), "-m", "pip", "install", f"sympy=={required_sympy}", *_constraints_args()],
+        [str(venv_python()), "-m", "pip", "install", f"sympy=={required_sympy}", *_constraints_args()],
         check=True,
         capture=False,
     )
 
 
-def _probe_onnx_runtime() -> dict[str, object]:
+def _probe_onnx_runtime(py: Path) -> dict[str, object]:
     """Inspect ONNX/ONNX Runtime availability inside the Argos venv."""
     probe = r"""
 import json
 result = {
     "onnx": False,
+    "onnx_version": None,
     "onnxruntime": False,
+    "version": None,
     "providers": None,
     "error": None,
 }
@@ -397,12 +418,14 @@ errors = []
 try:
     import onnx  # noqa: F401
     result["onnx"] = True
+    result["onnx_version"] = getattr(onnx, "__version__", None)
 except Exception as exc:  # pragma: no cover - diagnostics only
     errors.append(f"onnx: {type(exc).__name__}: {exc}")
 
 try:
     import onnxruntime as ort  # noqa: F401
     result["onnxruntime"] = True
+    result["version"] = getattr(ort, "__version__", None)
     try:
         result["providers"] = list(ort.get_available_providers())
     except Exception as exc:  # pragma: no cover
@@ -415,7 +438,7 @@ if errors:
 
 print(json.dumps(result))
 """
-    cp = _run([str(VPY), "-c", probe], check=False, capture=True)
+    cp = _run([str(py), "-c", probe], check=False, capture=True)
     data: dict[str, object] = {}
     try:
         payload = (cp.stdout or "").strip()
@@ -428,43 +451,230 @@ print(json.dumps(result))
     return data
 
 
-def _ensure_onnx_runtime_packages() -> None:
-    """Guarantee ONNX + ONNX Runtime are importable inside the venv."""
-    info = _probe_onnx_runtime()
-    onnx_ok = bool(info.get("onnx"))
-    ort_ok = bool(info.get("onnxruntime"))
 
-    if onnx_ok and ort_ok and info.get("providers"):
-        _print(f"→ onnxruntime providers detected: {info.get('providers')}")
-        return
+def _probe_onnx_success(info: dict[str, object]) -> bool:
+    """Return True when the probe indicates a healthy ONNX Runtime import."""
+    return bool(info.get("onnxruntime")) and not info.get("error")
 
-    _print(" ensuring onnx + onnxruntime inside venv .")
 
-    def _install(binary_only: bool) -> bool:
-        cmd = [str(VPY), "-m", "pip", "install", "--upgrade"]
+def _windows_missing_runtime_dlls() -> list[str]:
+    """Detect missing Windows runtime DLLs required by onnxruntime."""
+    if os.name != "nt":
+        return []
+    win_root = Path(os.environ.get("SystemRoot") or os.environ.get("WINDIR") or "C\\Windows")
+    sys32 = win_root / "System32"
+    required = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "vcomp140.dll"]
+    missing: list[str] = []
+    for name in required:
+        path = sys32 / name
+        try:
+            exists = path.exists()
+        except Exception:
+            exists = False
+        if not exists:
+            missing.append(name)
+    return missing
+
+
+def _install_windows_vcredist(
+    log: Callable[[str], None],
+    record: Callable[[str, dict[str, object]], None],
+) -> bool:
+    """Download and install the MSVC redistributable silently on Windows."""
+    if os.name != "nt":
+        return False
+
+    url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+    try:
+        import urllib.request
+    except Exception as exc:  # pragma: no cover - missing stdlib component
+        record("download-vcredist", {"status": "error", "error": f"{type(exc).__name__}: {exc}"})
+        return False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "vc_redist.x64.exe"
+        try:
+            with urllib.request.urlopen(url, timeout=120) as resp:
+                data = resp.read()
+            dest.write_bytes(data)
+            record("download-vcredist", {"status": "ok", "size": dest.stat().st_size})
+        except Exception as exc:  # pragma: no cover - network issues
+            record("download-vcredist", {"status": "error", "error": f"{type(exc).__name__}: {exc}"})
+            return False
+
+        log("→ installing Microsoft Visual C++ Redistributable (x64)…")
+        try:
+            proc = subprocess.run(
+                [str(dest), "/install", "/quiet", "/norestart"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            record(
+                "install-vcredist",
+                {
+                    "status": "ok" if proc.returncode == 0 else "error",
+                    "returncode": proc.returncode,
+                    "stdout_tail": (proc.stdout or "")[-400:],
+                    "stderr_tail": (proc.stderr or "")[-400:],
+                },
+            )
+            return proc.returncode == 0
+        except Exception as exc:  # pragma: no cover
+            record("install-vcredist", {"status": "error", "error": f"{type(exc).__name__}: {exc}"})
+            return False
+
+
+ORT_VERSION_LADDER: list[str] = ["1.19.2", "1.19.1", "1.19.0", "1.18.1", "1.18.0", "1.17.3"]
+_LAST_ONNX_SUMMARY: Optional[dict[str, object]] = None
+
+
+def ensure_onnxruntime(
+    venv_py: Optional[Path] = None,
+    *,
+    log: Callable[[str], None] = _print,
+) -> dict[str, object]:
+    """
+    Guarantee that ONNX + ONNX Runtime are importable within the Argos venv.
+
+    Returns a summary dict describing the actions taken and the resulting state.
+    """
+    global _LAST_ONNX_SUMMARY
+    py = venv_py or venv_python()
+    summary: dict[str, object] = {
+        "installed": False,
+        "healed": False,
+        "ort_version": None,
+        "onnx_version": None,
+        "providers": None,
+        "attempts": [],
+        "error": None,
+        "dlls_missing": [],
+    }
+    attempts: list[dict[str, object]] = summary["attempts"]  # type: ignore[assignment]
+
+    def record(action: str, info: Optional[dict[str, object]] = None) -> None:
+        entry: dict[str, object] = {"action": action}
+        if info:
+            entry.update(info)
+        attempts.append(entry)
+
+    def run_probe(label: str) -> dict[str, object]:
+        info = _probe_onnx_runtime(py)
+        record(label, info)
+        return info
+
+    def install_packages(packages: Sequence[str], *, label: str, binary_only: bool = True) -> bool:
+        cmd = [str(py), "-m", "pip", "install", "--upgrade"]
         if binary_only:
             cmd.append("--only-binary=:all:")
         cmd.extend(_constraints_args())
-        cmd.extend(["onnx", "onnxruntime"])
+        cmd.extend(list(packages))
         try:
             _run(cmd, check=True, capture=False)
+            record(label, {"status": "ok", "packages": list(packages), "binary_only": binary_only})
             return True
-        except Exception:
+        except Exception as exc:
+            record(
+                label,
+                {
+                    "status": "error",
+                    "packages": list(packages),
+                    "binary_only": binary_only,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
             return False
 
-    if not _install(binary_only=True):
-        _install(binary_only=False)
+    info = run_probe("probe-initial")
 
-    info = _probe_onnx_runtime()
-    providers = info.get("providers")
-    error = info.get("error")
-    onnx_ok = bool(info.get("onnx"))
-    ort_ok = bool(info.get("onnxruntime"))
+    def _succeed(data: dict[str, object], healed: bool) -> dict[str, object]:
+        summary["installed"] = True
+        summary["healed"] = healed
+        summary["ort_version"] = data.get("version")
+        summary["onnx_version"] = data.get("onnx_version")
+        summary["providers"] = data.get("providers")
+        summary["error"] = None
+        log(f"→ onnxruntime ready (v{data.get('version') or '?'}, providers={data.get('providers') or []})")
+        return summary
 
-    if onnx_ok and ort_ok and providers:
-        _print(f"→ onnxruntime providers: {providers}")
-    else:
-        _print(f"??  ONNX setup incomplete (onnx={onnx_ok}, ort={ort_ok}) reason={error or 'unknown'}")
+    if _probe_onnx_success(info):
+        result = _succeed(info, healed=False)
+        _LAST_ONNX_SUMMARY = result
+        return result
+
+    summary["error"] = info.get("error")
+    summary["onnx_version"] = info.get("onnx_version")
+    performed_heal = False
+
+    install_packages(["pip", "setuptools", "wheel"], label="pip-upgrade", binary_only=False)
+    if install_packages(["onnx"], label="pip-onnx"):
+        performed_heal = True
+    if install_packages(["onnxruntime"], label="pip-onnxruntime"):
+        performed_heal = True
+
+    info = run_probe("probe-after-pip")
+    if _probe_onnx_success(info):
+        result = _succeed(info, healed=performed_heal)
+        _LAST_ONNX_SUMMARY = result
+        return result
+
+    if os.name == "nt":
+        missing = _windows_missing_runtime_dlls()
+        summary["dlls_missing"] = missing
+        record("msvc-scan", {"missing": missing})
+        if missing:
+            log(f"→ missing MSVC runtime DLLs detected: {missing}")
+            if _install_windows_vcredist(log, lambda act, details: record(act, details)):
+                performed_heal = True
+            summary["dlls_missing"] = _windows_missing_runtime_dlls()
+            info = run_probe("probe-after-vcredist")
+            if _probe_onnx_success(info):
+                result = _succeed(info, healed=True)
+                _LAST_ONNX_SUMMARY = result
+                return result
+
+    for ver in ORT_VERSION_LADDER:
+        log(f"→ attempting onnxruntime=={ver}")
+        if install_packages([f"onnxruntime=={ver}"], label=f"pip-onnxruntime-{ver}"):
+            performed_heal = True
+            info = run_probe(f"probe-onnxruntime-{ver}")
+            if _probe_onnx_success(info):
+                result = _succeed(info, healed=True)
+                _LAST_ONNX_SUMMARY = result
+                return result
+
+    summary["error"] = info.get("error")
+    summary["providers"] = info.get("providers")
+    summary["healed"] = performed_heal and summary["installed"]
+
+    if os.environ.get("ARGOS_DISABLE_ONNX") != "1":
+        os.environ["ARGOS_DISABLE_ONNX"] = "1"
+    log(
+        f"?? onnxruntime unavailable after automated healing: {summary['error'] or 'unknown'}; "
+        'ARGOS_DISABLE_ONNX=1'
+    )
+    _LAST_ONNX_SUMMARY = summary
+    return summary
+
+
+def get_last_onnx_summary() -> Optional[dict[str, object]]:
+    """Return the most recent ONNX Runtime summary captured by bootstrap ensure."""
+    return _LAST_ONNX_SUMMARY
+
+
+
+
+def _ensure_onnx_runtime_packages() -> None:
+    """Guarantee ONNX + ONNX Runtime availability during bootstrap."""
+    global _LAST_ONNX_SUMMARY
+    summary = ensure_onnxruntime(venv_python(), log=_print)
+    _LAST_ONNX_SUMMARY = summary
+    if not summary.get("installed"):
+        reason = summary.get("error") or "unknown"
+        providers = summary.get("providers")
+        _print(f"?? onnxruntime unavailable after bootstrap: {reason}; providers={providers}")
 
 
 def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str], list[str]]:
@@ -513,7 +723,8 @@ out_path.write_text(json.dumps({
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tf:
         out_path = Path(tf.name)
     try:
-        py = str(VPY) if VENV.exists() and VPY.exists() else sys.executable
+        vpy_path = _venv_executable_path()
+        py = str(vpy_path) if VENV.exists() and vpy_path.exists() else sys.executable
         env = os.environ.copy()
         env_pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = (str(ARGOS) + (os.pathsep + env_pp if env_pp else ""))
@@ -552,7 +763,7 @@ def _child_json(code: str, args: list[str]) -> Dict[str, Any]:
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as tf:
         out_path = Path(tf.name)
     try:
-        _run([str(VPY), "-c", code, *args, str(out_path)], check=True, capture=False)
+        _run([str(venv_python()), "-c", code, *args, str(out_path)], check=True, capture=False)
         txt = out_path.read_text(encoding="utf-8")
         result: JSONDict = {}
         if txt.strip():
@@ -608,7 +819,7 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
         return
 
     if not _module_present("ultralytics"):
-        _run([str(VPY), "-m", "pip", "install", "ultralytics>=8.0"], check=True, capture=False)
+        _run([str(venv_python()), "-m", "pip", "install", "ultralytics>=8.0"], check=True, capture=False)
 
     pt_missing = [n for n in need if n.lower().endswith(".pt")]
     onnx_missing = [n for n in need if n.lower().endswith(".onnx")]
@@ -798,7 +1009,7 @@ param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
     )
 
 def _print_help(cpu_only: bool) -> None:
-    py = VPY
+    py = _venv_executable_path()
     msg = f"""
 ★ Argos is ready.
 
@@ -899,11 +1110,11 @@ def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
 
 def _pip_check_soft() -> None:
     try:
-        _run([str(VPY), "-m", "pip", "check"], check=True, capture=False)
+        _run([str(venv_python()), "-m", "pip", "check"], check=True, capture=False)
     except Exception:
         _print("⚠️  'pip check' reported issues; continuing. Details follow:")
         try:
-            cp = _run([str(VPY), "-m", "pip", "check"], check=False, capture=True)
+            cp = _run([str(venv_python()), "-m", "pip", "check"], check=False, capture=True)
             if cp and hasattr(cp, "stdout") and cp.stdout:
                 _print(cp.stdout.strip())
             if cp and hasattr(cp, "stderr") and cp.stderr:
@@ -983,7 +1194,7 @@ def main(argv: list[str]) -> int:
     _ensure_dirs()
 
     if args.print_venv:
-        _print(str(VPY))
+        _print(str(venv_python()))
         return 0
 
     cpu_only = bool(args.cpu_only or not _has_cuda())

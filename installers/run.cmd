@@ -160,8 +160,24 @@ if not defined PY (
 )
 
 :gotpy
-%PY% "%ROOT%\projects\argos\bootstrap.py" --ensure --yes >NUL 2>&1
+%PY% "%ROOT%\projects\argos\bootstrap.py" --ensure --yes
+if errorlevel 1 (
+  echo Argos bootstrap failed. See logs above.
+  exit /b !ERRORLEVEL!
+)
 for /f "usebackq delims=" %%V in (`%PY% "%ROOT%\projects\argos\bootstrap.py" --print-venv`) do set "VPY=%%V"
+if not defined VPY (
+  echo Could not resolve Argos venv python.
+  exit /b 1
+)
+if not exist "%VPY%" (
+  echo Argos venv python missing at %VPY%.
+  exit /b 1
+)
+for %%I in ("%VPY%") do set "VENV_BIN=%%~dpI"
+for %%I in ("%VENV_BIN%..") do set "VENV_ROOT=%%~fI"
+echo [Argos] python: %VPY% (venv=%VENV_ROOT%)
+set "PANOPTES_VENV_ROOT=%VENV_ROOT%"
 set "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\rAIn\pycache"
 
 rem ---- module switch ----

@@ -226,7 +226,18 @@ def _log_env_snapshot() -> None:
         _say("ENV", f"Implementation: {platform.python_implementation()}")
         _say("ENV", f"Platform: {platform.platform()} | machine={platform.machine()} | arch={platform.architecture()[0]}")
         _say("ENV", f"Executable: {sys.executable}")
-        _say("ENV", f"Working dir: {os.getcwd()}")
+        venv_root = os.environ.get('PANOPTES_VENV_ROOT')
+        in_argos_venv = False
+        if venv_root:
+            try:
+                in_argos_venv = Path(sys.executable).resolve().is_relative_to(Path(venv_root).resolve())
+            except Exception:
+                in_argos_venv = False
+        else:
+            base_prefix = getattr(sys, 'base_prefix', sys.prefix)
+            in_argos_venv = sys.prefix != base_prefix
+        _say('ENV', f'In Argos venv: {in_argos_venv} | PANOPTES_VENV_ROOT={venv_root or "unset"}')
+        _say('ENV', f'Working dir: {os.getcwd()}')
 
         # PATH entries for sanity
         try:
@@ -358,7 +369,7 @@ def _log_env_snapshot() -> None:
         # Windows VC++ redistributable DLLs
         if os.name == "nt":
             sysdir = Path(os.getenv("WINDIR", r"C:\Windows")) / "System32"
-            for dll in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"):
+            for dll in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "vcomp140.dll"):
                 present = (sysdir / dll).exists()
                 _say("MSVC", f"{dll}: {'Present' if present else 'Missing'}")
     except Exception as e:

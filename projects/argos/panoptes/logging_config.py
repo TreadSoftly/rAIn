@@ -11,7 +11,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterator, MutableMapping
+from typing import Dict, Iterator, MutableMapping, Optional
 
 import contextvars
 
@@ -223,19 +223,21 @@ def setup_logging(
 
         logs_root = _pick_logs_root()
         run_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}_{uuid.uuid4().hex[:8]}"
-        run_dir = logs_root
+        run_dir = logs_root / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        legacy_runs = run_dir.parent / "runs"
+        legacy_runs = logs_root / "runs"
         if legacy_runs.exists() and legacy_runs.is_dir():
             shutil.rmtree(legacy_runs, ignore_errors=True)
 
         file_override = os.getenv(file_env)
+        aggregate_path: Optional[Path] = None
         if file_override:
             log_path = Path(file_override).expanduser()
             log_path.parent.mkdir(parents=True, exist_ok=True)
         else:
             log_path = run_dir / "argos.log"
+            aggregate_path = logs_root / "argos.log"
 
         _BASE_CONTEXT.set({"run_id": run_id, "run_dir": str(run_dir)})
         _EXTRA_CONTEXT.set({})
@@ -243,6 +245,18 @@ def setup_logging(
         _RUN_ID.set(run_id)
 
         _configure_handlers(level, console_level, console_fmt, use_json_console, log_path, file_mode="w")
+        if aggregate_path is not None:
+            try:
+                aggregate_handler = logging.FileHandler(aggregate_path, encoding="utf-8", mode="a")
+                aggregate_handler.setLevel(level)
+                aggregate_handler.setFormatter(JsonFormatter())
+                logging.getLogger().addHandler(aggregate_handler)
+            except Exception:
+                logging.getLogger(__name__).debug("Failed to attach aggregate log handler", exc_info=True)
+            try:
+                (logs_root / "latest_run.txt").write_text(run_id, encoding="utf-8")
+            except Exception:
+                logging.getLogger(__name__).debug("Failed to update latest run pointer", exc_info=True)
         _STATE.configured = True
 
     try:

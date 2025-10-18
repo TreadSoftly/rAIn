@@ -70,12 +70,101 @@ class LivePipeline:
         if isinstance(self.source, str) and self.source.lower().startswith("synthetic"):
             return synthetic_source(size=self.size or (640, 480), fps=self.fps or 30)
         # camera/video path
-        return open_camera(
-            self.source,
-            width=(self.size[0] if self.size else None),
-            height=(self.size[1] if self.size else None),
-            fps=self.fps,
-        )
+        try:
+            return open_camera(
+                self.source,
+                width=(self.size[0] if self.size else None),
+                height=(self.size[1] if self.size else None),
+                fps=self.fps,
+            )
+        except RuntimeError as exc:
+            alt_source = self._autoprobe_camera(exc)
+            if alt_source is not None:
+                return alt_source
+            if not self._should_use_synthetic_fallback():
+                raise
+            _log(
+                "live.pipeline.source.fallback",
+                original=str(self.source),
+                fallback="synthetic",
+                reason=str(exc),
+            )
+            try:
+                synthetic = synthetic_source(size=self.size or (640, 480), fps=self.fps or 30)
+            except Exception as fallback_exc:
+                _log(
+                    "live.pipeline.source.fallback.error",
+                    original=str(self.source),
+                    fallback="synthetic",
+                    error=type(fallback_exc).__name__,
+                )
+                raise exc from fallback_exc
+            self._register_toast("Camera unavailable; showing synthetic demo feed.")
+            return synthetic
+
+    def _should_use_synthetic_fallback(self) -> bool:
+        if isinstance(self.source, str) and self.source.lower().startswith("synthetic"):
+            return False
+        if isinstance(self.source, int):
+            return self.source == 0
+        if isinstance(self.source, str):
+            token = self.source.strip()
+            if token.lstrip("+-").isdigit():
+                try:
+                    return int(token) == 0
+                except ValueError:
+                    return False
+        return False
+
+    def _numeric_source(self) -> Optional[int]:
+        if isinstance(self.source, int):
+            return self.source
+        if isinstance(self.source, str):
+            token = self.source.strip()
+            if token.lstrip("+-").isdigit():
+                try:
+                    return int(token)
+                except ValueError:
+                    return None
+        return None
+
+    def _autoprobe_camera(self, error: RuntimeError) -> Optional[FrameSource]:
+        current_idx = self._numeric_source()
+        if current_idx is None or current_idx < 0:
+            return None
+
+        probe_limit = getattr(live_config, "AUTO_CAMERA_PROBE_LIMIT", 4)
+        attempted: list[int] = []
+        for candidate in range(0, probe_limit + 1):
+            if candidate == current_idx:
+                continue
+            attempted.append(candidate)
+            try:
+                camera = open_camera(
+                    candidate,
+                    width=(self.size[0] if self.size else None),
+                    height=(self.size[1] if self.size else None),
+                    fps=self.fps,
+                )
+            except RuntimeError:
+                continue
+            self.source = candidate
+            _log(
+                "live.pipeline.source.autodetected",
+                original=str(current_idx),
+                selected=str(candidate),
+            )
+            self._register_toast(f"Camera {candidate} detected automatically.")
+            return camera
+
+        if attempted:
+            _log(
+                "live.pipeline.source.autoprobe.failed",
+                original=str(self.source),
+                attempted=",".join(str(i) for i in attempted),
+                reason=str(error),
+            )
+        return None
 
     def _register_toast(self, message: str) -> None:
         _log("live.model.toast", task=self.task, message=message)

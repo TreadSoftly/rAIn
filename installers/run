@@ -118,8 +118,22 @@ fi
 # ---- Launch Python module ---------------------------------------------------
 if [[ "$proj" == "argos" ]]; then
   PY="$(command -v python3 || command -v python)"
-  "$PY" "$ROOT/projects/argos/bootstrap.py" --ensure --yes >/dev/null 2>&1 || true
-  VPY="$("$PY" "$ROOT/projects/argos/bootstrap.py" --print-venv)"
+  BOOTSTRAP="$ROOT/projects/argos/bootstrap.py"
+
+  if ! "$PY" "$BOOTSTRAP" --ensure --yes; then
+    echo "Argos bootstrap failed. See logs above." >&2
+    exit 1
+  fi
+
+  VPY="$("$PY" "$BOOTSTRAP" --print-venv)"
+  if [[ -z "$VPY" || ! -x "$VPY" ]]; then
+    echo "Could not resolve Argos venv python." >&2
+    exit 1
+  fi
+
+  VENV_ROOT="$(cd "$(dirname "$VPY")/.." && pwd)"
+  echo "[Argos] python: $VPY (venv=$VENV_ROOT)"
+  export PANOPTES_VENV_ROOT="$VENV_ROOT"
   export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
 
   # Live-specific progress behavior
