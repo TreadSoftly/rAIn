@@ -186,15 +186,10 @@ class ResilientYOLO:
 
         notice_needed = self._pending_notice is not None or previous_backend is not None
         if notice_needed and self._on_switch is not None:
+            message = f"Switched backend -> {self._backend.upper()} ({weight.name})"
             if self._pending_notice:
-                self._on_switch(self._pending_notice)
-                self._on_switch(
-                    f"Switched backend -> {self._backend.upper()} ({weight.name})"
-                )
-            else:
-                self._on_switch(
-                    f"Switched backend -> {self._backend.upper()} ({weight.name})"
-                )
+                message = f"{message} | {self._pending_notice}"
+            self._on_switch(message)
         self._pending_notice = None
 
     def _record_failure(self, weight: Path, exc: BaseException) -> None:
