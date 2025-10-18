@@ -10,7 +10,7 @@ import sys
 import urllib.request
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any, Literal, Optional, Protocol, Union
+from typing import Any, Callable, Literal, Optional, Protocol, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -48,7 +48,7 @@ except ImportError:                # pragma: no cover
 
 # Preload primary models once (respecting the central registry)
 def _safe_load(
-    loader,
+    loader: Callable[..., Any],
     *,
     task: str,
     small: Optional[bool] = None,

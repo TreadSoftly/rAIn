@@ -49,13 +49,13 @@ from typing import (
     overload,
 )
 
-from panoptes.logging_config import setup_logging
-from panoptes.runtime.onnx_spec import desired_ort_spec
+from panoptes.logging_config import setup_logging # type: ignore[import]
+from panoptes.runtime.onnx_spec import desired_ort_spec # type: ignore[import]
 
 try:
-    from panoptes.model_registry import WEIGHT_PRIORITY as _BOOTSTRAP_WEIGHT_PRIORITY
+    from panoptes.model_registry import WEIGHT_PRIORITY as _BOOTSTRAP_WEIGHT_PRIORITY # type: ignore[import]
 except Exception:  # pragma: no cover - bootstrap still works even if registry import fails
-    _BOOTSTRAP_WEIGHT_PRIORITY: dict[str, list[Path]] = {}
+    _BOOTSTRAP_WEIGHT_PRIORITY: dict[str, list[Path]] = {} # type: ignore[assignment]
 
 # Diagnostics (always try to attach; never crash on failure)
 try:

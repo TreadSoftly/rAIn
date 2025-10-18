@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Iterator, List, Optional, Sequence, cast
 
 LOGGER = logging.getLogger(__name__)
 
@@ -243,16 +243,17 @@ class ResilientYOLO:
     # -------------------------------
     #  Public API
     # -------------------------------
-    def predict(self, frame, **kwargs):
+    def predict(self, frame: Any, **kwargs: Any) -> Any:
         self._ensure_model()
         assert self._model is not None
 
         try:
             predict = getattr(self._model, "predict")
-            call_kwargs = dict(kwargs)
+            predict_callable = cast(Callable[..., Any], predict)
+            call_kwargs: dict[str, Any] = dict(kwargs)
             call_kwargs.setdefault("conf", self._conf)
             call_kwargs.setdefault("verbose", False)
-            return predict(frame, **call_kwargs)
+            return predict_callable(frame, **call_kwargs)
         except Exception as exc:
             if _should_retry(exc) and len(self._candidates) > 1:
                 LOGGER.warning(

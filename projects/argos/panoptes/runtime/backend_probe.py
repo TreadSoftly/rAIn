@@ -14,7 +14,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Iterable, Sequence, Callable, cast
 
 import importlib.util as importlib_util
 
@@ -77,7 +77,11 @@ def _try_import_ort() -> Tuple[bool, Optional[str], Optional[list[str]], Optiona
         return False, None, None, f"{type(exc).__name__}: {exc}"
     version = getattr(ort, "__version__", None)
     try:
-        providers = list(ort.get_available_providers())
+        providers_getter = cast(Optional[Callable[[], Sequence[str]]], getattr(ort, "get_available_providers", None))
+        if providers_getter is None:
+            return True, version, None, "providers unavailable: missing get_available_providers"
+        providers_iter = cast(Iterable[str], providers_getter())
+        providers: list[str] = list(providers_iter)
     except Exception as exc:
         return True, version, None, f"providers unavailable: {exc}"
     return True, version, providers, None
@@ -116,10 +120,12 @@ def ort_available() -> Tuple[bool, Optional[str], Optional[list[str]], Optional[
                         try:
                             venv_py = _BOOTSTRAP.venv_python()
                         except Exception as exc:
-                            LOG.exception("onnx.heal.venv_python_failed")
-                    summary = ensure(venv_py, log=lambda msg: LOG.info("onnx.heal %s", msg))
+                            LOG.exception("onnx.heal.venv_python_failed: %s", exc)
+                    def _heal_log(msg: str) -> None:
+                        LOG.info("onnx.heal %s", msg)
+                    summary = ensure(venv_py, log=_heal_log)
                 except Exception as exc:
-                    LOG.exception("onnx.heal.ensure_exception")
+                    LOG.exception("onnx.heal.ensure_exception: %s", exc)
                     summary = {"installed": False, "error": f"{type(exc).__name__}: {exc}"}
             else:
                 summary = {"installed": False, "error": f"heal already in progress ({lock_path})"}

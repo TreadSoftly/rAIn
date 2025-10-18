@@ -101,10 +101,11 @@ def write_support_bundle(
         seen.add(key)
         unique_files.append((path, arcname))
 
+    manifest_files: list[dict[str, object]] = []
     manifest: dict[str, object] = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "run_dir": str(run),
-        "files": [],
+        "files": manifest_files,
     }
     if metadata:
         manifest.update(metadata)
@@ -114,7 +115,7 @@ def write_support_bundle(
             try:
                 bundle.write(path, arcname)
                 stat = path.stat()
-                manifest["files"].append(
+                manifest_files.append(
                     {
                         "arcname": arcname,
                         "size": stat.st_size,
@@ -126,4 +127,3 @@ def write_support_bundle(
         bundle.writestr("support.json", json.dumps(manifest, indent=2, ensure_ascii=False))
 
     return output_path
-

@@ -1,13 +1,14 @@
 from pathlib import Path
 
-import panoptes.model_registry as mr
+import panoptes.model_registry as mr  # type: ignore[import]
+from pytest import MonkeyPatch
 
 
 class DummyModel:
     pass
 
 
-def test_load_detector_falls_back_to_next_weight(monkeypatch, tmp_path):
+def test_load_detector_falls_back_to_next_weight(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     bad_weight = tmp_path / "bad.onnx"
     bad_weight.write_text("x", encoding="utf-8")
     good_weight = tmp_path / "good.pt"

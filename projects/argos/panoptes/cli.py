@@ -28,7 +28,7 @@ from types import TracebackType
 from typing import Any, Callable, Final, Iterable, Iterator, List, Literal, Optional, Protocol, cast
 
 try:
-    from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv
+    from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv # type: ignore[import]
 
     maybe_reexec_into_managed_venv()
 except Exception:
@@ -36,7 +36,7 @@ except Exception:
 
 import typer
 
-from panoptes.logging_config import bind_context, current_run_dir, setup_logging
+from panoptes.logging_config import bind_context, current_run_dir, setup_logging # type: ignore[import]
 from .ffmpeg_utils import resolve_ffmpeg
 from .support_bundle import write_support_bundle
 

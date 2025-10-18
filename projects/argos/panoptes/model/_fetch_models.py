@@ -18,6 +18,7 @@ from typing import (
     Any,
     ContextManager,
     Dict,
+    Generator,
     Iterable,
     Iterator,
     List,
@@ -69,7 +70,7 @@ try:
     from panoptes.progress import simple_status as _simple_status  # type: ignore
 
     @contextmanager
-    def percent_spinner(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
+    def percent_spinner(*args: Any, **kwargs: Any) -> Generator[_ProgressLike, None, None]:  # type: ignore[misc]
         prev_tail = os.environ.get("PANOPTES_PROGRESS_TAIL")
         if prev_tail is None or prev_tail.strip().lower() == "none":
             os.environ["PANOPTES_PROGRESS_TAIL"] = "full"
@@ -85,8 +86,9 @@ try:
     def simple_status(*args: Any, **kwargs: Any) -> ContextManager[Any]:  # type: ignore[misc]
         return _simple_status(*args, **kwargs)
 except Exception:  # pragma: no cover
-    def percent_spinner(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore
-        return _NoopSpinner()
+    @contextmanager
+    def percent_spinner(*_: Any, **__: Any) -> Generator[_ProgressLike, None, None]:  # type: ignore
+        yield _NoopSpinner()
 
     def simple_status(*_: Any, **__: Any) -> ContextManager[Any]:  # type: ignore
         return _NoopSpinner()

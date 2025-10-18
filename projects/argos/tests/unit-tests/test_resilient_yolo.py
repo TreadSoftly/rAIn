@@ -1,25 +1,29 @@
-from pathlib import Path
-import types
+from __future__ import annotations
+
 import sys
+import types
+from pathlib import Path
+from typing import Any, Type
 
-from panoptes.runtime.resilient_yolo import ResilientYOLO
+from panoptes.runtime.resilient_yolo import ResilientYOLO  # type: ignore[import]
+from pytest import MonkeyPatch
 
 
-def _install_dummy_ultralytics(monkeypatch, cls):
+def _install_dummy_ultralytics(monkeypatch: MonkeyPatch, cls: Type[Any]) -> None:
     module = types.SimpleNamespace(YOLO=cls)
     monkeypatch.setitem(sys.modules, "ultralytics", module)
 
 
-def test_resilient_fallback_on_init_failure(monkeypatch, tmp_path):
+def test_resilient_fallback_on_init_failure(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     class DummyYOLO:
-        def __init__(self, weight, *_, **__):
+        def __init__(self, weight: Path, *args: Any, **kwargs: Any):
             self.weight = Path(weight)
             if self.weight.suffix == ".onnx":
                 raise ImportError("onnxruntime missing")
             self.names = {0: "dummy"}
             self.device = "cpu"
 
-        def predict(self, frame, **_kwargs):
+        def predict(self, frame: Any, **kwargs: Any):
             return ["ok"]
 
     _install_dummy_ultralytics(monkeypatch, DummyYOLO)
@@ -38,14 +42,14 @@ def test_resilient_fallback_on_init_failure(monkeypatch, tmp_path):
     assert toasts and "Switched backend" in toasts[0]
 
 
-def test_resilient_runtime_retry(monkeypatch, tmp_path):
+def test_resilient_runtime_retry(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     class DummyYOLO:
-        def __init__(self, weight, *_, **__):
+        def __init__(self, weight: Path, *args: Any, **kwargs: Any):
             self.weight = Path(weight)
             self.names = {0: "dummy"}
             self.device = "cpu"
 
-        def predict(self, frame, **_kwargs):
+        def predict(self, frame: Any, **kwargs: Any):
             if self.weight.suffix == ".onnx":
                 raise ImportError("onnxruntime missing")
             return ["ok"]

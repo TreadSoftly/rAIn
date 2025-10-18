@@ -5,17 +5,28 @@ import contextlib
 import logging
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, ContextManager, Iterable, Optional, Protocol, Union, cast
+from typing import Any
+from typing import Callable
+from typing import ContextManager
+from typing import Iterable
+from typing import Optional
+from typing import Protocol
+from typing import Union
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
+from PIL import ImageDraw
+from PIL import ImageFont
 
-from .model_registry import load_segmenter
-
-
+if hasattr(Image, "Resampling"):
+    _RESAMPLE_NEAREST = getattr(Image.Resampling, "NEAREST")  # type: ignore[attr-defined]
+else:
+    _RESAMPLE_NEAREST = getattr(Image, "NEAREST")  # type: ignore[attr-defined]
 # ─────────────────────────── progress (opt‑in only) ───────────────────────────
 class ProgressLike(Protocol):
     def set_total(self, total_units: float) -> None: ...
@@ -46,48 +57,47 @@ def _dbg(msg: str) -> None:
     _LOG.debug(f"[panoptes] {msg}")
 
 # ─────────────────────────── model (lazy) ─────────────────────────
-_SEG_MODEL: Any | None = None
-_SEG_ERROR: Optional[Exception] = None
+_seg_model: Any | None = None
+_seg_error: Optional[Exception] = None
 
 
 def _get_segmenter() -> Any | None:
-    global _SEG_MODEL, _SEG_ERROR
-    if _SEG_MODEL is not None:
-        return _SEG_MODEL
-    if _SEG_ERROR is not None:
+    global _seg_model, _seg_error
+    if _seg_model is not None:
+        return _seg_model
+    if _seg_error is not None:
         return None
     try:
         from .model_registry import load_segmenter
-
-        _SEG_MODEL = load_segmenter()
+        _seg_model = load_segmenter()
         _dbg("heatmap segmenter ready (see registry log for weight)")
     except Exception as exc:  # pragma: no cover - weights genuinely unavailable
-        _SEG_ERROR = exc
+        _seg_error = exc
         _LOG.warning(
             "heatmap segmenter unavailable; falling back to bounding boxes (%s)",
             exc,
         )
-        _SEG_MODEL = None
-    return _SEG_MODEL
+        _seg_model = None
+    return _seg_model
 
 
 __all__ = ["heatmap_overlay"]
 
-_CV2: Any | bool | None = None
+_cv2_cached: Any | bool | None = None
 
 
 def _get_cv2() -> Any | None:
-    global _CV2
-    if _CV2 is False:
+    global _cv2_cached
+    if _cv2_cached is False:
         return None
-    if _CV2 is not None:
-        return cast(Any, _CV2)
+    if _cv2_cached is not None:
+        return cast(Any, _cv2_cached)
     try:  # pragma: no cover - exercised when OpenCV available
         import cv2 as _cv2  # type: ignore
     except Exception:  # pragma: no cover
-        _CV2 = False
+        _cv2_cached = False
         return None
-    _CV2 = _cv2
+    _cv2_cached = _cv2
     return _cv2
 
 # ---------------------------------------------------------------------- #
@@ -117,7 +127,7 @@ def _resize_mask(mask: NDArray[np.float32], width: int, height: int, cv2_mod: An
     # Pillow fallback – convert to 8-bit for resize, then normalise back to [0, 1]
     scaled = np.clip(mask, 0.0, 1.0)
     pil_mask = Image.fromarray((scaled * 255.0).astype(np.uint8), mode="L")
-    resized = pil_mask.resize((width, height), Image.NEAREST)
+    resized = pil_mask.resize((width, height), _RESAMPLE_NEAREST)
     return np.asarray(resized, dtype=np.float32) / 255.0
 
 
@@ -222,9 +232,11 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
 
                 # unique colour via golden‑ratio hue rotation
                 hue: float = (idx * 0.61803398875) % 1.0
-                r, g, b = (np.array(colorsys.hsv_to_rgb(hue, 1.0, 1.0)) * 255.0)
-                colour_f32: NDArray[np.float32] = np.array([b, g, r], dtype=np.float32)
-                colour_u8 = tuple(int(x) for x in (b, g, r))
+                rgb = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+                rgb_arr = np.array(rgb, dtype=np.float32) * 255.0
+                r_f, g_f, b_f = rgb_arr.tolist()
+                colour_f32: NDArray[np.float32] = np.array([b_f, g_f, r_f], dtype=np.float32)
+                colour_u8 = (int(b_f), int(g_f), int(r_f))
 
                 overlay[mask_bool] = overlay[mask_bool] * (1.0 - alpha) + colour_f32 * alpha
 
@@ -275,7 +287,17 @@ def heatmap_overlay(  # noqa: C901  (visual-logic)
                                     tw = bbox[2] - bbox[0]
                                     th = bbox[3] - bbox[1]
                                 except Exception:  # pragma: no cover - textbbox not everywhere
-                                    tw, th = draw.textsize(text, font=font)
+                                    try:
+                                        fbbox = font.getbbox(text)
+                                        tw = fbbox[2] - fbbox[0]
+                                        th = fbbox[3] - fbbox[1]
+                                    except Exception:
+                                        def _default_getsize(arg: str) -> tuple[int, int]:
+                                            return (len(arg) * 6, 10)
+                                        getsize_fn: Callable[[str], tuple[int, int]] = getattr(font, "getsize", _default_getsize)
+                                        size = getsize_fn(text)
+                                        tw = int(size[0])
+                                        th = int(size[1])
                                 y1 = max(0, int(xyxy[1]) - int(th) - 4)
                                 rect_coords = (x1, y1, x1 + int(tw) + 2, y1 + int(th) + 4)
                                 rgb_col = (colour_u8[2], colour_u8[1], colour_u8[0], 255)

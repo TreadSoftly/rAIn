@@ -2,8 +2,9 @@ import platform
 import sys
 from pathlib import Path
 
-import panoptes.model_registry as mr
-from panoptes.runtime.onnx_spec import desired_ort_spec
+import panoptes.model_registry as mr  # type: ignore[import]
+from panoptes.runtime.onnx_spec import desired_ort_spec  # type: ignore[import]
+from pytest import MonkeyPatch
 
 
 def _write_weight(path: Path) -> Path:
@@ -11,7 +12,7 @@ def _write_weight(path: Path) -> Path:
     return path
 
 
-def test_candidate_weights_skips_onnx_when_ort_unavailable(monkeypatch, tmp_path):
+def test_candidate_weights_skips_onnx_when_ort_unavailable(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     onnx = _write_weight(tmp_path / "model.onnx")
     pt = _write_weight(tmp_path / "model.pt")
 
@@ -22,7 +23,7 @@ def test_candidate_weights_skips_onnx_when_ort_unavailable(monkeypatch, tmp_path
     assert candidates == [pt]
 
 
-def test_candidate_weights_prefers_pt_when_env_disables_onnx(monkeypatch, tmp_path):
+def test_candidate_weights_prefers_pt_when_env_disables_onnx(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     onnx = _write_weight(tmp_path / "model.onnx")
     pt = _write_weight(tmp_path / "model.pt")
 
@@ -34,7 +35,7 @@ def test_candidate_weights_prefers_pt_when_env_disables_onnx(monkeypatch, tmp_pa
     assert candidates[0] == pt
 
 
-def test_candidate_weights_prefers_onnx_by_default(monkeypatch, tmp_path):
+def test_candidate_weights_prefers_onnx_by_default(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     onnx = _write_weight(tmp_path / "model.onnx")
     pt = _write_weight(tmp_path / "model.pt")
 
@@ -46,8 +47,8 @@ def test_candidate_weights_prefers_onnx_by_default(monkeypatch, tmp_path):
     assert candidates[0] == onnx
 
 
-def test_ort_available_failure(monkeypatch):
-    import panoptes.runtime.backend_probe as bp
+def test_ort_available_failure(monkeypatch: MonkeyPatch) -> None:
+    import panoptes.runtime.backend_probe as bp # type: ignore[import]
 
     monkeypatch.delenv("ARGOS_DISABLE_ONNX", raising=False)
     monkeypatch.setattr(bp, "_try_import_ort", lambda: (False, None, None, "ImportError: missing"))
@@ -60,7 +61,7 @@ def test_ort_available_failure(monkeypatch):
     assert reason == "ImportError: missing"
 
 
-def test_desired_ort_spec_matches_packaging():
+def test_desired_ort_spec_matches_packaging() -> None:
     spec = desired_ort_spec()
     if sys.version_info >= (3, 10):
         expected = "onnxruntime>=1.22,<1.23" if platform.system() == "Windows" else "onnxruntime>=1.22,<1.24"
