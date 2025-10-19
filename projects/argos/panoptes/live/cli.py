@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
-from typing import List, Optional, Tuple, Union
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final, List, Optional, Tuple, Union
 
 try:
     from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv # type: ignore[import]
@@ -35,6 +38,7 @@ def _log_event(event: str, **info: object) -> None:
         LOGGER.info(event)
 
 from .pipeline import LivePipeline # noqa: E402
+from . import tasks as live_tasks  # noqa: E402
 
 # Ensure live-friendly progress behavior even when invoked via the console script.
 os.environ.setdefault("PANOPTES_LIVE", "1")
@@ -92,6 +96,130 @@ _LIVE_MARKERS = {
 }
 
 
+@dataclass
+class _ModelHint:
+    source: str
+    version: str
+    size: str
+    ext: Optional[str]
+
+
+_ALLOWED_MODEL_SIZES: Final[set[str]] = {"n", "s", "m", "l", "x"}
+_ALLOWED_MODEL_EXTS: Final[set[str]] = {"pt", "onnx"}
+_MODEL_DEFAULT_SIZE: Final[str] = "x"
+_TASK_WEIGHT_SUFFIX: Final[dict[str, str]] = {
+    "detect": "",
+    "heatmap": "-seg",
+    "classify": "-cls",
+    "pose": "-pose",
+    "obb": "-obb",
+}
+_MODEL_TOKEN_RE = re.compile(
+    r"""
+    ^
+    (?:yolo)?
+    (?:v)?
+    (?P<ver>\d{1,2})
+    (?P<size>[nsmxl]?)       # optional size code
+    (?:\.(?P<ext>[A-Za-z0-9]+))?
+    $
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _parse_model_token(token: str) -> Optional[_ModelHint]:
+    raw = token.strip()
+    if not raw:
+        return None
+    if any(sep in raw for sep in (os.sep, "/", "\\")):
+        return None
+    lowered = raw.lower()
+    match = _MODEL_TOKEN_RE.fullmatch(lowered)
+    if not match:
+        return None
+
+    size = (match.group("size") or "").lower()
+    if size and size not in _ALLOWED_MODEL_SIZES:
+        return None
+
+    ext_raw = (match.group("ext") or "").lower()
+    if ext_raw and ext_raw not in _ALLOWED_MODEL_EXTS:
+        return None
+
+    return _ModelHint(
+        source=token,
+        version=(match.group("ver") or "").lstrip("0") or "0",
+        size=size,
+        ext=(f".{ext_raw}" if ext_raw else None),
+    )
+
+
+def _model_hint_to_path(hint: _ModelHint, task: str) -> Optional[Path]:
+    suffix = _TASK_WEIGHT_SUFFIX.get(task)
+    if suffix is None:
+        return None
+    try:
+        ver_int = int(hint.version)
+    except ValueError:
+        return None
+
+    size = hint.size or _MODEL_DEFAULT_SIZE
+    if size not in _ALLOWED_MODEL_SIZES:
+        size = _MODEL_DEFAULT_SIZE
+
+    prefix = "yolov" if ver_int <= 10 else "yolo"
+    stem = f"{prefix}{ver_int}{size}{suffix}"
+
+    from panoptes import model_registry as _model_registry  # type: ignore[import]  # defer heavy import
+
+    candidates: list[str]
+    if hint.ext is not None:
+        candidates = [hint.ext.lower()]
+    else:
+        if task == "classify":
+            candidates = [".pt", ".onnx"]
+        else:
+            candidates = [".onnx", ".pt"]
+
+    for ext in candidates:
+        path = _model_registry.MODEL_DIR / f"{stem}{ext}"
+        if path.exists():
+            return path
+
+    # No candidate exists; return the first choice so the caller can surface a clear error.
+    return _model_registry.MODEL_DIR / f"{stem}{candidates[0]}"
+
+
+def _clear_live_overrides() -> None:
+    live_tasks.LIVE_DETECT_OVERRIDE = None
+    live_tasks.LIVE_HEATMAP_OVERRIDE = None
+    live_tasks.LIVE_CLASSIFY_OVERRIDE = None
+    live_tasks.LIVE_POSE_OVERRIDE = None
+    live_tasks.LIVE_PSE_OVERRIDE = None
+    live_tasks.LIVE_OBB_OVERRIDE = None
+
+
+def _apply_live_override(task: str, path: Path) -> bool:
+    if task == "detect":
+        live_tasks.LIVE_DETECT_OVERRIDE = path
+        return True
+    if task == "heatmap":
+        live_tasks.LIVE_HEATMAP_OVERRIDE = path
+        return True
+    if task == "classify":
+        live_tasks.LIVE_CLASSIFY_OVERRIDE = path
+        return True
+    if task == "pose":
+        live_tasks.LIVE_POSE_OVERRIDE = path
+        live_tasks.LIVE_PSE_OVERRIDE = path
+        return True
+    if task == "obb":
+        live_tasks.LIVE_OBB_OVERRIDE = path
+        return True
+    return False
+
+
 @app.command()
 def run(
     tokens: List[str] = typer.Argument(
@@ -118,6 +246,8 @@ def run(
 
     _log_event("live.cli.start", tokens=",".join(tokens) if tokens else None, duration=duration, headless=headless, save=save)
 
+    _clear_live_overrides()
+
     # Some environments + Click variadic args can mis-route option values.
     # If Typer didn't bind --save/-o, fall back to parsing sys.argv directly.
     if save is None:
@@ -134,6 +264,7 @@ def run(
     # Flexible positional parsing:
     task_tok: Optional[str] = None
     source_tok: Optional[str] = None
+    model_hint: Optional[_ModelHint] = None
 
     for tok in (tokens or []):
         low = tok.lower().strip()
@@ -144,6 +275,11 @@ def run(
 
         # Ignore any live-intent markers completely (never treat as source).
         if low in _LIVE_MARKERS:
+            continue
+
+        parsed_hint = _parse_model_token(tok)
+        if parsed_hint is not None:
+            model_hint = parsed_hint
             continue
 
         # First recognized task token wins, the next token becomes the source
@@ -163,6 +299,23 @@ def run(
     task_tok = task_tok or "detect"
     t = _TASK_CHOICES[task_tok]  # canonical task for LivePipeline
 
+    if model_hint is not None:
+        hint_path = _model_hint_to_path(model_hint, t)
+        if hint_path is None:
+            raise typer.BadParameter(
+                f"model token {model_hint.source!r} is not valid for live task '{t}'."
+            )
+        if not hint_path.exists():
+            raise typer.BadParameter(
+                f"model weight {hint_path} (from token {model_hint.source!r}) not found."
+            )
+        if not _apply_live_override(t, hint_path):
+            raise typer.BadParameter(
+                f"live task '{t}' does not support model overrides."
+            )
+        _log_event("live.override", task=t, weight=str(hint_path), token=model_hint.source)
+        small = False
+
     # Normalize source: allow "synthetic", signed integers, or paths
     s: str = (source_tok or "0").strip()
     if s.lower().startswith("synthetic"):
@@ -175,7 +328,7 @@ def run(
         src = s
 
     with bind_context(live_task=t, source=str(src)):
-            _log_event("live.cli.selection", task=t, source=str(src), small=small, save=save, headless=headless)
+        _log_event("live.cli.selection", task=t, source=str(src), small=small, save=save, headless=headless)
 
     size: Optional[Tuple[int, int]] = (width, height) if (width and height) else None
 

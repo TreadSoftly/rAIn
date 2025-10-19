@@ -187,15 +187,40 @@ class LivePipeline:
     def _build_task(self):
         t = self.task.lower()
         if t in ("d", "detect"):
-            return live_tasks.build_detect(small=self.prefer_small, conf=self.conf, iou=self.iou, hud_callback=self._register_toast)
+            return live_tasks.build_detect(
+                small=self.prefer_small,
+                conf=self.conf,
+                iou=self.iou,
+                override=live_tasks.LIVE_DETECT_OVERRIDE,
+                hud_callback=self._register_toast,
+            )
         if t in ("hm", "heatmap"):
-            return live_tasks.build_heatmap(small=self.prefer_small, hud_callback=self._register_toast)
+            return live_tasks.build_heatmap(
+                small=self.prefer_small,
+                override=live_tasks.LIVE_HEATMAP_OVERRIDE,
+                hud_callback=self._register_toast,
+            )
         if t in ("clf", "classify"):
-            return live_tasks.build_classify(small=self.prefer_small, hud_callback=self._register_toast)
+            return live_tasks.build_classify(
+                small=self.prefer_small,
+                override=live_tasks.LIVE_CLASSIFY_OVERRIDE,
+                hud_callback=self._register_toast,
+            )
         if t in ("pose", "pse"):
-            return live_tasks.build_pose(small=self.prefer_small, conf=self.conf, hud_callback=self._register_toast)
+            return live_tasks.build_pose(
+                small=self.prefer_small,
+                conf=self.conf,
+                override=live_tasks.LIVE_POSE_OVERRIDE,
+                hud_callback=self._register_toast,
+            )
         if t in ("obb", "object"):
-            return live_tasks.build_obb(small=self.prefer_small, conf=self.conf, iou=self.iou, hud_callback=self._register_toast)
+            return live_tasks.build_obb(
+                small=self.prefer_small,
+                conf=self.conf,
+                iou=self.iou,
+                override=live_tasks.LIVE_OBB_OVERRIDE,
+                hud_callback=self._register_toast,
+            )
         raise ValueError(f"Unknown live task: {self.task}")
 
     def _default_out_path(self) -> str:
