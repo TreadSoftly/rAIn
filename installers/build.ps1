@@ -105,7 +105,6 @@ $script:pyArgs = @()
 
 function Find-Python {
   $script:pyExe = $null; $script:pyArgs = @()
-  $candidates = @()
   $c = Get-Command py -ErrorAction SilentlyContinue
   if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @('-3') }
   if (-not $script:pyExe) { $c = Get-Command python3 -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @() } }
@@ -218,8 +217,19 @@ function Install-Python {
       $p = Start-Process -FilePath $tmp -ArgumentList $pyInstallArgs -Wait -PassThru
       if ($p.ExitCode -ne 0) { throw "Python installer exited with code $($p.ExitCode)." }
     }
-    Start-Sleep -Seconds 2
-    if (-not (Find-Python) -or -not (Test-PythonOk)) { throw "Python 3.9 - 3.12 required but not located after installation." }
+    $waitSeconds = 30
+    $announcedWait = $false
+    for ($elapsed = 0; $elapsed -lt $waitSeconds; $elapsed++) {
+      if (Find-Python) {
+        if (Test-PythonOk) { return }
+      }
+      if (-not $announcedWait) {
+        Write-Host "Waiting for newly installed Python to surface..." -ForegroundColor Yellow
+        $announcedWait = $true
+      }
+      Start-Sleep -Seconds 1
+    }
+    throw "Python 3.9 - 3.12 required but not located after installation."
     return
   }
   if ($OsIsMac) {
