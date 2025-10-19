@@ -109,6 +109,39 @@ function Find-Python {
   if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @('-3') }
   if (-not $script:pyExe) { $c = Get-Command python3 -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source } }
   if (-not $script:pyExe) { $c = Get-Command python  -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source } }
+  if (-not $script:pyExe -and $OsIsWindows) {
+    $launcherCandidates = @()
+    if ($env:LOCALAPPDATA) { $launcherCandidates += Join-Path $env:LOCALAPPDATA 'Programs\Python\Launcher\py.exe' }
+    if ($env:ProgramFiles) { $launcherCandidates += Join-Path $env:ProgramFiles 'Python\Launcher\py.exe' }
+    if ($env:ProgramW6432) { $launcherCandidates += Join-Path $env:ProgramW6432 'Python\Launcher\py.exe' }
+    if (${env:ProgramFiles(x86)}) { $launcherCandidates += Join-Path ${env:ProgramFiles(x86)} 'Python\Launcher\py.exe' }
+    if ($env:SystemRoot) { $launcherCandidates += Join-Path $env:SystemRoot 'py.exe' }
+    foreach ($candidate in $launcherCandidates) {
+      if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @('-3'); break }
+    }
+  }
+  if (-not $script:pyExe -and $OsIsWindows) {
+    $baseCandidates = @()
+    if ($env:LOCALAPPDATA) { $baseCandidates += Join-Path $env:LOCALAPPDATA 'Programs\Python' }
+    if ($env:ProgramFiles) { $baseCandidates += $env:ProgramFiles }
+    if ($env:ProgramW6432) { $baseCandidates += $env:ProgramW6432 }
+    if (${env:ProgramFiles(x86)}) { $baseCandidates += ${env:ProgramFiles(x86)} }
+    foreach ($root in @($env:ProgramFiles, $env:ProgramW6432, ${env:ProgramFiles(x86)})) {
+      if (-not $root) { continue }
+      $pythonSub = Join-Path $root 'Python'
+      if (Test-Path -LiteralPath $pythonSub) { $baseCandidates += $pythonSub }
+    }
+    foreach ($base in $baseCandidates) {
+      if (-not $base) { continue }
+      if (-not (Test-Path -LiteralPath $base)) { continue }
+      $pyDirs = Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Python3*' } | Sort-Object Name -Descending
+      foreach ($dir in $pyDirs) {
+        $candidate = Join-Path $dir.FullName 'python.exe'
+        if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @(); break }
+      }
+      if ($script:pyExe) { break }
+    }
+  }
   return [bool]$script:pyExe
 }
 function Test-PythonOk {
