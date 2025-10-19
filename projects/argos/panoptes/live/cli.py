@@ -67,7 +67,6 @@ _TASK_CHOICES = {
     "heatmap": "heatmap",
     # classify
     "clf": "classify",
-    "cls": "classify",
     "classify": "classify",
     # pose
     "pse": "pose",      # ensure pse maps to pose (alias)
@@ -99,7 +98,7 @@ def run(
         None,
         metavar="[TASK] [SOURCE]",
         help=(
-            "Task (d|detect|hm|heatmap|clf|cls|classify|pse|pose|obb|object) and source "
+            "Task (d|detect|hm|heatmap|clf|classify|pse|pose|obb|object) and source "
             "(camera index, path, or 'synthetic')."
         ),
     ),

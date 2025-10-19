@@ -737,14 +737,14 @@ def _quick_check() -> None:
     if not typer.confirm("Run a quick smoke check now?", default=False):
         return
     raw_task = typer.prompt(
-        "Task [detect|heatmap|geojson|classify|pose|obb]  (aliases: d|hm|gj|cls|pse|object)",
+        "Task [detect|heatmap|geojson|classify|pose|obb]  (aliases: d|hm|gj|clf|pse|object)",
         default="heatmap",
     ).strip().lower()
     task_alias = {
         "d": "detect", "det": "detect", "detect": "detect",
         "hm": "heatmap", "heatmap": "heatmap",
         "gj": "geojson", "geojson": "geojson",
-        "cls": "classify", "classify": "classify", "clf": "classify",
+        "clf": "classify", "classify": "classify",
         "pose": "pose", "pse": "pose",
         "obb": "obb", "object": "obb",
     }

@@ -27,6 +27,7 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, Final, Iterable, Iterator, List, Literal, Optional, Protocol, cast
+from dataclasses import dataclass
 
 # Force nested progress off for all offline CLI commands before any internal modules import.
 os.environ["PANOPTES_NESTED_PROGRESS"] = "0"
@@ -43,7 +44,7 @@ except Exception:
 
 import typer # type: ignore[import]
 
-from panoptes.logging_config import bind_context, current_run_dir, setup_logging # type: ignore[import]
+from panoptes.logging_config import bind_context, setup_logging # type: ignore[import]
 from .ffmpeg_utils import resolve_ffmpeg # type: ignore[import]
 from .support_bundle import write_support_bundle # type: ignore[import]
 
@@ -99,10 +100,11 @@ _ALIAS = {
     "--geojson": "geojson",
     "-gj": "geojson",
     # classify
-    "cls": "classify",
+    "clf": "classify",
     "classify": "classify",
     "--classify": "classify",
-    "-cls": "classify",
+    "--clf": "classify",
+    "-clf": "classify",
     # pose (keypoints)
     "pose": "pose",
     "--pose": "pose",
@@ -274,7 +276,7 @@ def _man_header() -> str:
         argos — detect, heatmap, geojson, classify, pose, and obb over images & videos
 
     SYNOPSIS
-        argos [INPUT ...] [d|hm|gj|cls|pose|obb] [OPTIONS]
+        argos [INPUT ...] [d|hm|gj|clf|pose|obb] [OPTIONS]
         argos [OPTIONS] INPUT ...
 
     DESCRIPTION
@@ -291,7 +293,7 @@ def _man_header() -> str:
             detect mildrone.avif
             d mildrone
             hm camo
-            cls assets
+            clf assets
             pose human
             pse runner.jpg     (alias of pose)
             obb all
@@ -308,7 +310,7 @@ def _man_header() -> str:
             d *
             hm *.png
             gj all .jpg
-            cls *.jpg
+            clf *.jpg
             pose all
             obb all
             argos all d
@@ -390,7 +392,7 @@ def _man_shortcuts() -> str:
         d         -> prepends "d"        e.g., `d all`
         hm        -> prepends "hm"       e.g., `hm all`
         gj        -> prepends "gj"       e.g., `gj assets`
-        cls       -> prepends "cls"      e.g., `cls ocean.jpg`
+        clf       -> prepends "clf"      e.g., `clf ocean.jpg`
         pose      -> prepends "pose"     e.g., `pose robodog.png`
         pse       -> prepends "pose"     e.g., `pse runner.jpg`   (alias of pose)
         obb       -> prepends "obb"      e.g., `obb subdrones.png`
@@ -420,7 +422,7 @@ def _man_examples() -> str:
             argos geojson assets.jpg
 
         Classification:
-            argos cls assets.jpg
+            argos clf assets.jpg
             argos classify all .png --topk 3
 
         Pose (keypoints + skeleton):
@@ -436,14 +438,14 @@ def _man_examples() -> str:
             argos d all
             argos hm *.png
             argos gj all .jpg
-            argos cls all .jpg
+            argos clf all .jpg
             argos pose all
             argos obb all
 
         Video:
             argos d bunny.mp4
             argos hm bunny.mp4 --small
-            argos cls bunny.mp4
+            argos clf bunny.mp4
             argos pose bunny.mp4
             argos obb bunny.mp4
 
@@ -453,7 +455,7 @@ def _man_examples() -> str:
         Force weights:
             argos d assets --det-weights projects/argos/panoptes/model/yolov8x.pt
             argos hm camo --seg-weights projects/argos/panoptes/model/yolov8x-seg.pt
-            argos cls assets --cls-weights weights/classify.pt
+            argos clf assets --cls-weights weights/classify.pt
             argos pose runner --pose-weights weights/pose.pt
             argos obb ship --obb-weights weights/obb.pt
     """).strip("\n")
@@ -486,7 +488,7 @@ def _examples_page() -> str:
         "  argos hm camo",
         "  argos d mildrone",
         "  argos gj assets",
-        "  argos cls assets.jpg",
+        "  argos clf assets.jpg",
         "  argos pose runner.jpg",
         "  argos obb ship.png",
         "  argos d bunny.mp4",
@@ -495,7 +497,7 @@ def _examples_page() -> str:
         "  argos d all",
         "  argos hm *.png",
         "  argos gj all .jpg",
-        "  argos cls all .jpg",
+        "  argos clf all .jpg",
         "  argos pose all",
         "  argos obb all .png",
         "",
@@ -522,7 +524,7 @@ def _tutorial_page() -> str:
         "   argos gj assets",
         "",
         "4) Classify an image",
-        "   argos cls assets.jpg --topk 3",
+        "   argos clf assets.jpg --topk 3",
         "",
         "5) Pose estimation",
         "   argos pose runner.jpg",
@@ -585,6 +587,111 @@ def _extract_task(tokens: List[str]) -> tuple[Optional[str], List[str]]:
         return task, rest
 
     return None, tokens
+
+
+@dataclass
+class _ModelHint:
+    source: str
+    version: str
+    size: str
+    ext: str
+
+
+_ALLOWED_MODEL_SIZES: Final[set[str]] = {"n", "s", "m", "l", "x"}
+_ALLOWED_MODEL_EXTS: Final[set[str]] = {"", "pt", "onnx"}
+_MODEL_DEFAULT_SIZE: Final[str] = "x"
+_TASK_WEIGHT_SUFFIX: Final[dict[str, str]] = {
+    "detect": "",
+    "geojson": "",
+    "heatmap": "-seg",
+    "classify": "-cls",
+    "pose": "-pose",
+    "obb": "-obb",
+}
+_MODEL_TOKEN_RE = re.compile(
+    r"""
+    ^
+    (?:yolo)?
+    (?:v)?
+    (?P<ver>\d{1,2})
+    (?P<size>[nsmxl]?)       # optional size code
+    (?:\.(?P<ext>[A-Za-z0-9]+))?
+    $
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _parse_model_token(token: str) -> Optional[_ModelHint]:
+    raw = token.strip()
+    if not raw:
+        return None
+
+    # Path-like tokens should not be treated as model hints.
+    if any(sep in raw for sep in (os.sep, "/", "\\")):
+        return None
+
+    lowered = raw.lower()
+    match = _MODEL_TOKEN_RE.fullmatch(lowered)
+    if not match:
+        return None
+
+    version = match.group("ver")
+    size = (match.group("size") or "").lower()
+    if size and size not in _ALLOWED_MODEL_SIZES:
+        return None
+
+    ext_raw = (match.group("ext") or "").lower()
+    if ext_raw not in _ALLOWED_MODEL_EXTS:
+        return None
+
+    ext = f".{ext_raw}" if ext_raw else ".pt"
+
+    # Normalise size to prefer defaults later.
+    return _ModelHint(
+        source=token,
+        version=version.lstrip("0") or "0",
+        size=size,
+        ext=ext,
+    )
+
+
+def _extract_model_hint(tokens: List[str]) -> tuple[Optional[_ModelHint], List[str], Optional[int]]:
+    hint: Optional[_ModelHint] = None
+    insert_at: Optional[int] = None
+    remaining: list[str] = []
+    for tok in tokens:
+        parsed = _parse_model_token(tok)
+        if parsed is not None:
+            hint = parsed
+            insert_at = len(remaining)
+            continue
+        remaining.append(tok)
+    return hint, remaining, insert_at
+
+
+def _model_hint_to_path(hint: _ModelHint, task: str) -> Optional[Path]:
+    suffix = _TASK_WEIGHT_SUFFIX.get(task)
+    if suffix is None:
+        return None
+
+    try:
+        ver_int = int(hint.version)
+    except ValueError:
+        return None
+
+    size = hint.size or _MODEL_DEFAULT_SIZE
+    if size not in _ALLOWED_MODEL_SIZES:
+        size = _MODEL_DEFAULT_SIZE
+
+    # YOLO naming convention: versions up to 10 keep the 'v' prefix.
+    prefix = "yolov" if ver_int <= 10 else "yolo"
+    filename = f"{prefix}{ver_int}{size}{suffix}{hint.ext}"
+
+    from panoptes import model_registry as _model_registry  # type: ignore[import]  # local import to avoid heavy module load
+
+    return _model_registry.MODEL_DIR / filename
+
 
 def _pref_key(p: Path) -> int:
     try:
@@ -1034,7 +1141,7 @@ def _snapshot_results(bases: Optional[list[Path]] = None) -> set[Path]:
 # ────────────────────────────────────────────────────────────
 @app.command()
 def target(  # noqa: C901
-    inputs: List[str] = typer.Argument(..., metavar="INPUT [d|hm|gj|cls|pose|obb|FLAGS|help|man]"),
+    inputs: List[str] = typer.Argument(..., metavar="INPUT [d|hm|gj|clf|pose|obb|FLAGS|help|man]"),
     *,
     # flexible: explicit task name
     task: Optional[str] = typer.Option(None, "--task", "-t", help="- task detect | heatmap | geojson | classify | pose | obb"),
@@ -1042,7 +1149,7 @@ def target(  # noqa: C901
     detect_flag: bool = typer.Option(False, "--detect", "-d", help="d is shortcut for --task detect | d is also a positional token"),
     heatmap_flag: bool = typer.Option(False, "--heatmap", help="hm is shortcut for --task heatmap | hm is also a positional token"),
     geojson_flag: bool = typer.Option(False, "--geojson", help="gj is shortcut for --task geojson | gj is also a positional token"),
-    classify_flag: bool = typer.Option(False, "--classify", "--cls", help="cls is shortcut for --task classify | cls is also a positional token"),
+    classify_flag: bool = typer.Option(False, "--classify", "--clf", help="clf is shortcut for --task classify | clf is also a positional token"),
     pose_flag: bool = typer.Option(False, "--pose", help="pose is shortcut for --task pose | pose is also a positional token"),
     obb_flag: bool = typer.Option(False, "--obb", help="obb is shortcut for --task obb | obb is also a positional token"),
     # meta/help UX
@@ -1164,6 +1271,67 @@ def target(  # noqa: C901
         task_final = flag_tasks[0]
     else:
         task_final = token_task or "detect"
+
+    model_hint, positional, hint_insert_at = _extract_model_hint(positional)
+    hint_path: Optional[Path] = None
+    hint_applied = False
+    hint_skipped_reason: Optional[str] = None
+    if model_hint is not None:
+        hint_path = _model_hint_to_path(model_hint, task_final)
+        if hint_path is None:
+            # Put token back where it was so it can be treated as an input.
+            insert_at = hint_insert_at if hint_insert_at is not None else len(positional)
+            positional.insert(insert_at, model_hint.source)
+        else:
+            if task_final in {"detect", "geojson"}:
+                if det_override is None:
+                    det_override = hint_path
+                    hint_applied = True
+                else:
+                    hint_skipped_reason = "detector weight already provided"
+            elif task_final == "heatmap":
+                if seg_override is None:
+                    seg_override = hint_path
+                    hint_applied = True
+                else:
+                    hint_skipped_reason = "segmentation weight already provided"
+            elif task_final == "classify":
+                if cls_override is None:
+                    cls_override = hint_path
+                    hint_applied = True
+                else:
+                    hint_skipped_reason = "classification weight already provided"
+            elif task_final == "pose":
+                if pose_override is None:
+                    pose_override = hint_path
+                    hint_applied = True
+                else:
+                    hint_skipped_reason = "pose weight already provided"
+            elif task_final == "obb":
+                if obb_override is None:
+                    obb_override = hint_path
+                    hint_applied = True
+                else:
+                    hint_skipped_reason = "obb weight already provided"
+            else:
+                hint_skipped_reason = f"task {task_final} does not support model overrides"
+
+            if hint_applied:
+                if not hint_path.exists():
+                    typer.secho(
+                        f"[bold yellow] model override {hint_path.name} (from token {model_hint.source!r}) not found on disk; download or fetch weights.",
+                        err=True,
+                    )
+                elif not quiet:
+                    typer.secho(
+                        f"[panoptes] model override from token {model_hint.source!r} -> {hint_path.name}",
+                        err=True,
+                    )
+            elif hint_skipped_reason and not quiet:
+                typer.secho(
+                    f"[bold yellow] model token {model_hint.source!r} ignored ({hint_skipped_reason}).",
+                    err=True,
+                )
 
     # model flag is cosmetic; kept for compatibility
     if model.lower() not in _AVAILABLE_MODELS:
@@ -1521,7 +1689,7 @@ def main_geojson() -> None:  # pragma: no cover
     main()
 
 def main_classify() -> None:  # pragma: no cover
-    _prepend_argv("cls")
+    _prepend_argv("clf")
     main()
 
 def main_pose() -> None:  # pragma: no cover
