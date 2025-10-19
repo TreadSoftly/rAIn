@@ -105,43 +105,81 @@ $script:pyArgs = @()
 
 function Find-Python {
   $script:pyExe = $null; $script:pyArgs = @()
+  $candidates = @()
   $c = Get-Command py -ErrorAction SilentlyContinue
   if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @('-3') }
-  if (-not $script:pyExe) { $c = Get-Command python3 -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source } }
-  if (-not $script:pyExe) { $c = Get-Command python  -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source } }
-  if (-not $script:pyExe -and $OsIsWindows) {
+  if (-not $script:pyExe) { $c = Get-Command python3 -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @() } }
+  if (-not $script:pyExe) { $c = Get-Command python  -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @() } }
+  if ($script:pyExe) { return $true }
+
+  if ($OsIsWindows) {
     $launcherCandidates = @()
     if ($env:LOCALAPPDATA) { $launcherCandidates += Join-Path $env:LOCALAPPDATA 'Programs\Python\Launcher\py.exe' }
     if ($env:ProgramFiles) { $launcherCandidates += Join-Path $env:ProgramFiles 'Python\Launcher\py.exe' }
     if ($env:ProgramW6432) { $launcherCandidates += Join-Path $env:ProgramW6432 'Python\Launcher\py.exe' }
     if (${env:ProgramFiles(x86)}) { $launcherCandidates += Join-Path ${env:ProgramFiles(x86)} 'Python\Launcher\py.exe' }
-    if ($env:SystemRoot) { $launcherCandidates += Join-Path $env:SystemRoot 'py.exe' }
+    if ($env:SystemRoot) {
+      $launcherCandidates += Join-Path $env:SystemRoot 'py.exe'
+      $launcherCandidates += Join-Path $env:SystemRoot 'pyw.exe'
+    }
     foreach ($candidate in $launcherCandidates) {
-      if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @('-3'); break }
+      if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @('-3'); return $true }
     }
-  }
-  if (-not $script:pyExe -and $OsIsWindows) {
-    $baseCandidates = @()
-    if ($env:LOCALAPPDATA) { $baseCandidates += Join-Path $env:LOCALAPPDATA 'Programs\Python' }
-    if ($env:ProgramFiles) { $baseCandidates += $env:ProgramFiles }
-    if ($env:ProgramW6432) { $baseCandidates += $env:ProgramW6432 }
-    if (${env:ProgramFiles(x86)}) { $baseCandidates += ${env:ProgramFiles(x86)} }
+
+    $dirCandidates = New-Object System.Collections.Generic.List[string]
+    if ($env:LOCALAPPDATA) { $dirCandidates.Add((Join-Path $env:LOCALAPPDATA 'Programs\Python')) }
     foreach ($root in @($env:ProgramFiles, $env:ProgramW6432, ${env:ProgramFiles(x86)})) {
-      if (-not $root) { continue }
-      $pythonSub = Join-Path $root 'Python'
-      if (Test-Path -LiteralPath $pythonSub) { $baseCandidates += $pythonSub }
+      if ($root) {
+        $dirCandidates.Add($root)
+        $dirCandidates.Add((Join-Path $root 'Python'))
+      }
     }
-    foreach ($base in $baseCandidates) {
+    foreach ($base in $dirCandidates) {
       if (-not $base) { continue }
       if (-not (Test-Path -LiteralPath $base)) { continue }
-      $pyDirs = Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Python3*' } | Sort-Object Name -Descending
-      foreach ($dir in $pyDirs) {
-        $candidate = Join-Path $dir.FullName 'python.exe'
-        if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @(); break }
+      try {
+        $pyDirs = Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Python3*' }
       }
-      if ($script:pyExe) { break }
+      catch { continue }
+      foreach ($dir in ($pyDirs | Sort-Object Name -Descending)) {
+        $candidate = Join-Path $dir.FullName 'python.exe'
+        if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @(); return $true }
+      }
+      $directCandidate = Join-Path $base 'python.exe'
+      if (Test-Path -LiteralPath $directCandidate) { $script:pyExe = $directCandidate; $script:pyArgs = @(); return $true }
+    }
+
+    # Registry detection: uses InstallPath registered by the Python installer
+    $regRoots = @(
+      'HKLM:\SOFTWARE\Python\PythonCore',
+      'HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore',
+      'HKCU:\SOFTWARE\Python\PythonCore'
+    )
+    foreach ($regRoot in $regRoots) {
+      try {
+        $versions = Get-ChildItem -LiteralPath $regRoot -ErrorAction SilentlyContinue | Where-Object {
+          $_.PSChildName -match '^3\.(9|1[0-2])($|[^0-9])'
+        }
+      }
+      catch { continue }
+      foreach ($versionKey in ($versions | Sort-Object PSChildName -Descending)) {
+        $installKeyPath = Join-Path $versionKey.PSPath 'InstallPath'
+        try {
+          $installKey = Get-Item -LiteralPath $installKeyPath -ErrorAction SilentlyContinue
+          if (-not $installKey) { continue }
+          $exePath = $installKey.GetValue('ExecutablePath')
+          if ($exePath -and (Test-Path -LiteralPath $exePath)) { $script:pyExe = $exePath; $script:pyArgs = @(); return $true }
+          $rootPath = $installKey.GetValue('')
+          if ($rootPath) {
+            $candidate = Join-Path $rootPath 'python.exe'
+            if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @(); return $true }
+          }
+        }
+        catch { continue }
+      }
     }
   }
+
   return [bool]$script:pyExe
 }
 function Test-PythonOk {
