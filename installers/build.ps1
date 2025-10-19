@@ -102,27 +102,78 @@ if (-not $OsIsWindows) {
 # --- Python ensure (auto-install if needed) ---
 $script:pyExe = $null
 $script:pyArgs = @()
+$script:pyMode = 'direct'
 
+function Test-PythonCandidate {
+  param(
+    [Parameter(Mandatory = $true)][string]$Exe,
+    [Parameter()][string[]]$CandidateArgs = @(),
+    [Parameter()][string]$Mode = 'direct'
+  )
+  if (-not $Exe) { return $false }
+  if (-not (Test-Path -LiteralPath $Exe)) { return $false }
+  switch ($Mode) {
+    'launcher' {
+      try { $v = & $Exe @CandidateArgs --version 2>&1 } catch { return $false }
+      if ($v -match 'Python ([0-9]+)\.([0-9]+)\.([0-9]+)') {
+        $maj = [int]$Matches[1]; $min = [int]$Matches[2]
+        return ($maj -eq 3 -and $min -ge 9 -and $min -le 12)
+      }
+      return $false
+    }
+    default {
+      try {
+        $item = Get-Item -LiteralPath $Exe -ErrorAction Stop
+        $fileVer = $item.VersionInfo.FileVersion
+      }
+      catch {
+        $fileVer = $null
+      }
+      if ($fileVer) {
+        try {
+          $parsed = [Version]$fileVer
+          $maj = $parsed.Major
+          $min = $parsed.Minor
+          if ($maj -eq 3 -and $min -ge 9 -and $min -le 12) { return $true }
+        }
+        catch {}
+      }
+      try { $v = & $Exe @CandidateArgs --version 2>&1 } catch { return $false }
+      if ($v -match 'Python ([0-9]+)\.([0-9]+)\.([0-9]+)') {
+        $maj = [int]$Matches[1]; $min = [int]$Matches[2]
+        return ($maj -eq 3 -and $min -ge 9 -and $min -le 12)
+      }
+      return $false
+    }
+  }
+}
 function Find-Python {
-  $script:pyExe = $null; $script:pyArgs = @()
-  $c = Get-Command py -ErrorAction SilentlyContinue
-  if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @('-3') }
-  if (-not $script:pyExe) { $c = Get-Command python3 -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @() } }
-  if (-not $script:pyExe) { $c = Get-Command python  -ErrorAction SilentlyContinue; if ($c) { $script:pyExe = $c.Source; $script:pyArgs = @() } }
-  if ($script:pyExe) { return $true }
+  $script:pyExe = $null; $script:pyArgs = @(); $script:pyMode = 'direct'
+  $candidates = New-Object System.Collections.Generic.List[object]
+
+  foreach ($name in @('py', 'python3', 'python')) {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
+    if ($cmd) {
+      $candidateArgs = if ($name -eq 'py') { @('-3') } else { @() }
+      $mode = if ($name -eq 'py') { 'launcher' } else { 'direct' }
+      $candidates.Add([pscustomobject]@{ Exe = $cmd.Source; Arguments = $candidateArgs; Mode = $mode })
+    }
+  }
 
   if ($OsIsWindows) {
-    $launcherCandidates = @()
-    if ($env:LOCALAPPDATA) { $launcherCandidates += Join-Path $env:LOCALAPPDATA 'Programs\Python\Launcher\py.exe' }
-    if ($env:ProgramFiles) { $launcherCandidates += Join-Path $env:ProgramFiles 'Python\Launcher\py.exe' }
-    if ($env:ProgramW6432) { $launcherCandidates += Join-Path $env:ProgramW6432 'Python\Launcher\py.exe' }
-    if (${env:ProgramFiles(x86)}) { $launcherCandidates += Join-Path ${env:ProgramFiles(x86)} 'Python\Launcher\py.exe' }
+    $launcherPaths = @()
+    if ($env:LOCALAPPDATA) { $launcherPaths += Join-Path $env:LOCALAPPDATA 'Programs\Python\Launcher\py.exe' }
+    if ($env:ProgramFiles) { $launcherPaths += Join-Path $env:ProgramFiles 'Python\Launcher\py.exe' }
+    if ($env:ProgramW6432) { $launcherPaths += Join-Path $env:ProgramW6432 'Python\Launcher\py.exe' }
+    if (${env:ProgramFiles(x86)}) { $launcherPaths += Join-Path ${env:ProgramFiles(x86)} 'Python\Launcher\py.exe' }
     if ($env:SystemRoot) {
-      $launcherCandidates += Join-Path $env:SystemRoot 'py.exe'
-      $launcherCandidates += Join-Path $env:SystemRoot 'pyw.exe'
+      $launcherPaths += Join-Path $env:SystemRoot 'py.exe'
+      $launcherPaths += Join-Path $env:SystemRoot 'pyw.exe'
     }
-    foreach ($candidate in $launcherCandidates) {
-      if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @('-3'); return $true }
+    foreach ($launcher in $launcherPaths) {
+      if (Test-Path -LiteralPath $launcher) {
+        $candidates.Add([pscustomobject]@{ Exe = $launcher; Arguments = @('-3'); Mode = 'launcher' })
+      }
     }
 
     $dirCandidates = New-Object System.Collections.Generic.List[string]
@@ -140,15 +191,18 @@ function Find-Python {
         $pyDirs = Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Python3*' }
       }
       catch { continue }
-      foreach ($dir in ($pyDirs | Sort-Object Name -Descending)) {
-        $candidate = Join-Path $dir.FullName 'python.exe'
-        if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @(); return $true }
+      foreach ($dir in ($pyDirs | Sort-Object -Property Name -Descending)) {
+        $candidatePath = Join-Path $dir.FullName 'python.exe'
+        if (Test-Path -LiteralPath $candidatePath) {
+          $candidates.Add([pscustomobject]@{ Exe = $candidatePath; Arguments = @(); Mode = 'direct' })
+        }
       }
       $directCandidate = Join-Path $base 'python.exe'
-      if (Test-Path -LiteralPath $directCandidate) { $script:pyExe = $directCandidate; $script:pyArgs = @(); return $true }
+      if (Test-Path -LiteralPath $directCandidate) {
+        $candidates.Add([pscustomobject]@{ Exe = $directCandidate; Arguments = @(); Mode = 'direct' })
+      }
     }
 
-    # Registry detection: uses InstallPath registered by the Python installer
     $regRoots = @(
       'HKLM:\SOFTWARE\Python\PythonCore',
       'HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore',
@@ -161,17 +215,23 @@ function Find-Python {
         }
       }
       catch { continue }
-      foreach ($versionKey in ($versions | Sort-Object PSChildName -Descending)) {
+      foreach ($versionKey in ($versions | Sort-Object -Property PSChildName -Descending)) {
         $installKeyPath = Join-Path $versionKey.PSPath 'InstallPath'
         try {
           $installKey = Get-Item -LiteralPath $installKeyPath -ErrorAction SilentlyContinue
           if (-not $installKey) { continue }
           $exePath = $installKey.GetValue('ExecutablePath')
-          if ($exePath -and (Test-Path -LiteralPath $exePath)) { $script:pyExe = $exePath; $script:pyArgs = @(); return $true }
-          $rootPath = $installKey.GetValue('')
-          if ($rootPath) {
-            $candidate = Join-Path $rootPath 'python.exe'
-            if (Test-Path -LiteralPath $candidate) { $script:pyExe = $candidate; $script:pyArgs = @(); return $true }
+          if ($exePath -and (Test-Path -LiteralPath $exePath)) {
+            $candidates.Add([pscustomobject]@{ Exe = $exePath; Arguments = @(); Mode = 'direct' })
+          }
+          else {
+            $rootPath = $installKey.GetValue('')
+            if ($rootPath) {
+              $candidatePath = Join-Path $rootPath 'python.exe'
+              if (Test-Path -LiteralPath $candidatePath) {
+                $candidates.Add([pscustomobject]@{ Exe = $candidatePath; Arguments = @(); Mode = 'direct' })
+              }
+            }
           }
         }
         catch { continue }
@@ -179,16 +239,28 @@ function Find-Python {
     }
   }
 
-  return [bool]$script:pyExe
+  $seen = @{}
+  foreach ($candidate in $candidates) {
+    if (-not $candidate) { continue }
+    $exe = $candidate.Exe
+    if (-not $exe) { continue }
+    $key = $exe.ToLowerInvariant()
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+    $mode = if ($candidate.PSObject.Properties['Mode']) { $candidate.Mode } else { 'direct' }
+    if (Test-PythonCandidate -Exe $exe -CandidateArgs $candidate.Arguments -Mode $mode) {
+      $script:pyExe = $exe
+      $script:pyArgs = $candidate.Arguments
+      $script:pyMode = $mode
+      return $true
+    }
+  }
+
+  return $false
 }
 function Test-PythonOk {
   if (-not $script:pyExe) { return $false }
-  try { $v = & $script:pyExe @script:pyArgs --version 2>&1 } catch { return $false }
-  if ($v -match 'Python ([0-9]+)\.([0-9]+)\.([0-9]+)') {
-    $maj = [int]$Matches[1]; $min = [int]$Matches[2]
-    return ($maj -eq 3 -and $min -ge 9 -and $min -le 12)
-  }
-  return $false
+  return (Test-PythonCandidate -Exe $script:pyExe -CandidateArgs $script:pyArgs -Mode $script:pyMode)
 }
 function Test-IsAdmin {
   try {
@@ -220,9 +292,7 @@ function Install-Python {
     $waitSeconds = 30
     $announcedWait = $false
     for ($elapsed = 0; $elapsed -lt $waitSeconds; $elapsed++) {
-      if (Find-Python) {
-        if (Test-PythonOk) { return }
-      }
+      if (Find-Python) { return }
       if (-not $announcedWait) {
         Write-Host "Waiting for newly installed Python to surface..." -ForegroundColor Yellow
         $announcedWait = $true
@@ -252,7 +322,7 @@ function Install-Python {
   }
   throw "Unsupported OS. Please install Python 3.9 - 3.12 and re-run."
 }
-if (-not (Find-Python) -or -not (Test-PythonOk)) { Install-Python }
+if (-not (Find-Python)) { Install-Python }
 
 # Ensure VC++ runtime before anything may trigger local ONNX export (Windows only)
 Install-VcRedistIfMissing
