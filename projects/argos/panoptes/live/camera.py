@@ -62,7 +62,12 @@ from ._types import NDArrayU8
 from panoptes.logging_config import bind_context  # type: ignore[import]
 
 TRACE_CAMERA = os.getenv("PANOPTES_LIVE_TRACE_CAMERA", "").strip().lower() in {"1", "true", "yes"}
-ENABLE_DSHOW = os.getenv("PANOPTES_LIVE_ENABLE_DSHOW", "").strip().lower() in {"1", "true", "yes", "on"}
+_enable_dshow_env = os.getenv("PANOPTES_LIVE_ENABLE_DSHOW", "").strip().lower()
+ENABLE_DSHOW = _enable_dshow_env != "0" and _enable_dshow_env not in {"false", "no", "off"}
+LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
+BASIC_KEYS = ("source", "error", "reason", "backend", "mode", "task")
+PREFERRED_FOURCC = ("MJPG", "YUY2")
+DEFAULT_WARMUP_FRAMES = 5
 
 
 @contextlib.contextmanager
@@ -124,9 +129,18 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _log(event: str, **info: object) -> None:
+    if not LOGGER.isEnabledFor(logging.INFO):
+        return
     if info:
-        detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        LOGGER.info("%s %s", event, detail)
+        if TRACE_CAMERA or LOG_DETAIL:
+            detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        else:
+            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
+            detail = " ".join(detail_parts)
+        if detail:
+            LOGGER.info("%s %s", event, detail)
+        else:
+            LOGGER.info(event)
     else:
         LOGGER.info(event)
 
@@ -216,15 +230,14 @@ def _guess_backend_ids() -> list[int]:
         return ids
     plat = sys.platform
     if plat.startswith("win"):
+        dshow = getattr(cv2, "CAP_DSHOW", 0)
         msmf = getattr(cv2, "CAP_MSMF", 0)
+        if ENABLE_DSHOW and dshow:
+            ids.append(dshow)
+        elif TRACE_CAMERA and dshow:
+            _log("live.camera.backend.skip", backend="CAP_DSHOW")
         if msmf:
             ids.append(msmf)
-        if ENABLE_DSHOW:
-            dshow = getattr(cv2, "CAP_DSHOW", 0)
-            if dshow:
-                ids.append(dshow)
-        elif TRACE_CAMERA:
-            _log("live.camera.backend.skip", backend="CAP_DSHOW")
     elif plat == "darwin":
         ids.append(getattr(cv2, "CAP_AVFOUNDATION", 0))
     elif "linux" in plat:
@@ -261,6 +274,8 @@ class _CVCamera(FrameSource):
         self._backend: Optional[int] = None
         self._initial_decode_mode: Optional[str] = None
         self._flat_frame_streak = 0
+        self._warmup_target = DEFAULT_WARMUP_FRAMES
+        self._warmup_success = 0
         # Allow "0", "-1" strings, or file/rtsp paths
         if isinstance(source, str):
             try:
@@ -337,6 +352,31 @@ class _CVCamera(FrameSource):
                     self.cap.set(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4), float(height))
                 if fps is not None:
                     self.cap.set(getattr(cv2, "CAP_PROP_FPS", 5), float(fps))
+
+                fourcc_applied = None
+                if hasattr(cv2, "VideoWriter_fourcc"):
+                    for prefer in PREFERRED_FOURCC:
+                        try:
+                            code = float(getattr(cv2, "VideoWriter_fourcc")(*prefer))
+                            if self.cap.set(getattr(cv2, "CAP_PROP_FOURCC", 6), code):
+                                fourcc_applied = prefer
+                                break
+                        except Exception:
+                            continue
+                    if TRACE_CAMERA:
+                        _log(
+                            "live.camera.fourcc.pref",
+                            source=self._source,
+                            applied=fourcc_applied,
+                        )
+
+                if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+                    try:
+                        if not self.cap.set(getattr(cv2, "CAP_PROP_BUFFERSIZE"), 1):
+                            raise RuntimeError("cap_set_failed")
+                    except Exception:
+                        if TRACE_CAMERA:
+                            _log("live.camera.buffersize.unsupported", source=self._source)
 
             actual_w = actual_h = None
             actual_fps: Optional[float] = None
@@ -473,7 +513,7 @@ class _CVCamera(FrameSource):
                     continue
                 _log("live.camera.read.error", source=getattr(self, "_source", "unknown"), warmups=warmups)
                 break
-            if not reported_raw:
+            if not reported_raw and TRACE_CAMERA:
                 raw_shape = getattr(frame, "shape", None)
                 raw_dtype = getattr(frame, "dtype", None)
                 raw_str = str(raw_shape) if raw_shape is not None else None
@@ -502,10 +542,21 @@ class _CVCamera(FrameSource):
                     raw_mean=raw_mean,
                 )
                 reported_raw = True
+            if self._warmup_success < self._warmup_target:
+                self._warmup_success += 1
+                if TRACE_CAMERA:
+                    _log(
+                        "live.camera.read.warmup",
+                        source=getattr(self, "_source", "unknown"),
+                        count=self._warmup_success,
+                        target=self._warmup_target,
+                    )
+                time.sleep(0.002)
+                continue
             current_mode = getattr(self, "_decode_mode", None)
             arr = np.asarray(frame)
             channels = arr.shape[2] if arr.ndim == 3 else 1
-            if frame_counter <= 5 or TRACE_CAMERA:
+            if TRACE_CAMERA:
                 try:
                     raw_min = float(arr.min())
                     raw_max = float(arr.max())
@@ -614,7 +665,7 @@ class _CVCamera(FrameSource):
             except Exception:
                 frame_min = frame_max = frame_mean = frame_std = None
 
-            if frame_counter <= 5 or TRACE_CAMERA:
+            if TRACE_CAMERA:
                 channels_out: Optional[int] = None
                 try:
                     shape_seq = cast(Sequence[int], getattr(frame_bgr, "shape", ()))

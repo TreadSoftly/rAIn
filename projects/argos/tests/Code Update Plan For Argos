@@ -1,0 +1,644 @@
+Iteration 1 – Plan Skeleton
+
+We’ll build the overhaul plan in layers so nothing gets missed. First pass lays out every area we’ll address, the objectives for each, and how they connect. Subsequent iterations will drill into tasks, owners, acceptance criteria, and sequencing.
+
+A. Strategic Goals
+
+Short-term (next release):
+Reduce fetch/install latency (parallel downloads, cached toolchains, reliable manifests).
+Raise live-webcam FPS and cut end-to-end latency without changing models.
+Produce reliable telemetry and automated benchmarks to measure gains.
+Mid-term:
+Ship pre-optimized artifacts (FP16/INT8 ONNX, TensorRT, OpenVINO) keyed to detected hardware.
+Add pipeline controls (backend selection, resolution modes, tracking) and make the live stack resilient/stable.
+Long-term:
+Support multi-camera orchestration, remote control APIs, and curated deployment playbooks for laptops/edge rigs.
+B. Workstreams
+
+Instrumentation & Baselines
+
+Expand per-stage timers, queue metrics, backend diagnostics.
+Automate replay benchmarks (video + webcam) storing results for regression tracking.
+Feed metrics into support bundles for quick triage.
+Fetch & Asset Pipeline
+
+Parallelize _fetch_all, add resume/mirror, manifest index with checksums/hardware metadata.
+Cache toolchain installs, expose CLI flags, expand packs with optimized artifacts.
+Live Pipeline Architecture
+Introduce capture→infer→render worker queues with drop-oldest policy.
+Add staleness guards, adaptive frame skipping, and resource back-pressure warnings.
+Prewarm models and reuse model pools between sessions.
+Capture/Input Layer
+
+Backend auto-selection (DSHOW/AVFoundation/V4L2) plus MJPG/YUY2 negotiation, buffer-size control.
+GPU ingest options (NVDEC/D3D11/VAAPI/libcamera) with graceful fallback.
+Camera health monitoring & auto-reconnect flows.
+Preprocess & Inference Runtime
+
+Single conversion/letterbox per frame, GPU-accelerated where available.
+ONNX Runtime session tuning (threads, CUDA graph, memory arena).
+Runtime toggles for Torch/ORT/TensorRT; artifact cache for FP16/INT8 engines.
+Postprocessing & Rendering
+
+In-graph NMS where possible; per-class filters, realistic max_det.
+Overlay batching, GPU-based composition exploration, heatmap scaling.
+VideoSink upgrades (HW encoders, async writes), direct streaming sinks.
+Configuration & UX
+
+Performance profiles (low-latency/balanced/high-accuracy).
+CLI & GUI controls for backend/precision/resolution; interactive “panoptes live tune”.
+HUD telemetry overlays (FPS, percentiles, GPU load), structured logs.
+Reliability & Testing
+
+Unit/integration tests for fetch resume, ONNX fallback correctness, CLI defaults.
+Regression benchmarks (FPS/latency) and stress tests (multi-camera, long soak, camera disconnect).
+Feature flags for staged rollout (ARGOS_FETCH_PARALLEL, ARGOS_ENABLE_ACCELERATORS).
+Deployment & Documentation
+
+Playbooks for laptops, edge devices, dedicated GPU rigs.
+Manifest maintenance workflow and CI validation for optimized artifacts.
+Post-release telemetry review & iteration loop.
+
+Iteration 2 – Instrumentation & Baselines (≈12% of overall plan complete)
+
+I focused this iteration entirely on Workstream 1, detailing the actions needed to capture trustworthy performance data before we start optimizing. Once these land, every later change can be measured objectively.
+
+1. Stage Timing & Telemetry Hooks
+Files to touch
+
+projects/argos/panoptes/live/pipeline.py
+projects/argos/panoptes/live/tasks.py
+projects/argos/panoptes/live/sinks.py
+Support bundle plumbing (projects/argos/panoptes/live/cli.py, ...,/observability.md)
+Actions
+
+Add a lightweight metrics helper (panoptes/metrics.py) to record:
+capture start/end, preprocess, inference, postprocessing, overlay, sink commit.
+queue depths and dropped frame counts per stage.
+Instrument LivePipeline.run to wrap each stage with timers, emitting:
+live.pipeline.timing JSONL events (median and p95 every N frames).
+live.pipeline.queue_depth and live.pipeline.drop_count.
+Capture backend metadata at startup:
+camera backend/FOURCC/resolution (already partly logged).
+inference backend (Torch vs ORT; ORT provider name; TensorRT/DirectML marker).
+sink type (display FPS target, video codec, hardware encoder flag).
+Extend support bundle to include the recent metrics log (metrics.jsonl) plus hardware snapshot (GPU name, driver version, CPU core count).
+Acceptance criteria
+
+Running panoptes live produces structured logs with per-stage timings and drop counts.
+The support bundle contains metrics.jsonl and a concise hardware.json.
+No measurable overhead (<1 ms/frame) from the instrumentation.
+2. Automated Baseline Harness
+Files / scripts
+
+New tools/benchmarks/live_baseline.py (or similar) that replays:
+3 canned video clips (720p daylight, 720p low-light, 480p indoor).
+Optional live webcam run for 2 minutes if a camera is available.
+Stores results in projects/argos/tests/results/runs/<timestamp>/baseline.json.
+Tasks
+
+Script loads model using same config as CLI, runs through pipeline, collects metrics.
+Emits summary (mean FPS, p95 latency, dropped frames) per scenario.
+Adds CLI entry: panoptes bench live --scenario <clip|camera>.
+Acceptance
+
+QA can run panoptes bench live and obtain a standardized JSON report.
+Baseline numbers archived for comparison in future iterations.
+3. Documentation Update
+Update docs/observability.md with:
+
+How to enable metrics logging.
+Where support bundles store perf data.
+How to run the baseline harness and interpret results.
+Progress so far
+
+Workstream 1 (Instrumentation & Baselines): planned in detail (tasks, files, success criteria).
+Other workstreams pending.
+
+Iteration 3 – Fetch & Asset Pipeline (≈24% overall plan complete)
+
+This iteration breaks down Workstream 2 so _fetch_models.py becomes faster, resilient, and capable of delivering pre-optimized artifacts.
+
+2.1 Parallel Fetch & Export
+Files: projects/argos/panoptes/model/_fetch_models.py, CLI entry.
+
+Tasks
+
+Replace serial _fetch_all loop with a worker pool (e.g., concurrent.futures.ThreadPoolExecutor with configurable --max-parallel).
+Ensure downloads (HTTP), ONNX exports, and validation run in parallel without trampling shared directories (use per-task staging).
+Provide CLI flag --max-parallel and tie defaults to hardware (#cores).
+Add structured telemetry: emit per-model download duration and export duration.
+Acceptance: Running panoptes.model.fetch --pack default fetches multiple models concurrently; total wall-clock time drops vs baseline; logs show per-model timings.
+
+2.2 Manifest Index & Integrity
+New module: projects/argos/panoptes/model/manifest.py
+
+Tasks
+
+Define manifest schema containing:
+model id, variant (fp32, fp16, int8, trt, etc.)
+file size, SHA256, mirrors, hardware capabilities.
+On fetch, consult manifest before network call; skip micro if hash matches.
+Support remote manifest updates (e.g., GitHub JSON); fallback to local cache.
+Ensure _write_manifest handles cross-drive paths (fix ValueError from relpath).
+Acceptance: CLI reports when assets found locally; manifest entries validated on fetch completion.
+
+2.3 Robust Downloader
+Tasks
+
+Update _fetch_one to:
+Verify existing checksum before re-download.
+Support HTTP range requests for resume (using requests or httpx).
+Provide fallback mirrors and local cache.
+Introduce optional aria2c or multi-connection downloader where available.
+Clearly label manifest action (download, copy, skip) instead of generic “download”.
+Acceptance: Interrupted downloads can resume; CLI output differentiates local copy vs new download.
+
+2.4 Toolchain & Export Handling
+Tasks
+
+Gate _ensure_export_toolchain behind explicit call (not import-time). Cache install state in ~/.cache/argos/toolchain.json.
+Detect hardware (CUDA, DirectML, CPU) and install only necessary packages.
+Modify _export_onnx_subprocess to capture stdout/stderr, return detailed error messages; avoid silent failure.
+Provide CLI flag to prefetch hardware-specific toolchains (e.g., --hardware gpu).
+Acceptance: Running fetch on limited environments skips unnecessary installs; errors are surfaced; repeated runs avoid re-install.
+
+2.5 Optimized Asset Generation
+Tasks
+
+Post-download stage builds:
+FP16 and INT8 ONNX (with calibration dataset hook).
+TensorRT engine (if torch.cuda.is_available() and TensorRT detected).
+OpenVINO IR (if CPU/Intel iGPU).
+Store artifacts with naming convention model.fp32.onnx, model.fp16.onnx, model.trt, model.openvino.xml.
+Update manifest to reference these artifacts and hardware tags.
+Add CLI options --opt-level {baseline, fp16, aggressive}.
+Acceptance: After fetch, hardware-specific artifacts exist; manifest indicates available variants; CLI report lists new assets.
+
+2.6 Quick Check & Benchmarking
+Tasks
+
+Evolve _quick_check into panoptes model bench that:
+Runs a quick inference with each available backend (Torch/ORT/TensorRT).
+Records latency/FPS, verifies outputs.
+Ensure _quick_check waits for subprocess exit properly (fix unconditional terminate()).
+Acceptance: panoptes model bench yields JSON summary; pipeline doesn’t leave orphan processes.
+
+2.7 CLI & UX Enhancements
+Tasks
+
+Add non-interactive mode: panoptes.model.fetch --pack default --hardware gpu --opt-level aggressive --yes.
+Fix default prompt (“Press Enter” selects option 1).
+Integrate dependency sanity checks (e.g., torch version compatibility, ONNX opset support).
+Acceptance: Scripts/installers can prefetch without prompts; CLI no longer warns on Enter; dependencies validated early.
+
+2.8 Tests & Rollout
+Tasks
+
+Add unit tests for manifest handling, resume logic, and CLI option parsing (use pytest + responses to mock HTTP).
+Integration test: simulate failed download -> resume -> success.
+Feature flags ARGOS_FETCH_PARALLEL, ARGOS_ENABLE_ACCELERATORS to allow staging.
+Draft migration doc describing new artifact layout, CLI flags, and recommended packs.
+Acceptance: Tests pass in CI; docs published; feature flags default off until manually enabled.
+
+Iteration 4 – Live Pipeline Architecture (≈36% overall plan complete)
+(Research cross-referenced: live/pipeline.py, live/tasks.py, docs insights on multistage queues and drop policies.)
+
+3.1 Multistage Pipeline Structure
+Files
+
+projects/argos/panoptes/live/pipeline.py
+Tasks
+
+Refactor LivePipeline.run into three coordinated components:
+Capture worker: reads frames, writes into a single-slot or bounded queue (maxsize=2) with “overwrite oldest” behavior.
+Inference worker: consumes latest frame, runs preprocess + model + postproc, emits results into a second bounded queue.
+Render worker: pulls latest result, applies overlay, handles sinks.
+Use queue.SimpleQueue or custom ring buffer to avoid blocking; provide drop policy configuration (drop_oldest default).
+Ensure graceful startup/shutdown: stop_event, join workers, handle exceptions with context.
+Acceptance
+
+Under load, capture never blocks on inference; logs show bounded queue sizes and drop events.
+Unit/integration test simulating slow inference shows latent frames are dropped, not queued endlessly.
+3.2 Frame Staleness & Adaptive Load Shedding
+Tasks
+
+Add timestamp metadata to each frame; if now - capture_ts > 2 * frame_period, skip rendering and log staleness.
+Introduce optional --latency-budget flag (ms); when exceeded, the inference worker requests:
+dynamic frame skipping (process every Nth frame) or downscale resolution.
+HUD notice indicating the adaptation.
+Provide hook to revert to full processing once latency recovers.
+Acceptance
+
+Configurable budget works; metrics show staleness counts decrease.
+Users receive clear HUD warning when frames are being skipped.
+3.3 Model Prewarm & Pools
+Tasks
+
+Extend _warmup_wrapper hooks in live/tasks.py to run N dummy frames per backend (Torch/ORT/TensorRT) before live inference, caching warmed kernels.
+Add model pool cache so repeated sessions reuse existing model handles without reloading weights.
+Provide CLI --no-warmup for testing.
+Acceptance
+
+First-frame latency drops (benchmarked via instrumentation).
+Multiple LivePipeline invocations reuse model without reload.
+3.4 GPU Stream / IO Binding (Future-ready hooks)
+Tasks
+
+If using ORT or Torch with CUDA, set up dedicated CUDA streams:
+asynchronous host-to-device copies (non_blocking=True).
+overlap upload/inference/download operations.
+Provide fallback when GPU binding unavailable.
+Acceptance
+
+On GPU builds, profiler shows copy/infer overlap.
+No regression on CPU-only systems.
+3.5 Back-pressure & Sink Notifications
+Tasks
+
+Modify sinks (live/sinks.py) to expose current throughput; if writer/display lags:
+log warning.
+offer option to auto-disable preview or switch to “headless” mode.
+Update pipeline to listen for sink slowdowns and react (drop render queue, reduce overlay complexity).
+Acceptance
+
+When sink intentionally slowed (e.g., disk writer sleeps), pipeline logs back-pressure and maintains low latency.
+3.6 Error Handling & Recovery
+Tasks
+
+Capture worker: detect camera disconnect, attempt reconnect, switch to synthetic source if repeated failure.
+Surface error in HUD/log (explicit source label change).
+Ensure pipeline context manager stays active so logs include task/source metadata (fix existing bind_context exit issue).
+Acceptance
+
+Pull camera cable during run -> pipeline attempts reconnect, falls back gracefully, updates HUD.
+
+Iteration 5 – Capture / Input Layer (≈48% overall plan complete)
+(References: live/camera.py (FrameSource, _CVCamera), installer env defaults, research on backend tuning & GPU ingest.)
+
+4.1 Backend Auto-Selection & Device Probing
+Tasks
+
+Extend _numeric_source / _autoprobe_camera to handle string indices (“0”) and re-run probing.
+Implement backend detection routine:
+On Windows prioritize DirectShow (cv2.CAP_DSHOW), fall back to Media Foundation only when DSHOW unavailable.
+On macOS use AVFoundation (cv2.CAP_AVFOUNDATION), on Linux V4L2/GStreamer.
+Expose CLI flag --capture-backend to override auto-pick (useful for debugging).
+Acceptance
+
+String index inputs successfully run auto-detect.
+Logging shows selected backend, with human-readable message when fallback occurs.
+4.2 Camera Parameter Tuning
+Tasks
+
+After opening device, set:
+CAP_PROP_FOURCC to ‘MJPG’ or ‘YUY2’ where supported.
+CAP_PROP_BUFFERSIZE = 1 to limit buffering.
+Optional: attempt to disable auto-exposure / auto-focus if user passes --lock-exposure.
+Implement warm-up loop with exponential backoff and limit; log when camera fails to stabilize.
+Document parameter impact and a safe fallback path.
+Acceptance
+
+When camera supports MJPEG, FPS increases vs raw format.
+Buffer size change reduces capture latency (seen in metrics).
+Warm-up no longer loops indefinitely.
+4.3 GPU-Friendly Ingest
+Tasks
+
+Introduce optional PyAV/FFmpeg capture path for advanced users:
+Detect NVDEC/D3D11/VAAPI availability.
+Provide --capture-mode ffmpeg flag; route frames as NV12/YUV and convert on GPU if possible.
+Graceful fallback to OpenCV capture when GPU ingest not supported.
+Acceptance
+
+On capable hardware, --capture-mode ffmpeg shows lower CPU usage.
+Non-supporting systems return to default capture without error.
+4.4 Preprocessing Module
+Tasks
+
+Create dedicated preprocessing utility:
+Centralize color conversion, resize, letterbox, normalization.
+Support both CPU and GPU code paths (CUDA cv2.cuda_GpuMat where available).
+Reuse preallocated buffers; ensure stride alignment for YOLO.
+Optional: expose --preprocess-device {cpu,gpu} flag.
+Acceptance
+
+Preprocessing step emits consistent timing < target (e.g., <3 ms per frame).
+GPU mode measurable on NV hardware; CPU fallback identical to previous output.
+4.5 Capture Health Monitoring
+Tasks
+
+Track dropped / duplicated frames by comparing timestamps or frame IDs.
+Provide reconnect logic with exponential backoff; log each attempt.
+On repeated failure, optionally switch to synthetic feed and notify driver.
+Acceptance
+
+Metrics show frame drop statistics.
+Disconnecting camera triggers reconnect attempts logged with context.
+4.6 HUD Updates
+Tasks
+
+Update overlay to reflect actual feed source (camera id, backend, synthetic fallback) to avoid confusion (fix earlier issue).
+Display capture FPS vs target inference FPS so users can adjust resolution.
+Acceptance
+
+HUD accurately reports current source; telemetry matches logs.
+
+Iteration 6 – Preprocess & Inference Runtime (≈60% overall plan complete)
+(Inputs: research on ONNX Runtime tuning, FP16/INT8 exports, in-graph NMS, code references in live/tasks.py, model/_fetch_models.py.)
+
+5.1 Preprocess Efficiency & Reuse
+Tasks
+
+Ensure preprocessing occurs exactly once per frame:
+Consolidate resize + letterbox + color conversion into single function (reuse from Workstream 4).
+Store precomputed letterbox padding for static input size.
+Allocate reusable numpy/CUDA buffers; avoid per-frame reallocations.
+Offload to GPU when available (with a fallback path).
+Acceptance
+
+Profiling shows consistent, low (~1–2 ms) preprocess time; no extra conversions later.
+5.2 ONNX Runtime Session Tuning
+Files: live/tasks.py, model/_fetch_models.py (exporter).
+
+Tasks
+
+Configure ORT session options based on provider:
+intra_op_num_threads = physical cores (unless GPU only).
+execution_mode = SEQUENTIAL (unless running CPU parallel NMS).
+For CUDA provider: enable CUDA graph capture, set arena extend strategy.
+For DirectML: choose discrete vs integrated GPU id, enable memory pattern reuse.
+Expose CLI flag --ort-threads / --ort-execution-mode.
+Integrate with _warmup_wrapper so session warms caches.
+Log chosen settings in telemetry.
+Acceptance
+
+Benchmarks show improved throughput vs default ORT config; no regressions.
+5.3 Backend Selection & Fallback
+Tasks
+
+Add --backend {torch, ort, tensorrt} to panoptes live.
+At runtime detect available providers (CUDA, DirectML, OpenVINO) and choose best:
+Default order: TensorRT (if engine exists) > ORT GPU > ORT DirectML/OpenVINO > Torch.
+Clear logging when falling back (lack of provider, engine failure).
+Keep existing resilient_yolo heal logic; extend to install missing GPU packages when allowed.
+Acceptance
+
+Users can force backend via CLI; fallback events logged; baseline uses best available provider.
+5.4 Optimized Artifact Cache
+Tasks
+
+Hook into fetcher (Workstream 2) to select appropriate artifact:
+If GPU/FP16 supported, use FP16 ONNX.
+If TensorRT engine available, load directly.
+Otherwise default to FP32.
+In live/tasks.py, maintain artifact map per hardware profile.
+Provide --precision {fp32, fp16, int8} overrides (with warnings if unsupported).
+Acceptance
+
+Live pipeline loads correct artifact; metrics reflect expected speedups.
+5.5 Postprocessing Integration
+Tasks
+
+For ONNX/TensorRT paths, embed NMS in graph to avoid Python loops.
+When using Torch backend, ensure torchvision.ops.nms executed on GPU.
+Implement max_det and classes filters pre-NMS to reduce work when possible.
+Acceptance
+
+Postprocessing timing reduced; results remain accurate (verified by regression tests).
+5.6 Advanced Features (Optional)
+Tasks
+
+Explore dynamic batching or adaptive slicing for high-end GPUs (if latency budget allows).
+Investigate mixed precision inference for Torch (autocast + evaluate accuracy impact).
+Prepare QAT pipeline for future INT8 parity if needed.
+Acceptance
+
+Document experimental results; keep behind flags.
+
+Iteration 7 – Postprocessing & Rendering (≈72% overall plan complete)
+(Aligned with overlays, HUD, sink work from research and code review: live/overlay.py, live/sinks.py, postprocessing in live/tasks.py.)
+
+6.1 Postprocessing Efficiency
+Tasks
+
+Move remaining per-frame box filtering into vectorized operations:
+Use numpy or torch vector ops to clamp/confidence-filter before NMS.
+Ensure class filtering (--classes) applied early.
+Persist per-class statistics for debugging (counts, suppressed boxes).
+Acceptance
+
+Postprocessing time < target (e.g., <2 ms) even with dense scenes.
+6.2 Overlay & HUD Optimization
+Tasks
+
+Profile current overlay path (overlay.py):
+Identify frequent cv2.putText/rectangle calls; cache glyphs or draw once per label.
+Introduce overlay presets:
+Minimal (just boxes), Standard, Rich (boxes + labels + heatmaps).
+CLI --overlay preset.
+For heatmaps, compute at half-resolution and upscale before blending.
+Display new telemetry (FPS, p95 latency, backend, capture FPS) using minimal draw calls.
+Acceptance
+
+Switching to Minimal overlay reduces render time significantly; telemetry visible without FPS drop.
+6.3 GPU-Based Overlay Exploration (Optional)
+Tasks
+
+Investigate using OpenGL/Vulkan/D3D interop for overlay when GPU supports it:
+Keep fallback to CPU drawing when not available.
+Provide experimental flag --overlay-gpu (document Beta status).
+Acceptance
+
+On supported hardware, GPU overlay reduces CPU load; fallback stable elsewhere.
+6.4 VideoSink Improvements
+Tasks
+
+Extend VideoSink to detect hardware encoders (NVENC/QSV/AMF/VideoToolbox).
+Use ffmpeg subprocess or PyAV wrapper when OS supports.
+Provide asynchronous writer queue to prevent blocking pipeline.
+Maintain fallback to existing OpenCV writer; use MJPG/AVI for high-FPS tests.
+Add streaming sink interface (RTSP/WebRTC) for future expansion.
+Acceptance
+
+Recording no longer throttles pipeline; metrics show sink latency reduced.
+CLI allows --video-sink {opencv, ffmpeg, streaming}.
+6.5 Rendering Back-pressure & Drop Policy
+Tasks
+
+Integrate sink feedback (Workstream 3) to drop or skip overlay when sink is slow.
+Expose config --render-fps to cap display refresh (e.g., 30 fps preview even if inference runs at 90).
+Acceptance
+
+Display throttle stops UI from impacting inference FPS; user can tune.
+6.6 UI Feedback & Alerts
+Tasks
+
+HUD should show:
+Source (camera backend or synthetic).
+Backend/precision (Torch FP32 vs ORT FP16 vs TensorRT).
+Drop counts/staleness warnings.
+When overlay disabled for performance, log notice and update HUD.
+Acceptance
+
+Operators immediately know current modes without diving into logs.
+
+Iteration 8 – Configuration & UX (≈84% overall plan complete)
+(References: config files, CLI entry, docs on performance profiles, “panoptes live tune” idea.)
+
+7.1 Performance Profiles
+Tasks
+
+Define profiles in projects/argos/panoptes/live/config.py:
+low-latency: small resolution, minimal overlay, GPU backend, drop-oldest policy.
+balanced: default settings.
+high-accuracy: larger resolution, rich overlay, FP32.
+Add CLI option --profile to select profile quickly.
+Document profile details in README/docs.
+Acceptance
+
+User can run panoptes live --profile low-latency and see settings applied.
+7.2 CLI Enhancements
+Tasks
+
+Add explicit flags for backend (--backend), precision (--precision), overlay (--overlay), capture backend override, latency budget.
+Support config file (~/.config/argos/live.yaml) for default settings.
+Ensure installer scripts expose key flags via environment variables.
+Acceptance
+
+CLI help shows new options; config file overrides works.
+7.3 Guided Tuning Workflow
+Tasks
+
+Create panoptes live tune command:
+Runs baseline test with different resolutions/backends/overlays.
+Presents recommended config based on latency and FPS.
+Write results to a report (JSON + human-readable summary).
+Acceptance
+
+Running tune outputs ranking of configurations; users can adopt via CLI.
+7.4 Telemetry in HUD / Logs
+Tasks
+
+Integrate per-stage timing metrics (Workstream 1) into HUD toggle (hotkey).
+Provide JSON log stream for dashboards (e.g., send to stdlog or optional websocket).
+Provide summary at session end (mean/p95 FPS, dropped frames, backend used).
+Acceptance
+
+Operators can view telemetry in HUD; logs capture summary.
+7.5 Documentation & UX Polish
+Tasks
+
+Update README/docs with:
+Quick start using profiles.
+Explanation of new CLI flags and tune workflow.
+FAQs for common issues (camera latency, backend fallback).
+Provide sample configuration files for different hardware.
+Acceptance
+
+Documentation up-to-date; testers can follow without confusion.
+7.6 GUI Considerations (if applicable)
+Tasks
+
+If GUI layer exists (future), expose new options (profile, backend, overlay toggle) via dropdowns.
+Ensure string inputs (camera indices) are converted to int before pipeline (address earlier issue).
+Acceptance
+
+GUI matches CLI capabilities (planned if UI in scope).
+
+Iteration 9 – Reliability & Testing (≈96% overall plan complete)
+(Based on earlier code-review findings, new pipeline features, fetch changes.)
+
+8.1 Unit & Integration Tests
+Tests to add – tests/ directory
+
+Fetch pipeline
+
+Simulate interrupted download (responses/mock) → resume.
+Manifest relpath failure (different drives) → absolute path fallback.
+Toolchain cache reuse.
+ONNX fallback logic
+
+Ensure latest export matching model is copied; wrong file mismatch triggers error.
+Export failure surfaces stderr/log.
+Live pipeline
+
+Multi-stage queue drop-old behavior.
+Camera string index auto-probe.
+Synthetic fallback updates source label.
+HUD telemetry toggles.
+Overlay/sinks
+
+Preset selection applies correct config.
+Back-pressure triggers drop/warning.
+Acceptance: CI covers new behaviors; tests fail on regressions.
+
+8.2 Benchmark & Regression Harness
+Integrate panoptes bench live (Workstream 1) into CI nightly job.
+Store baseline reports and alert when FPS/latency regress beyond thresholds.
+Add fetch pipeline benchmark (parallel vs serial) to ensure speed-ups persist.
+8.3 Stress & Resilience Tests
+Long-duration live run (e.g., 2-hour soak) to catch leaks/throttling.
+Multi-camera scenario: simulate multiple sources sharing inference pool.
+Camera disconnect/reconnect tests ensure recovery logs appear.
+Sink slowdown simulation (slow disk) triggers headless fallback.
+8.4 Feature Flags & Safe Rollout
+Ensure ARGOS_FETCH_PARALLEL, ARGOS_ENABLE_ACCELERATORS default off initially; add tests verifying behavior when disabled.
+Add config toggles for multi-stage pipeline ARGOS_PIPELINE_V2.
+8.5 QA Playbook
+Document testing checklist:
+Fetch with/without network, with different hardware marks.
+Live pipeline tests per profile (low-latency, balanced, high-accuracy).
+Benchmark harness usage.
+Provide instructions on collecting support bundle, comparing logs.
+
+Iteration 10 – Deployment & Documentation (Plan complete: 100%)
+
+9.1 Deployment Playbooks
+Tasks
+
+Create docs/deploy/ with guides for:
+
+Laptop/Desktop (Windows/Mac/Linux): recommended profiles, capture backend hints, GPU driver requirements.
+Edge device (Jetson/Intel NUC): how to enable TensorRT/OpenVINO assets, power/thermal considerations.
+Dedicated GPU rig: hardware encoder usage, multi-camera scenarios.
+Include troubleshooting sections (camera permission, backend missing, unsupported encoder).
+
+Acceptance
+
+Operators can follow playbooks to set up environment with minimal guidance.
+9.2 Manifest Maintenance & CI Hooks
+Tasks
+
+Add CI job to validate manifest entries on new revisions:
+Ensure referenced artifacts exist, hashes match.
+Run quick ONNX/TensorRT load test.
+Document process for updating manifest (who, when, how to version) in docs/manifest.md.
+Acceptance
+
+CI prevents bad manifest entries; team has clear checklist for updates.
+9.3 Release/Migration Notes
+Tasks
+
+Draft migration document describing:
+
+New CLI flags & profiles.
+Changes in artifact structure (*.fp16.onnx, etc.).
+Feature flag defaults & how to enable new pipeline.
+Update onboarding scripts (installers) to prefetch optimized packs when requested.
+
+Acceptance
+
+Upgraders know how to adapt scripts and find new options.
+9.4 Post-release Monitoring & Iteration
+Tasks
+
+Set up telemetry review (manual or automated) to track:
+
+panoptes bench live results after release.
+Support bundle metrics submitted by users.
+Schedule follow-up iteration to address emerging bottlenecks (e.g., GPU overlay adoption, pseudo labeling, multi-camera orchestration).
+
+Acceptance
+
+Operational plan in place for monitoring; backlog seeded with future enhancements.

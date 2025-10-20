@@ -227,7 +227,7 @@ def setup_logging(
                 raise RuntimeError("Logging configured but run directory unset.")
             return run_dir
 
-        level_name = os.getenv(level_env, "INFO").upper()
+        level_name = os.getenv(level_env, "WARNING").upper()
         level = getattr(logging, level_name, logging.INFO)
         console_level_name = os.getenv(console_level_env, "WARNING").upper()
         console_level = getattr(logging, console_level_name, logging.WARNING)

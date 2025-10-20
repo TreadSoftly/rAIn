@@ -43,7 +43,6 @@ import os
 import urllib.request
 import uuid
 import time
-from types import TracebackType
 from typing import Any, Dict, Sequence, Optional
 
 # ── third-party ────────────────────────────────────────────────────────
@@ -59,7 +58,7 @@ from .heatmap import heatmap_overlay  # type: ignore
 from panoptes.model_registry import (  # type: ignore
     load_detector,  # single source-of-truth
 )
-from panoptes.logging_config import bind_context, setup_logging
+from panoptes.logging_config import bind_context, setup_logging # type: ignore
 
 # If present, GeoJSON sink (kept as in original)
 from .geo_sink import to_geojson  # type: ignore
@@ -77,12 +76,46 @@ except Exception:  # pragma: no cover
 # ───────────────────────── logging ────────────────────────────────────
 setup_logging()
 LOGGER = logging.getLogger(__name__)
+TRACE_LAMBDA = os.getenv("PANOPTES_LAMBDA_TRACE", "").strip().lower() in {"1", "true", "yes"}
+LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
+ESSENTIAL_LAMBDA_EVENTS = {
+    "lambda.model.init.start",
+    "lambda.model.init.success",
+    "lambda.model.init.dummy",
+    "lambda.request.start",
+    "lambda.request.complete",
+    "lambda.phase.inference.success",
+    "lambda.phase.fetch",
+    "lambda.phase.parse",
+}
+BASIC_KEYS = ("task", "status", "ms", "reason", "detections", "model", "small")
+
+
+class _Null:
+    """No-op context manager used when progress hooks are unavailable."""
+
+    def __enter__(self) -> "_Null":
+        return self
+
+    def __exit__(self, *_: object) -> bool:
+        return False
 
 
 def _log(event: str, **info: object) -> None:
+    if not LOGGER.isEnabledFor(logging.INFO):
+        return
+    if not TRACE_LAMBDA and event not in ESSENTIAL_LAMBDA_EVENTS:
+        return
     if info:
-        detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        LOGGER.info("%s %s", event, detail)
+        if TRACE_LAMBDA or LOG_DETAIL:
+            detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        else:
+            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
+            detail = " ".join(detail_parts)
+        if detail:
+            LOGGER.info("%s %s", event, detail)
+        else:
+            LOGGER.info(event)
     else:
         LOGGER.info(event)
 
@@ -228,10 +261,12 @@ def handler(event: Dict[str, Any], _ctx: Any) -> Dict[str, Any]:
                 or headers.get("x-amzn-trace-id")
                 or headers.get("x-amzn-requestid")
             )
-    if not request_id:
-        request_id = str(uuid.uuid4())
+    if not isinstance(request_id, str) or not request_id:
+        request_id_str = str(uuid.uuid4())
+    else:
+        request_id_str = request_id
 
-    with bind_context(lambda_request_id=request_id):
+    with bind_context(lambda_request_id=request_id_str):
         _log("lambda.request.start")
         # coarse request-level progress (safe no-op in Lambda)
         lp = _lp_ctx("LAMBDA")

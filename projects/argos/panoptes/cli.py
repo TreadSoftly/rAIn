@@ -50,12 +50,34 @@ from .support_bundle import write_support_bundle # type: ignore[import]
 
 setup_logging()
 LOGGER = logging.getLogger(__name__)
+TRACE_OFFLINE_CLI = os.getenv("PANOPTES_CLI_TRACE", "").strip().lower() in {"1", "true", "yes"}
+LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
+ESSENTIAL_CLI_EVENTS = {
+    "cli.run.start",
+    "cli.run.complete",
+    "cli.run.error",
+    "cli.item.start",
+    "cli.item.outputs",
+    "cli.run.dry",
+}
+BASIC_KEYS = ("task", "input", "count", "reason", "weight", "outputs", "inputs")
 
 
 def _log_event(event: str, **info: object) -> None:
+    if not LOGGER.isEnabledFor(logging.INFO):
+        return
+    if not TRACE_OFFLINE_CLI and event not in ESSENTIAL_CLI_EVENTS:
+        return
     if info:
-        detail = ' '.join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        LOGGER.info("%s %s", event, detail)
+        if TRACE_OFFLINE_CLI or LOG_DETAIL:
+            detail = ' '.join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        else:
+            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
+            detail = ' '.join(detail_parts)
+        if detail:
+            LOGGER.info("%s %s", event, detail)
+        else:
+            LOGGER.info("%s", event)
     else:
         LOGGER.info("%s", event)
 

@@ -5,13 +5,14 @@ Keeps progress UX similar to other ARGOS tasks and returns the saved path (if an
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Tuple, Union
 import threading
 from queue import Empty, Full, Queue
 import time
+from dataclasses import dataclass
 
 from .camera import FrameSource, open_camera, synthetic_source
 from .sinks import DisplaySink, VideoSink, MultiSink
@@ -34,13 +35,35 @@ except Exception:  # pragma: no cover
         return _N()
 
 LOGGER = logging.getLogger(__name__)
+TRACE_PIPELINE = os.getenv("PANOPTES_LIVE_TRACE_PIPELINE", "").strip().lower() in {"1", "true", "yes"}
+LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
+ESSENTIAL_EVENTS = {
+    "live.pipeline.start",
+    "live.pipeline.stop",
+    "live.pipeline.end",
+    "live.pipeline.capture.error",
+    "live.pipeline.video_init.error",
+    "live.pipeline.sinks",
+}
+BASIC_KEYS = ("task", "source", "reason", "error", "frames", "model", "video_path")
 
 FramePacket = Tuple[NDArrayU8, float]
 
 def _log(event: str, **info: object) -> None:
+    if not LOGGER.isEnabledFor(logging.INFO):
+        return
+    if not TRACE_PIPELINE and event not in ESSENTIAL_EVENTS:
+        return
     if info:
-        detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        LOGGER.info("%s %s", event, detail)
+        if TRACE_PIPELINE or LOG_DETAIL:
+            detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        else:
+            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
+            detail = " ".join(detail_parts)
+        if detail:
+            LOGGER.info("%s %s", event, detail)
+        else:
+            LOGGER.info(event)
     else:
         LOGGER.info(event)
 

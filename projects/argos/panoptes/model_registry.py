@@ -17,11 +17,31 @@ from .runtime.backend_probe import ort_available, torch_available
 # ────────────────────────────────────────────────────────────────
 # — Logging helpers
 LOGGER = logging.getLogger(__name__)
+TRACE_MODEL_REGISTRY = os.getenv("PANOPTES_MODEL_TRACE", "").strip().lower() in {"1", "true", "yes"}
+LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
+ESSENTIAL_MODEL_EVENTS = {
+    "weights.select.start",
+    "weights.select.success",
+    "weights.select.error",
+    "weights.select.try",
+}
+BASIC_KEYS = ("task", "weight", "backend", "error", "reason")
 
 def _log(event: str, **info: object) -> None:
+    if not LOGGER.isEnabledFor(logging.INFO):
+        return
+    if not TRACE_MODEL_REGISTRY and event not in ESSENTIAL_MODEL_EVENTS:
+        return
     if info:
-        detail = ' '.join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        LOGGER.info("%s %s", event, detail)
+        if TRACE_MODEL_REGISTRY or LOG_DETAIL:
+            detail = ' '.join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        else:
+            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
+            detail = ' '.join(detail_parts)
+        if detail:
+            LOGGER.info("%s %s", event, detail)
+        else:
+            LOGGER.info("%s", event)
     else:
         LOGGER.info("%s", event)
 

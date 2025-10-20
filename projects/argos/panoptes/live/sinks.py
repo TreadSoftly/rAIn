@@ -39,12 +39,36 @@ from panoptes.logging_config import bind_context # type: ignore[import]
 
 
 LOGGER = logging.getLogger(__name__)
+TRACE_SINKS = os.getenv("PANOPTES_LIVE_TRACE_SINKS", "").strip().lower() in {"1", "true", "yes"}
+LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
+ESSENTIAL_SINK_EVENTS = {
+    "live.display.init",
+    "live.display.fallback",
+    "live.display.backend",
+    "live.sink.video.init",
+    "live.sink.video.opened",
+    "live.sink.video.fallback",
+    "live.sink.video.disabled",
+    "live.sink.video.closed",
+}
+BASIC_KEYS = ("backend", "path", "codec", "reason", "size", "fps")
 
 
 def _log(event: str, **info: object) -> None:
+    if not LOGGER.isEnabledFor(logging.INFO):
+        return
+    if not TRACE_SINKS and event not in ESSENTIAL_SINK_EVENTS:
+        return
     if info:
-        detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        LOGGER.info("%s %s", event, detail)
+        if TRACE_SINKS or LOG_DETAIL:
+            detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
+        else:
+            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
+            detail = " ".join(detail_parts)
+        if detail:
+            LOGGER.info("%s %s", event, detail)
+        else:
+            LOGGER.info(event)
     else:
         LOGGER.info(event)
 
