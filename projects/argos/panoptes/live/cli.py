@@ -229,32 +229,34 @@ def _extract_all_flag(tokens: List[str]) -> tuple[List[str], bool]:
 
 def _parse_specs(tokens: List[str]) -> List[_LiveSpec]:
     specs: List[_LiveSpec] = []
-    current_task: Optional[str] = None
-    current_hint: Optional[_ModelHint] = None
+    idx = 0
+    total = len(tokens)
 
-    for tok in tokens:
-        low = tok.lower().strip()
-        if low in _TASK_CHOICES:
-            if current_task is not None:
-                specs.append(_LiveSpec(task=current_task, hint=current_hint, source=None))
-            current_task = _TASK_CHOICES[low]
-            current_hint = None
-            continue
+    while idx < total:
+        task_token = tokens[idx].strip()
+        task_key = task_token.lower()
+        if task_key not in _TASK_CHOICES:
+            raise typer.BadParameter(f"Unexpected token {task_token!r}; specify a task before the camera/source.")
 
-        hint = _parse_model_token(tok)
-        if hint is not None:
-            current_hint = hint
-            continue
+        task = _TASK_CHOICES[task_key]
+        idx += 1
 
-        if current_task is None:
-            raise typer.BadParameter(f"Unexpected token {tok!r}; specify a task before the camera/source.")
+        hint: Optional[_ModelHint] = None
+        if idx < total:
+            model_token = tokens[idx].strip()
+            model_hint = _parse_model_token(model_token)
+            if model_hint is not None:
+                hint = model_hint
+                idx += 1
 
-        specs.append(_LiveSpec(task=current_task, hint=current_hint, source=tok))
-        current_task = None
-        current_hint = None
+        source: Optional[str] = None
+        if idx < total:
+            candidate_source = tokens[idx].strip()
+            if candidate_source.lower() not in _TASK_CHOICES:
+                source = candidate_source
+                idx += 1
 
-    if current_task is not None:
-        specs.append(_LiveSpec(task=current_task, hint=current_hint, source=None))
+        specs.append(_LiveSpec(task=task, hint=hint, source=source))
 
     return specs
 
@@ -264,6 +266,14 @@ def _normalise_source_token(token: str) -> Union[int, str]:
     low = stripped.lower()
     if low.startswith("synthetic"):
         return stripped
+    for prefix in ("cam", "camera", "webcam", "webcamera"):
+        if low.startswith(prefix):
+            suffix = stripped[len(prefix):].strip()
+            if suffix.lstrip("+-").isdigit():
+                idx = int(suffix)
+                if idx <= 0:
+                    return 0
+                return idx - 1
     if stripped.lstrip("+-").isdigit():
         idx = int(stripped)
         if idx <= 0:
@@ -517,6 +527,7 @@ def run(
         cleaned_tokens.append(trimmed)
 
     cleaned_tokens, use_all = _extract_all_flag(cleaned_tokens)
+    _log_event("live.cli.tokens", tokens=",".join(cleaned_tokens))
     specs = _parse_specs(cleaned_tokens)
     if not specs:
         specs = [_LiveSpec(task="detect", hint=None, source=None)]

@@ -219,23 +219,8 @@ if ($tokens.Count -gt 0) {
 # ---- Optional: normalize op position (INPUT op -> op INPUT) to match *nix shims ----
 $opIndex = -1
 $normOp = $null
-for ($i = 0; $i -lt $tokens.Count; $i++) {
-  $tok = $tokens[$i].ToLowerInvariant()
-  switch ($tok) {
-    { $_ -in @('d', 'detect', '-d', '--detect') } { $normOp = 'd'; $opIndex = $i; break }
-    { $_ -in @('hm', 'heatmap', '-hm', '--hm', '-heatmap', '--heatmap') } { $normOp = 'hm'; $opIndex = $i; break }
-    { $_ -in @('gj', 'geojson', '-gj', '--gj', '-geojson', '--geojson') } { $normOp = 'gj'; $opIndex = $i; break }
-    { $_ -in @('classify', 'clf') } { $normOp = 'classify'; $opIndex = $i; break }
-    { $_ -in @('pose', 'pse') } { $normOp = 'pose'; $opIndex = $i; break }
-    { $_ -in @('obb', 'object') } { $normOp = 'obb'; $opIndex = $i; break }
-  }
-}
-if ($opIndex -gt 0) {
-  $new = New-Object System.Collections.Generic.List[string]
-  $new.Add($normOp) | Out-Null
-  for ($j = 0; $j -lt $tokens.Count; $j++) { if ($j -ne $opIndex) { $new.Add($tokens[$j]) | Out-Null } }
-  $tokens = $new
-}
+$opCount = 0
+# Operation reordering disabled to preserve multi-task argument order
 
 # Infer project from CWD
 $cwd = (Get-Location).Path

@@ -401,6 +401,10 @@ class _YOLOHeatmap(TaskAdapter):
     color each instance distinctly (and label it), matching offline heatmap behavior.
     """
 
+    _MAX_INSTANCES: int = 12
+    _MIN_AREA_PX: int = 96
+    _MIN_AREA_FRAC: float = 5e-4
+
     def __init__(self, model: ResilientYOLOProtocol, *, conf: float = 0.25) -> None:
         self.model = model
         self.conf = float(conf)
@@ -436,6 +440,7 @@ class _YOLOHeatmap(TaskAdapter):
             res_obj = cast(object, res_any)
 
         H, W = int(frame_bgr.shape[0]), int(frame_bgr.shape[1])
+        total_px = max(1, H * W)
 
         masks_any: Any = getattr(res_obj, "masks", None)
         if masks_any is None:
@@ -445,35 +450,64 @@ class _YOLOHeatmap(TaskAdapter):
         if data_any is None:
             return []
 
+        boxes_obj: Any = getattr(res_obj, "boxes", None)
+        if boxes_obj is None:
+            return []
+        try:
+            num_boxes = int(len(boxes_obj))
+        except Exception:
+            num_boxes = 0
+        if num_boxes <= 0:
+            return []
+
         m_np: Any = _to_numpy(data_any, dtype=f32)  # (N,h,w) float in [0,1] typically
         if getattr(m_np, "ndim", 0) == 2:
             m_np = m_np[0:1, ...]  # (1, h, w)
 
         # Optional: confidences + classes (aligned with masks)
-        boxes_obj: Any = getattr(res_obj, "boxes", None)
         confs_seq: Optional[Sequence[float]] = None
         clses_seq: Optional[Sequence[int]] = None
-        if boxes_obj is not None:
-            try:
-                confs_seq = cast(Sequence[float], _to_numpy(getattr(boxes_obj, "conf", None), dtype=f32).reshape(-1).tolist())
-            except Exception:
-                confs_seq = None
-            try:
-                clses_seq = cast(Sequence[int], _to_numpy(getattr(boxes_obj, "cls", None), dtype=i64).reshape(-1).astype(int).tolist())
-            except Exception:
-                clses_seq = None
+        try:
+            confs_seq = cast(
+                Sequence[float],
+                _to_numpy(getattr(boxes_obj, "conf", None), dtype=f32).reshape(-1).tolist(),
+            )
+        except Exception:
+            confs_seq = None
+        try:
+            clses_seq = cast(
+                Sequence[int],
+                _to_numpy(getattr(boxes_obj, "cls", None), dtype=i64).reshape(-1).astype(int).tolist(),
+            )
+        except Exception:
+            clses_seq = None
 
         out: List[Tuple[NDArrayU8, float, Optional[int]]] = []
-        num = int(getattr(m_np, "shape", (0,))[0] or 0)
-        for i in range(num):
+        num_masks = int(getattr(m_np, "shape", (0,))[0] or 0)
+        count = min(num_masks, num_boxes)
+        if count <= 0:
+            return []
+        max_keep = self._MAX_INSTANCES
+        for i in range(count):
+            conf_v = float(confs_seq[i]) if confs_seq is not None and i < len(confs_seq) else 0.0
+            if conf_v < self.conf:
+                continue
             m = m_np[i]
-            m_bin: NDArrayU8 = (m >= 0.5).astype(u8)
+            m_bin: NDArrayU8 = (m >= 0.5).astype(u8, copy=False)
             if tuple(m_bin.shape) != (H, W):
                 m_bin = self._resize_nn(m_bin, (H, W))
-            conf_v = float(confs_seq[i]) if confs_seq is not None and i < len(confs_seq) else 1.0
+            area = float(m_bin.sum())
+            if area < self._MIN_AREA_PX or (area / total_px) < self._MIN_AREA_FRAC:
+                continue
             cls_v: Optional[int] = int(clses_seq[i]) if clses_seq is not None and i < len(clses_seq) else None
             out.append((m_bin, conf_v, cls_v))
-        return out
+            if len(out) >= max_keep:
+                break
+
+        if not out:
+            return []
+        out.sort(key=lambda item: item[1], reverse=True)
+        return out[:max_keep]
 
     def render(self, frame_bgr: NDArrayU8, result: List[Tuple[NDArrayU8, float, Optional[int]]]) -> NDArrayU8:
         # Per-instance compositing with distinct colors + optional labels

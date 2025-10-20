@@ -14,7 +14,7 @@ import logging
 import os
 import sys
 import time
-from typing import Any, Iterator, Optional, Protocol, Tuple, Union, cast
+from typing import Any, Iterator, Optional, Protocol, Tuple, Union, cast, Sequence
 
 # Lightweight progress status for open/init phases
 try:
@@ -259,6 +259,8 @@ class _CVCamera(FrameSource):
         self._convert_rgb_forced = False
         self._convert_rgb_enabled = False
         self._backend: Optional[int] = None
+        self._initial_decode_mode: Optional[str] = None
+        self._flat_frame_streak = 0
         # Allow "0", "-1" strings, or file/rtsp paths
         if isinstance(source, str):
             try:
@@ -401,6 +403,7 @@ class _CVCamera(FrameSource):
                     decode_mode = "gray"
 
             self._decode_mode = decode_mode
+            self._initial_decode_mode = decode_mode
             if TRACE_CAMERA:
                 _log(
                     "live.camera.open.decode",
@@ -502,6 +505,28 @@ class _CVCamera(FrameSource):
             current_mode = getattr(self, "_decode_mode", None)
             arr = np.asarray(frame)
             channels = arr.shape[2] if arr.ndim == 3 else 1
+            if frame_counter <= 5 or TRACE_CAMERA:
+                try:
+                    raw_min = float(arr.min())
+                    raw_max = float(arr.max())
+                    raw_mean = float(arr.mean())
+                    raw_std = float(arr.std())
+                except Exception:
+                    raw_min = raw_max = raw_mean = raw_std = None
+                _log(
+                    "live.camera.frame.raw.stats",
+                    source=getattr(self, "_source", "unknown"),
+                    idx=frame_counter,
+                    shape=str(arr.shape),
+                    dtype=str(arr.dtype),
+                    min=raw_min,
+                    max=raw_max,
+                    mean=raw_mean,
+                    std=raw_std,
+                    mode=current_mode,
+                    convert_rgb=self._convert_rgb_enabled,
+                    channels=channels,
+                )
             if current_mode in {"yuy", "nv12", "nv21"} and channels >= 3:
                 if TRACE_CAMERA:
                     _log(
@@ -567,6 +592,7 @@ class _CVCamera(FrameSource):
                         dtype=str(frame_bgr.dtype),
                         decode=getattr(self, "_decode_mode", None),
                         warmups=warmups,
+                        convert_rgb=self._convert_rgb_enabled,
                     )
                 elif now >= next_report:
                     elapsed = now - start_time
@@ -580,13 +606,22 @@ class _CVCamera(FrameSource):
                         warmups=warmups,
                     )
                     next_report = now + 10.0
-            if frame_counter <= 5:
+            try:
+                frame_min = float(frame_bgr.min())
+                frame_max = float(frame_bgr.max())
+                frame_mean = float(frame_bgr.mean())
+                frame_std = float(frame_bgr.std())
+            except Exception:
+                frame_min = frame_max = frame_mean = frame_std = None
+
+            if frame_counter <= 5 or TRACE_CAMERA:
+                channels_out: Optional[int] = None
                 try:
-                    frame_min = float(frame_bgr.min())
-                    frame_max = float(frame_bgr.max())
-                    frame_mean = float(frame_bgr.mean())
+                    shape_seq = cast(Sequence[int], getattr(frame_bgr, "shape", ()))
+                    if len(shape_seq) >= 3:
+                        channels_out = int(shape_seq[2])
                 except Exception:
-                    frame_min = frame_max = frame_mean = None
+                    channels_out = None
                 _log(
                     "live.camera.frame.stats",
                     source=getattr(self, "_source", "unknown"),
@@ -594,8 +629,64 @@ class _CVCamera(FrameSource):
                     min=frame_min,
                     max=frame_max,
                     mean=frame_mean,
+                    std=frame_std,
                     decode=getattr(self, "_decode_mode", None),
+                    convert_rgb=self._convert_rgb_enabled,
+                    channels=channels_out,
                 )
+
+            if frame_std is not None and frame_std < 5.0:
+                self._flat_frame_streak += 1
+            else:
+                self._flat_frame_streak = 0
+
+            if self._flat_frame_streak >= 3 and self._convert_rgb_prop is not None:
+                streak_reason = "low-variance"
+                if not self._convert_rgb_enabled:
+                    try:
+                        self.cap.set(self._convert_rgb_prop, 1.0)
+                        self._convert_rgb_enabled = True
+                        self._convert_rgb_forced = False
+                        setattr(self, "_decode_mode", None)
+                        _log(
+                            "live.camera.decode.convert_rgb.auto_enable",
+                            source=getattr(self, "_source", "unknown"),
+                            idx=frame_counter,
+                            reason=streak_reason,
+                        )
+                        self._flat_frame_streak = 0
+                        continue
+                    except Exception as conv_exc:
+                        _log(
+                            "live.camera.decode.convert_rgb.auto_enable.error",
+                            source=getattr(self, "_source", "unknown"),
+                            idx=frame_counter,
+                            reason=streak_reason,
+                            error=type(conv_exc).__name__,
+                        )
+                        self._flat_frame_streak = 0
+                else:
+                    # Try toggling back to the original raw mode if available.
+                    if self._initial_decode_mode:
+                        try:
+                            self.cap.set(self._convert_rgb_prop, 0.0)
+                        except Exception:
+                            pass
+                        self._convert_rgb_enabled = False
+                        self._convert_rgb_forced = True
+                        setattr(self, "_decode_mode", self._initial_decode_mode)
+                        _log(
+                            "live.camera.decode.convert_rgb.auto_disable",
+                            source=getattr(self, "_source", "unknown"),
+                            idx=frame_counter,
+                            reason=streak_reason,
+                            mode=self._initial_decode_mode,
+                        )
+                        self._flat_frame_streak = 0
+                        continue
+                # Avoid rapid toggling if property unsupported.
+                self._flat_frame_streak = 0
+
             yield frame_bgr, time.time()
 
     def release(self) -> None:
