@@ -66,6 +66,8 @@ class LivePipeline:
     conf: float = 0.25
     iou: float = 0.45
     duration: Optional[float] = None  # seconds; None = until user closes
+    override: Optional[Path] = None
+    display_name: Optional[str] = None
 
     def __post_init__(self) -> None:
         self._hud_notice: Optional[str] = None
@@ -191,26 +193,26 @@ class LivePipeline:
                 small=self.prefer_small,
                 conf=self.conf,
                 iou=self.iou,
-                override=live_tasks.LIVE_DETECT_OVERRIDE,
+                override=self.override if self.override is not None else live_tasks.LIVE_DETECT_OVERRIDE,
                 hud_callback=self._register_toast,
             )
         if t in ("hm", "heatmap"):
             return live_tasks.build_heatmap(
                 small=self.prefer_small,
-                override=live_tasks.LIVE_HEATMAP_OVERRIDE,
+                override=self.override if self.override is not None else live_tasks.LIVE_HEATMAP_OVERRIDE,
                 hud_callback=self._register_toast,
             )
         if t in ("clf", "classify"):
             return live_tasks.build_classify(
                 small=self.prefer_small,
-                override=live_tasks.LIVE_CLASSIFY_OVERRIDE,
+                override=self.override if self.override is not None else live_tasks.LIVE_CLASSIFY_OVERRIDE,
                 hud_callback=self._register_toast,
             )
         if t in ("pose", "pse"):
             return live_tasks.build_pose(
                 small=self.prefer_small,
                 conf=self.conf,
-                override=live_tasks.LIVE_POSE_OVERRIDE,
+                override=self.override if self.override is not None else live_tasks.LIVE_POSE_OVERRIDE,
                 hud_callback=self._register_toast,
             )
         if t in ("obb", "object"):
@@ -218,7 +220,7 @@ class LivePipeline:
                 small=self.prefer_small,
                 conf=self.conf,
                 iou=self.iou,
-                override=live_tasks.LIVE_OBB_OVERRIDE,
+                override=self.override if self.override is not None else live_tasks.LIVE_OBB_OVERRIDE,
                 hud_callback=self._register_toast,
             )
         raise ValueError(f"Unknown live task: {self.task}")
@@ -264,7 +266,8 @@ class LivePipeline:
             src: FrameSource = self._build_source()
             sp.update(job="open-src", current=str(self.source))
 
-            display: Optional[DisplaySink] = None if self.headless else DisplaySink("ARGOS Live", headless=False)
+            window_title = self.display_name or f"ARGOS Live ({self.task}:{self.source})"
+            display: Optional[DisplaySink] = None if self.headless else DisplaySink(window_title, headless=False)
             saved_path = self.out_path or (self._default_out_path() if self.autosave and self.out_path is None else None)
             sinks: Optional[MultiSink] = None
 
@@ -421,4 +424,3 @@ class LivePipeline:
 
         _log("live.pipeline.end", saved_path=saved_path)
         return saved_path
-

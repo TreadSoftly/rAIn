@@ -30,6 +30,10 @@ if (-not $env:ARGOS_ONNX_IMGSZ) { $env:ARGOS_ONNX_IMGSZ = '640' }
 $env:PIP_PROGRESS_BAR = 'off'
 $env:PIP_NO_COLOR = '1'
 
+# Avoid user-level hooks that force interactive sessions.
+Remove-Item Env:PYTHONINSPECT -ErrorAction SilentlyContinue
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue
+
 # Create a minimal, ephemeral pip config that enforces single-line friendliness
 try {
   $pipCfg = Join-Path $env:TEMP 'pip-singleline.ini'
@@ -250,7 +254,10 @@ function Find-Python {
     $mode = if ($candidate.PSObject.Properties['Mode']) { $candidate.Mode } else { 'direct' }
     if (Test-PythonCandidate -Exe $exe -CandidateArgs $candidate.Arguments -Mode $mode) {
       $script:pyExe = $exe
-      $script:pyArgs = $candidate.Arguments
+      $argsCopy = @()
+      if ($candidate.Arguments) { $argsCopy = @($candidate.Arguments) }
+      if ($argsCopy -notcontains '-I') { $argsCopy += '-I' }
+      $script:pyArgs = $argsCopy
       $script:pyMode = $mode
       return $true
     }

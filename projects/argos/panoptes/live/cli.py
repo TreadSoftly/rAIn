@@ -1,13 +1,19 @@
 # panoptes.live.cli — dedicated live/webcam entrypoint ("lv" / "live" / "livevideo")
 from __future__ import annotations
 
+import contextlib
 import logging
+import multiprocessing as mp
 import os
+import queue
 import re
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, List, Optional, Tuple, Union
+from typing import Final, List, Optional, Tuple, Union, Literal, cast
+
+from multiprocessing.queues import Queue as MPQueue
 
 try:
     from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv # type: ignore[import]
@@ -45,16 +51,8 @@ os.environ.setdefault("PANOPTES_LIVE", "1")
 os.environ.setdefault("PANOPTES_PROGRESS_TAIL", "none")          # hide [DONE] [PERCENT] tail
 os.environ.setdefault("PANOPTES_PROGRESS_FINAL_NEWLINE", "0")    # keep line anchored
 os.environ.setdefault("PANOPTES_NESTED_PROGRESS", "0")           # avoid nested spinners under live
-
-# Progress helpers for short-lived CLI phases (non-nested, single line)
-try:
-    from panoptes.progress import running_task as _progress_running_task  # type: ignore[import]
-except Exception:  # pragma: no cover
-    def _progress_running_task(*_a: object, **_k: object):
-        class _N:
-            def __enter__(self): return self
-            def __exit__(self, *_: object) -> bool: return False
-        return _N()
+os.environ.setdefault("OPENCV_VIDEOIO_ENABLE_OBSENSOR", "0")     # silence obsensor backend noise
+TRACE_DISCOVERY = os.getenv("PANOPTES_LIVE_TRACE_DISCOVERY", "").strip().lower() in {"1", "true", "yes"}
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 
@@ -191,6 +189,24 @@ def _model_hint_to_path(hint: _ModelHint, task: str) -> Optional[Path]:
     return _model_registry.MODEL_DIR / f"{stem}{candidates[0]}"
 
 
+@dataclass
+class _LiveSpec:
+    task: str
+    hint: Optional[_ModelHint]
+    source: Optional[str]
+
+
+@dataclass
+class _ResolvedSpec:
+    task: str
+    source: Union[int, str]
+    override: Optional[Path]
+    prefer_small: bool
+
+
+ResultMessage = tuple[Literal["ok", "err"], int, str]
+
+
 def _clear_live_overrides() -> None:
     live_tasks.LIVE_DETECT_OVERRIDE = None
     live_tasks.LIVE_HEATMAP_OVERRIDE = None
@@ -200,24 +216,251 @@ def _clear_live_overrides() -> None:
     live_tasks.LIVE_OBB_OVERRIDE = None
 
 
-def _apply_live_override(task: str, path: Path) -> bool:
-    if task == "detect":
-        live_tasks.LIVE_DETECT_OVERRIDE = path
-        return True
-    if task == "heatmap":
-        live_tasks.LIVE_HEATMAP_OVERRIDE = path
-        return True
-    if task == "classify":
-        live_tasks.LIVE_CLASSIFY_OVERRIDE = path
-        return True
-    if task == "pose":
-        live_tasks.LIVE_POSE_OVERRIDE = path
-        live_tasks.LIVE_PSE_OVERRIDE = path
-        return True
-    if task == "obb":
-        live_tasks.LIVE_OBB_OVERRIDE = path
-        return True
-    return False
+def _extract_all_flag(tokens: List[str]) -> tuple[List[str], bool]:
+    remaining: List[str] = []
+    use_all = False
+    for tok in tokens:
+        if tok.lower() == "all":
+            use_all = True
+        else:
+            remaining.append(tok)
+    return remaining, use_all
+
+
+def _parse_specs(tokens: List[str]) -> List[_LiveSpec]:
+    specs: List[_LiveSpec] = []
+    current_task: Optional[str] = None
+    current_hint: Optional[_ModelHint] = None
+
+    for tok in tokens:
+        low = tok.lower().strip()
+        if low in _TASK_CHOICES:
+            if current_task is not None:
+                specs.append(_LiveSpec(task=current_task, hint=current_hint, source=None))
+            current_task = _TASK_CHOICES[low]
+            current_hint = None
+            continue
+
+        hint = _parse_model_token(tok)
+        if hint is not None:
+            current_hint = hint
+            continue
+
+        if current_task is None:
+            raise typer.BadParameter(f"Unexpected token {tok!r}; specify a task before the camera/source.")
+
+        specs.append(_LiveSpec(task=current_task, hint=current_hint, source=tok))
+        current_task = None
+        current_hint = None
+
+    if current_task is not None:
+        specs.append(_LiveSpec(task=current_task, hint=current_hint, source=None))
+
+    return specs
+
+
+def _normalise_source_token(token: str) -> Union[int, str]:
+    stripped = token.strip()
+    low = stripped.lower()
+    if low.startswith("synthetic"):
+        return stripped
+    if stripped.lstrip("+-").isdigit():
+        idx = int(stripped)
+        if idx <= 0:
+            return 0
+        return idx - 1
+    return stripped
+
+
+def _discover_cameras(max_index: int = 16) -> list[int]:
+    from .camera import open_camera  # defer heavy import
+
+    cv2_utils = None
+    prev_log_level: Optional[int] = None
+    try:
+        import cv2  # type: ignore
+
+        cv2_utils = getattr(cv2, "utils", None)
+        cv2_logging = getattr(cv2_utils, "logging", None) if cv2_utils else None
+        if cv2_logging is not None and hasattr(cv2_logging, "getLogLevel"):
+            prev_log_level = cv2_logging.getLogLevel()
+            target_level = (
+                getattr(cv2_logging, "LOG_LEVEL_ERROR", None)
+                or getattr(cv2_logging, "LOG_LEVEL_FATAL", None)
+            )
+            if target_level is not None:
+                cv2_logging.setLogLevel(target_level)
+    except Exception:
+        cv2_utils = None
+        prev_log_level = None
+
+    indexes: list[int] = []
+    last_found = -1
+    gap_limit = 4
+    devnull = None
+    try:
+        devnull = open(os.devnull, "w")
+        with contextlib.redirect_stderr(devnull), contextlib.redirect_stdout(devnull):
+            for idx in range(max_index):
+                if last_found >= 0 and (idx - last_found) > gap_limit:
+                    break
+                if TRACE_DISCOVERY:
+                    _log_event(
+                        "live.cli.discover.probe",
+                        index=str(idx),
+                        last_found=str(last_found) if last_found >= 0 else None,
+                    )
+                try:
+                    src = open_camera(idx)
+                except Exception as exc:
+                    if TRACE_DISCOVERY:
+                        _log_event(
+                            "live.cli.discover.fail",
+                            index=str(idx),
+                            error=type(exc).__name__,
+                            message=str(exc),
+                        )
+                    if last_found >= 0 and (idx - last_found) >= gap_limit:
+                        if TRACE_DISCOVERY:
+                            _log_event(
+                                "live.cli.discover.stop",
+                                index=str(idx),
+                                reason="gap-limit",
+                                gap=str(idx - last_found),
+                            )
+                        break
+                    continue
+                if TRACE_DISCOVERY:
+                    _log_event("live.cli.discover.ok", index=str(idx))
+                indexes.append(idx)
+                last_found = idx
+                try:
+                    src.release()
+                except Exception:
+                    pass
+        if TRACE_DISCOVERY:
+            _log_event(
+                "live.cli.discover.complete",
+                found=",".join(str(i) for i in indexes) if indexes else "none",
+            )
+        return indexes
+    finally:
+        if prev_log_level is not None and cv2_utils is not None:
+            try:
+                cv2_utils.logging.setLogLevel(prev_log_level)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        if devnull is not None:
+            try:
+                devnull.close()
+            except Exception:
+                pass
+
+
+def _build_resolved_spec(spec: _LiveSpec, source: Union[int, str], prefer_small_default: bool) -> _ResolvedSpec:
+    prefer_small = prefer_small_default
+    override: Optional[Path] = None
+    if spec.hint is not None:
+        path = _model_hint_to_path(spec.hint, spec.task)
+        if path is None:
+            raise typer.BadParameter(f"Model token {spec.hint.source!r} is not valid for task '{spec.task}'.")
+        if not path.exists():
+            raise typer.BadParameter(f"Model weight {path} (from token {spec.hint.source!r}) not found.")
+        override = path
+        prefer_small = False
+    return _ResolvedSpec(task=spec.task, source=source, override=override, prefer_small=prefer_small)
+
+
+def _resolve_specs(specs: List[_LiveSpec], use_all: bool, prefer_small_default: bool) -> List[_ResolvedSpec]:
+    if not specs:
+        return []
+
+    if use_all:
+        if len(specs) != 1:
+            raise typer.BadParameter("When using 'all', specify exactly one task/model.")
+        cameras = _discover_cameras()
+        if not cameras:
+            raise typer.BadParameter("No cameras detected.")
+        _log_event("live.cli.cameras", cameras=",".join(_format_source_label(c) for c in cameras))
+        base = specs[0]
+        return [_build_resolved_spec(base, cam, prefer_small_default) for cam in cameras]
+
+    resolved_pairs: List[tuple[int, _ResolvedSpec]] = []
+    pending_defaults: List[tuple[int, _LiveSpec]] = []
+    used_int_sources: set[int] = set()
+
+    for idx, spec in enumerate(specs):
+        if spec.source is None:
+            pending_defaults.append((idx, spec))
+            continue
+        src = _normalise_source_token(spec.source)
+        res = _build_resolved_spec(spec, src, prefer_small_default)
+        resolved_pairs.append((idx, res))
+        if isinstance(src, int):
+            used_int_sources.add(src)
+
+    if pending_defaults:
+        cameras = _discover_cameras()
+        if not cameras:
+            raise typer.BadParameter("No cameras detected.")
+        _log_event("live.cli.cameras", cameras=",".join(_format_source_label(c) for c in cameras))
+        available = (cam for cam in cameras if cam not in used_int_sources)
+        for idx, spec in pending_defaults:
+            try:
+                src = next(available)
+            except StopIteration:
+                raise typer.BadParameter("Not enough cameras detected to satisfy the request.") from None
+            res = _build_resolved_spec(spec, src, prefer_small_default)
+            resolved_pairs.append((idx, res))
+            used_int_sources.add(src)
+
+    resolved_pairs.sort(key=lambda item: item[0])
+    return [res for _, res in resolved_pairs]
+
+
+def _format_source_label(source: Union[int, str]) -> str:
+    if isinstance(source, int):
+        return str(source + 1)
+    return str(source)
+
+
+def _run_pipeline_worker(
+    idx: int,
+    task: str,
+    source: Union[int, str],
+    override_path: Optional[str],
+    prefer_small: bool,
+    fps: Optional[int],
+    size: Optional[Tuple[int, int]],
+    headless: bool,
+    conf: float,
+    iou: float,
+    duration: Optional[float],
+    save_path: Optional[str],
+    display_name: str,
+    result_queue: MPQueue[ResultMessage],
+) -> None:
+    try:
+        override = Path(override_path) if override_path else None
+        pipeline = LivePipeline(
+            source=source,
+            task=task,
+            autosave=bool(save_path),
+            out_path=save_path,
+            prefer_small=prefer_small,
+            fps=fps,
+            size=size,
+            headless=headless,
+            conf=conf,
+            iou=iou,
+            duration=duration,
+            override=override,
+            display_name=display_name,
+        )
+        output = pipeline.run()
+        result_queue.put(("ok", idx, output or ""))
+    except Exception:
+        result_queue.put(("err", idx, traceback.format_exc()))
 
 
 @app.command()
@@ -261,74 +504,26 @@ def run(
                         save = val
                         break
 
-    # Flexible positional parsing:
-    task_tok: Optional[str] = None
-    source_tok: Optional[str] = None
-    model_hint: Optional[_ModelHint] = None
-
+    cleaned_tokens: List[str] = []
     for tok in (tokens or []):
-        low = tok.lower().strip()
-
-        # Some wrappers prepend "run"; treat it as noise.
+        trimmed = tok.strip()
+        if not trimmed:
+            continue
+        low = trimmed.lower()
         if low == "run":
             continue
-
-        # Ignore any live-intent markers completely (never treat as source).
         if low in _LIVE_MARKERS:
             continue
+        cleaned_tokens.append(trimmed)
 
-        parsed_hint = _parse_model_token(tok)
-        if parsed_hint is not None:
-            model_hint = parsed_hint
-            continue
+    cleaned_tokens, use_all = _extract_all_flag(cleaned_tokens)
+    specs = _parse_specs(cleaned_tokens)
+    if not specs:
+        specs = [_LiveSpec(task="detect", hint=None, source=None)]
 
-        # First recognized task token wins, the next token becomes the source
-        if task_tok is None and low in _TASK_CHOICES:
-            task_tok = low
-            continue
-
-        # First non-task, non-live marker token becomes the source
-        if source_tok is None:
-            source_tok = tok
-            continue
-
-        # Anything beyond "<task> <source>" is unexpected
-        raise typer.BadParameter(f"Got unexpected extra argument ({tok!r})")
-
-    # Defaults
-    task_tok = task_tok or "detect"
-    t = _TASK_CHOICES[task_tok]  # canonical task for LivePipeline
-
-    if model_hint is not None:
-        hint_path = _model_hint_to_path(model_hint, t)
-        if hint_path is None:
-            raise typer.BadParameter(
-                f"model token {model_hint.source!r} is not valid for live task '{t}'."
-            )
-        if not hint_path.exists():
-            raise typer.BadParameter(
-                f"model weight {hint_path} (from token {model_hint.source!r}) not found."
-            )
-        if not _apply_live_override(t, hint_path):
-            raise typer.BadParameter(
-                f"live task '{t}' does not support model overrides."
-            )
-        _log_event("live.override", task=t, weight=str(hint_path), token=model_hint.source)
-        small = False
-
-    # Normalize source: allow "synthetic", signed integers, or paths
-    s: str = (source_tok or "0").strip()
-    if s.lower().startswith("synthetic"):
-        src: Union[int, str] = "synthetic"
-    elif s.lstrip("+-").isdigit():
-        # camera index (e.g., "0", "1", "-1")
-        src = int(s)
-    else:
-        # treat as filesystem path
-        src = s
-
-    with bind_context(live_task=t, source=str(src)):
-        _log_event("live.cli.selection", task=t, source=str(src), small=small, save=save, headless=headless)
+    resolved_specs = _resolve_specs(specs, use_all, small)
+    if not resolved_specs:
+        raise typer.BadParameter("No live tasks were specified.")
 
     size: Optional[Tuple[int, int]] = (width, height) if (width and height) else None
 
@@ -353,38 +548,84 @@ def run(
     }
     _log_event("live.capabilities", **capabilities) # type: ignore[arg-type]
 
-    # Short, non-nested progress note during pipeline construction (auto-disabled in live by progress_ux)
-    pipe: Optional[LivePipeline] = None
-    with _progress_running_task("LIVE", f"{t} on {src}") as _:
-        pipe = LivePipeline(
-            source=src,
-            task=t,
-            autosave=bool(save),
-            out_path=save,
-            prefer_small=small,
-            fps=fps,
-            size=size,
-            headless=headless,
-            conf=conf,
-            iou=iou,
-            duration=duration,
-        )
-    assert pipe is not None
+    result_queue: MPQueue[ResultMessage] = cast(MPQueue[ResultMessage], mp.Queue())
+    processes: list[mp.Process] = []
+    try:
+        for idx, spec in enumerate(resolved_specs):
+            src_label = _format_source_label(spec.source)
+            with bind_context(live_task=spec.task, source=src_label):
+                _log_event("live.cli.selection", task=spec.task, source=src_label, small=spec.prefer_small, save=save, headless=headless)
+            proc = mp.Process(
+                target=_run_pipeline_worker,
+                args=(
+                    idx,
+                    spec.task,
+                    spec.source,
+                    str(spec.override) if spec.override is not None else None,
+                    spec.prefer_small,
+                    fps,
+                    size,
+                    headless,
+                    conf,
+                    iou,
+                    duration,
+                    save,
+                    f"ARGOS Live ({spec.task}:{src_label})",
+                    result_queue,
+                ),
+            )
+            proc.start()
+            processes.append(proc)
 
-    out = pipe.run()
-    _log_event("live.cli.completed", task=t, source=str(src), output=out)
-    if out:
-        print(out)
+        outputs: list[tuple[int, str]] = []
+        errors: list[tuple[int, str]] = []
+        remaining = len(processes)
+        while remaining > 0:
+            try:
+                kind, proc_idx, payload = result_queue.get(timeout=0.5)
+            except queue.Empty:
+                crashed = [p for p in processes if p.exitcode not in (None, 0)]
+                if crashed:
+                    break
+                continue
+            if kind == "ok":
+                if payload:
+                    outputs.append((proc_idx, payload))
+            else:
+                errors.append((proc_idx, payload))
+            remaining -= 1
 
-    bundle_path = None
-    if support_bundle:
+        for proc in processes:
+            proc.join()
+
+        for proc in processes:
+            if proc.exitcode not in (0, None):
+                errors.append((processes.index(proc), f"Process exited with code {proc.exitcode}"))
+
+        if errors:
+            detail = errors[0][1]
+            raise RuntimeError(f"live pipeline failed: {detail}")
+
+        for _, out in sorted(outputs):
+            print(out)
+
+        if support_bundle and outputs:
+            try:
+                bundle_path = write_support_bundle(extra_paths=[out for _, out in sorted(outputs)])
+                if bundle_path:
+                    typer.echo(f"Support bundle written: {bundle_path}")
+            except Exception as exc:
+                typer.secho(f"[bold red] failed to create support bundle: {exc}", err=True)
+
+    except KeyboardInterrupt:
+        for proc in processes:
+            proc.terminate()
+        raise
+    finally:
         try:
-            extras = [out] if out else None
-            bundle_path = write_support_bundle(extra_paths=extras)
-        except Exception as exc:
-            typer.secho(f"[bold red] failed to create support bundle: {exc}", err=True)
-    if bundle_path:
-        typer.echo(f"Support bundle written: {bundle_path}")
+            result_queue.close()
+        except Exception:
+            pass
 
 
 def _prepend_argv(token: str) -> None:
