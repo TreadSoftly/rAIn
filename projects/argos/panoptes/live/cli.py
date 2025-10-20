@@ -469,6 +469,7 @@ def _run_pipeline_worker(
     duration: Optional[float],
     save_path: Optional[str],
     display_name: str,
+    preprocess_device: str,
     result_queue: MPQueue[ResultMessage],
 ) -> None:
     try:
@@ -487,6 +488,7 @@ def _run_pipeline_worker(
             duration=duration,
             override=override,
             display_name=display_name,
+            preprocess_device=preprocess_device,
         )
         output = pipeline.run()
         result_queue.put(("ok", idx, output or ""))
@@ -515,12 +517,24 @@ def run(
     iou: float = typer.Option(0.45, "--iou", help="Detector IOU (detect/obb where applicable)."),
     small: bool = typer.Option(True, "--small/--no-small", help="Prefer small models for live."),
     support_bundle: bool = typer.Option(False, "--support-bundle", help="Write a support bundle zip after the session"),
+    preprocess_device: str = typer.Option(
+        "auto",
+        "--preprocess-device",
+        metavar="[cpu|gpu|auto]",
+        help="Choose where preprocessing runs ('cpu', 'gpu', or 'auto').",
+    ),
 ) -> None:
     """Launch the live webcam/video pipeline."""
 
     _log_event("live.cli.start", tokens=",".join(tokens) if tokens else None, duration=duration, headless=headless, save=save)
 
     _clear_live_overrides()
+
+    preprocess_device_norm = (preprocess_device or "auto").strip().lower()
+    if preprocess_device_norm not in {"auto", "cpu", "gpu"}:
+        raise typer.BadParameter("--preprocess-device must be one of cpu/gpu/auto")
+
+    _log_event("live.cli.preprocess_device", device=preprocess_device_norm)
 
     # Some environments + Click variadic args can mis-route option values.
     # If Typer didn't bind --save/-o, fall back to parsing sys.argv directly.
@@ -603,6 +617,7 @@ def run(
                     duration,
                     save,
                     f"ARGOS Live ({spec.task}:{src_label})",
+                    preprocess_device_norm,
                     result_queue,
                 ),
             )

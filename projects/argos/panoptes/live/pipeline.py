@@ -91,10 +91,12 @@ class LivePipeline:
     duration: Optional[float] = None  # seconds; None = until user closes
     override: Optional[Path] = None
     display_name: Optional[str] = None
+    preprocess_device: str = "auto"
 
     def __post_init__(self) -> None:
         self._hud_notice: Optional[str] = None
         self._hud_notice_until: float = 0.0
+        self.preprocess_device = (self.preprocess_device or "auto").strip().lower()
 
     def _build_source(self) -> FrameSource:
         if isinstance(self.source, str) and self.source.lower().startswith("synthetic"):
@@ -211,24 +213,31 @@ class LivePipeline:
 
     def _build_task(self):
         t = self.task.lower()
+        preprocess_device = self._resolve_preprocess_device()
         if t in ("d", "detect"):
             return live_tasks.build_detect(
                 small=self.prefer_small,
                 conf=self.conf,
                 iou=self.iou,
                 override=self.override if self.override is not None else live_tasks.LIVE_DETECT_OVERRIDE,
+                input_size=self.size,
+                preprocess_device=preprocess_device,
                 hud_callback=self._register_toast,
             )
         if t in ("hm", "heatmap"):
             return live_tasks.build_heatmap(
                 small=self.prefer_small,
                 override=self.override if self.override is not None else live_tasks.LIVE_HEATMAP_OVERRIDE,
+                input_size=self.size,
+                preprocess_device=preprocess_device,
                 hud_callback=self._register_toast,
             )
         if t in ("clf", "classify"):
             return live_tasks.build_classify(
                 small=self.prefer_small,
                 override=self.override if self.override is not None else live_tasks.LIVE_CLASSIFY_OVERRIDE,
+                input_size=self.size,
+                preprocess_device=preprocess_device,
                 hud_callback=self._register_toast,
             )
         if t in ("pose", "pse"):
@@ -236,6 +245,8 @@ class LivePipeline:
                 small=self.prefer_small,
                 conf=self.conf,
                 override=self.override if self.override is not None else live_tasks.LIVE_POSE_OVERRIDE,
+                input_size=self.size,
+                preprocess_device=preprocess_device,
                 hud_callback=self._register_toast,
             )
         if t in ("obb", "object"):
@@ -244,9 +255,41 @@ class LivePipeline:
                 conf=self.conf,
                 iou=self.iou,
                 override=self.override if self.override is not None else live_tasks.LIVE_OBB_OVERRIDE,
+                input_size=self.size,
+                preprocess_device=preprocess_device,
                 hud_callback=self._register_toast,
             )
         raise ValueError(f"Unknown live task: {self.task}")
+
+    def _resolve_preprocess_device(self) -> str:
+        choice = (self.preprocess_device or "auto").strip().lower()
+        if choice not in {"auto", "cpu", "gpu"}:
+            choice = "auto"
+        if choice == "cpu":
+            return "cpu"
+        if choice == "gpu":
+            return "gpu" if self._cuda_available() else "cpu"
+        # auto
+        try:
+            hw = live_config.probe_hardware()
+        except Exception:
+            hw = None
+        if hw and getattr(hw, "gpu", None):
+            if self._cuda_available():
+                return "gpu"
+        return "cpu"
+
+    @staticmethod
+    def _cuda_available() -> bool:
+        try:
+            import cv2  # type: ignore
+
+            if not hasattr(cv2, "cuda"):
+                return False
+            count = cv2.cuda.getCudaEnabledDeviceCount()
+            return bool(count and count > 0)
+        except Exception:
+            return False
 
     def _default_out_path(self) -> str:
         ts = time.strftime("%Y%m%d-%H%M%S")

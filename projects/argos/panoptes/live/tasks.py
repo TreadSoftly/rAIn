@@ -94,6 +94,7 @@ except Exception:  # pragma: no cover
     u8 = cast(Any, "uint8")
 
 from ._types import NDArrayU8, Boxes, Names
+from .preprocess import attach_preprocessor
 
 try:
     from panoptes.runtime.resilient_yolo import ResilientYOLO as ResilientYOLORuntime  # type: ignore[import]
@@ -717,12 +718,21 @@ def build_pse(
     *,
     small: bool = True,
     override: Optional[Union[str, Path]] = LIVE_PSE_OVERRIDE,
+    input_size: Optional[Tuple[int, int]] = None,
+    preprocess_device: str = "cpu",
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     """
     PSE is an alias of POSE: same model family, same overlay.
     """
-    return build_pose(small=small, conf=0.25, override=override, hud_callback=hud_callback)
+    return build_pose(
+        small=small,
+        conf=0.25,
+        override=override,
+        input_size=input_size,
+        preprocess_device=preprocess_device,
+        hud_callback=hud_callback,
+    )
 
 
 # ---------------------------
@@ -869,6 +879,8 @@ def build_detect(
     conf: float = 0.25,
     iou: float = 0.45,
     override: Optional[Union[str, Path]] = LIVE_DETECT_OVERRIDE,
+    input_size: Optional[Tuple[int, int]] = None,
+    preprocess_device: str = "cpu",
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
@@ -890,6 +902,7 @@ def build_detect(
             with _progress_running_task("Load", f"detector:{label_hint}"):
                 with _silence_ultralytics():
                     wrapper.prepare()
+            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             sp.update(job="warmup", model=wrapper.descriptor())
             _warmup_wrapper(wrapper, task="detect", conf=conf, iou=iou)
             sp.update(count=1, job="ready", model=wrapper.descriptor())
@@ -903,6 +916,8 @@ def build_heatmap(
     *,
     small: bool = True,
     override: Optional[Union[str, Path]] = LIVE_HEATMAP_OVERRIDE,
+    input_size: Optional[Tuple[int, int]] = None,
+    preprocess_device: str = "cpu",
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
@@ -924,6 +939,7 @@ def build_heatmap(
             with _progress_running_task("Load", f"segmenter:{label_hint}"):
                 with _silence_ultralytics():
                     wrapper.prepare()
+            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             sp.update(job="warmup", model=wrapper.descriptor())
             _warmup_wrapper(wrapper, task="heatmap", conf=0.25)
             sp.update(count=1, job="ready", model=wrapper.descriptor())
@@ -938,6 +954,8 @@ def build_classify(
     small: bool = True,
     topk: int = 1,
     override: Optional[Union[str, Path]] = LIVE_CLASSIFY_OVERRIDE,
+    input_size: Optional[Tuple[int, int]] = None,
+    preprocess_device: str = "cpu",
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
@@ -959,6 +977,7 @@ def build_classify(
             with _progress_running_task("Load", f"classifier:{label_hint}"):
                 with _silence_ultralytics():
                     wrapper.prepare()
+            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             sp.update(job="warmup", model=wrapper.descriptor())
             _warmup_wrapper(wrapper, task="classify")
             sp.update(count=1, job="ready", model=wrapper.descriptor())
@@ -973,6 +992,8 @@ def build_pose(
     small: bool = True,
     conf: float = 0.25,
     override: Optional[Union[str, Path]] = LIVE_POSE_OVERRIDE,
+    input_size: Optional[Tuple[int, int]] = None,
+    preprocess_device: str = "cpu",
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
@@ -994,6 +1015,7 @@ def build_pose(
             with _progress_running_task("Load", f"pose:{label_hint}"):
                 with _silence_ultralytics():
                     wrapper.prepare()
+            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             sp.update(job="warmup", model=wrapper.descriptor())
             _warmup_wrapper(wrapper, task="pose", conf=conf)
             sp.update(count=1, job="ready", model=wrapper.descriptor())
@@ -1009,6 +1031,8 @@ def build_obb(
     conf: float = 0.25,
     iou: float = 0.45,
     override: Optional[Union[str, Path]] = LIVE_OBB_OVERRIDE,
+    input_size: Optional[Tuple[int, int]] = None,
+    preprocess_device: str = "cpu",
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
@@ -1030,6 +1054,7 @@ def build_obb(
             with _progress_running_task("Load", f"obb:{label_hint}"):
                 with _silence_ultralytics():
                     wrapper.prepare()
+            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             sp.update(job="warmup", model=wrapper.descriptor())
             _warmup_wrapper(wrapper, task="obb", conf=conf, iou=iou)
             sp.update(count=1, job="ready", model=wrapper.descriptor())
