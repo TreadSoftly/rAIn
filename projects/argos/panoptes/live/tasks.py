@@ -97,8 +97,26 @@ from ._types import NDArrayU8, Boxes, Names
 from .preprocess import attach_preprocessor
 
 try:
-    from panoptes.runtime.resilient_yolo import ResilientYOLO as ResilientYOLORuntime  # type: ignore[import]
+    from panoptes.runtime.resilient_yolo import (  # type: ignore[import]
+        ResilientYOLO as _ResilientYOLO,
+        configure_onnxruntime as _configure_onnxruntime,
+    )
 except Exception:  # pragma: no cover
+    _ResilientYOLO = None
+
+    def _configure_onnxruntime(
+        *,
+        threads: Optional[int] = None,
+        execution: Optional[str] = None,
+        enable_cuda_graph: bool = True,
+        arena_strategy: Optional[str] = "kNextPowerOfTwo",
+        dml_device_id: Optional[int] = None,
+    ) -> None:
+        return None
+
+if _ResilientYOLO is not None:
+    ResilientYOLORuntime = _ResilientYOLO  # type: ignore[assignment]
+else:  # pragma: no cover - runtime fallback when resilient wrapper missing
     class ResilientYOLORuntime:  # type: ignore[no-redef]
         def __init__(self, *_: Any, **__: Any) -> None:
             raise RuntimeError("panoptes.runtime.resilient_yolo not available")
@@ -114,6 +132,37 @@ except Exception:  # pragma: no cover
 
         def active_model(self) -> Any:
             raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+        def set_on_switch(self, *_: object, **__: object) -> None:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+
+def configure_onnxruntime(
+    *,
+    threads: Optional[int] = None,
+    execution: Optional[str] = None,
+    enable_cuda_graph: bool = True,
+    arena_strategy: Optional[str] = "kNextPowerOfTwo",
+    dml_device_id: Optional[int] = None,
+) -> None:
+    """
+    Invoke the shared ORT configuration helper when available.
+    """
+    _configure_onnxruntime(
+        threads=threads,
+        execution=execution,
+        enable_cuda_graph=enable_cuda_graph,
+        arena_strategy=arena_strategy,
+        dml_device_id=dml_device_id,
+    )
+
+try:
+    from panoptes.runtime.backend_probe import ort_available  # type: ignore[import]
+except Exception:  # pragma: no cover
+    def ort_available() -> Tuple[bool, Optional[str], Optional[list[str]], Optional[str]]:
+        return False, None, None, "backend probe unavailable"
+
+LOGGER = logging.getLogger(__name__)
 
 @contextmanager
 def _silence_ultralytics() -> Iterator[None]:
@@ -151,15 +200,180 @@ def _ensure_contiguous(frame: NDArrayU8) -> NDArrayU8:
         return frame
     return np.ascontiguousarray(frame)
 
-def _warmup_wrapper(model: "ResilientYOLOProtocol", *, task: str, **kwargs: Any) -> None:
-    """Run a single dummy inference so first real frame is fast."""
+def _warmup_wrapper(model: "ResilientYOLOProtocol", *, task: str, **kwargs: Any) -> bool:
+    """
+    Run a handful of dummy inferences so the first real frame is fast.
+
+    We memoise by backend so switching from ONNX Runtime → Torch (or vice versa)
+    replays the warmup, but repeated sessions on the same backend skip it.
+    """
     if np is None:
-        return
-    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        return False
+
     try:
-        model.predict(dummy, verbose=False, **kwargs)
+        backend_name = getattr(model, "backend", None)
     except Exception:
-        return
+        backend_name = None
+
+    try:
+        active_backend = (backend_name or "unknown").lower()
+    except Exception:
+        active_backend = "unknown"
+
+    warmed: set[str] = getattr(model, "_argos_warmup_backends", set())
+    if active_backend in warmed:
+        return False
+
+    setattr(model, "_argos_warmup_backends", warmed)
+
+    dummy_frames: List[NDArrayU8] = [
+        np.zeros((640, 640, 3), dtype=np.uint8),
+        np.full((640, 640, 3), 64, dtype=np.uint8),
+    ]
+    try:
+        rng = np.random.default_rng(0)
+        dummy_frames.append(rng.integers(0, 255, size=(640, 640, 3), dtype=np.uint8))
+    except Exception:
+        dummy_frames.append(np.full((640, 640, 3), 192, dtype=np.uint8))
+
+    try:
+        for frame in dummy_frames:
+            model.predict(frame, verbose=False, **kwargs)
+    except Exception:
+        return False
+
+    warmed.add(active_backend)
+    return True
+
+
+_MODEL_POOL: Dict[Tuple[str, Tuple[str, ...]], "ResilientYOLOProtocol"] = {}
+
+
+def _wrapper_pool_key(task: str, candidates: Sequence[Path]) -> Tuple[str, Tuple[str, ...]]:
+    return task, tuple(str(Path(c)) for c in candidates)
+
+
+def _candidate_backend(path: Path) -> str:
+    suffix = path.suffix.lower()
+    stem = path.stem.lower()
+    if suffix in {".engine", ".plan"}:
+        return "tensorrt"
+    if suffix == ".onnx":
+        if "fp16" in stem or "half" in stem:
+            return "onnx-fp16"
+        return "onnx"
+    if suffix in {".xml", ".bin"}:
+        return "openvino"
+    if suffix in {".torchscript"}:
+        return "torch"
+    return "torch"
+
+
+def _preferred_backend_order(preference: str) -> List[str]:
+    pref = (preference or "auto").lower()
+    ort_ok, _ort_version, providers, _ = ort_available()
+    providers_l = [p.lower() for p in (providers or [])]
+    has_cuda = any("cuda" in p for p in providers_l)
+    has_dml = any("dml" in p or "directml" in p for p in providers_l)
+
+    order: List[str]
+    if pref == "tensorrt":
+        order = ["tensorrt", "onnx", "torch"]
+    elif pref == "ort":
+        order = ["onnx", "tensorrt", "torch"]
+    elif pref == "torch":
+        order = ["torch", "onnx", "tensorrt"]
+    else:
+        order = ["tensorrt"]
+        if ort_ok:
+            order.append("onnx")
+            if has_cuda or has_dml:
+                order.append("onnx-gpu")
+        order.append("torch")
+
+    # Add defaults to guarantee coverage
+    base = ["tensorrt", "onnx", "onnx-gpu", "torch"]
+    seen: set[str] = set()
+    final: List[str] = []
+    for item in order + base:
+        if item not in seen:
+            final.append(item)
+            seen.add(item)
+    return final
+
+
+def _sort_candidates(
+    candidates: Sequence[Path],
+    *,
+    backend_preference: str,
+) -> List[Path]:
+    order = _preferred_backend_order(backend_preference)
+
+    def backend_rank(path: Path, idx: int) -> Tuple[float, int]:
+        backend = _candidate_backend(path)
+        base = backend
+        bonus = 0.0
+        if backend == "onnx-fp16":
+            base = "onnx"
+            bonus = -0.1
+        elif backend == "onnx":
+            base = "onnx"
+        if backend == "onnx-fp16" and "cuda" not in backend_preference:
+            bonus -= 0.05
+        try:
+            base_idx = order.index(base)
+        except ValueError:
+            base_idx = len(order)
+        return (base_idx + bonus, idx)
+
+    enumerated = list(enumerate([Path(c) for c in candidates]))
+    sorted_enum = sorted(enumerated, key=lambda item: backend_rank(item[1], item[0]))
+    return [entry for _, entry in sorted_enum]
+
+
+def _acquire_wrapper(
+    task: str,
+    candidates: Sequence[Path],
+    *,
+    conf: float,
+    hud_callback: Optional[Callable[[str], None]],
+    backend_preference: str,
+    ort_threads: Optional[int],
+    ort_execution: Optional[str],
+) -> "ResilientYOLOProtocol":
+    configure_onnxruntime(threads=ort_threads, execution=ort_execution)
+    key = _wrapper_pool_key(task, candidates)
+    wrapper = _MODEL_POOL.get(key)
+    if wrapper is None:
+        wrapper = cast(
+            ResilientYOLOProtocol,
+            ResilientYOLORuntime(
+                candidates,
+                task=task,
+                conf=conf,
+                on_switch=hud_callback,
+            ),
+        )
+        _MODEL_POOL[key] = wrapper
+        LOGGER.debug(
+            "Live task %s created new wrapper using candidates=%s backend_pref=%s",
+            task,
+            [str(p) for p in candidates],
+            backend_preference,
+        )
+    else:
+        set_switch = getattr(wrapper, "set_on_switch", None)
+        if callable(set_switch):
+            try:
+                set_switch(hud_callback)
+            except Exception:
+                pass
+        LOGGER.debug(
+            "Live task %s reusing cached model for backend_pref=%s",
+            task,
+            backend_preference,
+        )
+    return wrapper
 # ─────────────────────────────────────────────────────────────────────
 # Central model registry (single source of truth) — guarded import
 # ─────────────────────────────────────────────────────────────────────
@@ -720,6 +934,10 @@ def build_pse(
     override: Optional[Union[str, Path]] = LIVE_PSE_OVERRIDE,
     input_size: Optional[Tuple[int, int]] = None,
     preprocess_device: str = "cpu",
+    warmup: bool = True,
+    backend: str = "auto",
+    ort_threads: Optional[int] = None,
+    ort_execution: Optional[str] = None,
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     """
@@ -731,6 +949,10 @@ def build_pse(
         override=override,
         input_size=input_size,
         preprocess_device=preprocess_device,
+        warmup=warmup,
+        backend=backend,
+        ort_threads=ort_threads,
+        ort_execution=ort_execution,
         hud_callback=hud_callback,
     )
 
@@ -881,30 +1103,39 @@ def build_detect(
     override: Optional[Union[str, Path]] = LIVE_DETECT_OVERRIDE,
     input_size: Optional[Tuple[int, int]] = None,
     preprocess_device: str = "cpu",
+    warmup: bool = True,
+    backend: str = "auto",
+    ort_threads: Optional[int] = None,
+    ort_execution: Optional[str] = None,
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
         candidates = candidate_weights("detect", small=small, override=override)
         if not candidates:
             raise RuntimeError("no-detect-weights")
+        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
         label_hint = _label_from_override_or_pick("detect", small, override)
-        wrapper = cast(
-            ResilientYOLOProtocol,
-            ResilientYOLORuntime(
-                candidates,
-                task="detect",
-                conf=conf,
-                on_switch=hud_callback,
-            ),
+        wrapper = _acquire_wrapper(
+            "detect",
+            ordered_candidates,
+            conf=conf,
+            hud_callback=hud_callback,
+            backend_preference=backend,
+            ort_threads=ort_threads,
+            ort_execution=ort_execution,
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label_hint, current="detector")
-            with _progress_running_task("Load", f"detector:{label_hint}"):
-                with _silence_ultralytics():
-                    wrapper.prepare()
+            prepared = bool(getattr(wrapper, "_argos_prepared", False))
+            job_label = "Load" if not prepared else "reuse"
+            sp.update(total=1, count=0, job=job_label, model=label_hint, current="detector")
+            if not prepared:
+                with _progress_running_task("Load", f"detector:{label_hint}"):
+                    with _silence_ultralytics():
+                        wrapper.prepare()
+                setattr(wrapper, "_argos_prepared", True)
             attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
-            sp.update(job="warmup", model=wrapper.descriptor())
-            _warmup_wrapper(wrapper, task="detect", conf=conf, iou=iou)
+            if warmup and _warmup_wrapper(wrapper, task="detect", conf=conf, iou=iou):
+                sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLODetect(wrapper, conf=conf, iou=iou)
     except Exception:
@@ -918,30 +1149,39 @@ def build_heatmap(
     override: Optional[Union[str, Path]] = LIVE_HEATMAP_OVERRIDE,
     input_size: Optional[Tuple[int, int]] = None,
     preprocess_device: str = "cpu",
+    warmup: bool = True,
+    backend: str = "auto",
+    ort_threads: Optional[int] = None,
+    ort_execution: Optional[str] = None,
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
         candidates = candidate_weights("heatmap", small=small, override=override)
         if not candidates:
             raise RuntimeError("no-heatmap-weights")
+        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
         label_hint = _label_from_override_or_pick("heatmap", small, override)
-        wrapper = cast(
-            ResilientYOLOProtocol,
-            ResilientYOLORuntime(
-                candidates,
-                task="heatmap",
-                conf=0.25,
-                on_switch=hud_callback,
-            ),
+        wrapper = _acquire_wrapper(
+            "heatmap",
+            ordered_candidates,
+            conf=0.25,
+            hud_callback=hud_callback,
+            backend_preference=backend,
+            ort_threads=ort_threads,
+            ort_execution=ort_execution,
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label_hint, current="segmenter")
-            with _progress_running_task("Load", f"segmenter:{label_hint}"):
-                with _silence_ultralytics():
-                    wrapper.prepare()
+            prepared = bool(getattr(wrapper, "_argos_prepared", False))
+            job_label = "Load" if not prepared else "reuse"
+            sp.update(total=1, count=0, job=job_label, model=label_hint, current="segmenter")
+            if not prepared:
+                with _progress_running_task("Load", f"segmenter:{label_hint}"):
+                    with _silence_ultralytics():
+                        wrapper.prepare()
+                setattr(wrapper, "_argos_prepared", True)
             attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
-            sp.update(job="warmup", model=wrapper.descriptor())
-            _warmup_wrapper(wrapper, task="heatmap", conf=0.25)
+            if warmup and _warmup_wrapper(wrapper, task="heatmap", conf=0.25):
+                sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLOHeatmap(wrapper, conf=0.25)
     except Exception:
@@ -956,30 +1196,39 @@ def build_classify(
     override: Optional[Union[str, Path]] = LIVE_CLASSIFY_OVERRIDE,
     input_size: Optional[Tuple[int, int]] = None,
     preprocess_device: str = "cpu",
+    warmup: bool = True,
+    backend: str = "auto",
+    ort_threads: Optional[int] = None,
+    ort_execution: Optional[str] = None,
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
         candidates = candidate_weights("classify", small=small, override=override)
         if not candidates:
             raise RuntimeError("no-classify-weights")
+        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
         label_hint = _label_from_override_or_pick("classify", small, override)
-        wrapper = cast(
-            ResilientYOLOProtocol,
-            ResilientYOLORuntime(
-                candidates,
-                task="classify",
-                conf=0.25,
-                on_switch=hud_callback,
-            ),
+        wrapper = _acquire_wrapper(
+            "classify",
+            ordered_candidates,
+            conf=0.25,
+            hud_callback=hud_callback,
+            backend_preference=backend,
+            ort_threads=ort_threads,
+            ort_execution=ort_execution,
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label_hint, current="classifier")
-            with _progress_running_task("Load", f"classifier:{label_hint}"):
-                with _silence_ultralytics():
-                    wrapper.prepare()
+            prepared = bool(getattr(wrapper, "_argos_prepared", False))
+            job_label = "Load" if not prepared else "reuse"
+            sp.update(total=1, count=0, job=job_label, model=label_hint, current="classifier")
+            if not prepared:
+                with _progress_running_task("Load", f"classifier:{label_hint}"):
+                    with _silence_ultralytics():
+                        wrapper.prepare()
+                setattr(wrapper, "_argos_prepared", True)
             attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
-            sp.update(job="warmup", model=wrapper.descriptor())
-            _warmup_wrapper(wrapper, task="classify")
+            if warmup and _warmup_wrapper(wrapper, task="classify"):
+                sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLOClassify(wrapper, topk=topk)
     except Exception:
@@ -994,30 +1243,39 @@ def build_pose(
     override: Optional[Union[str, Path]] = LIVE_POSE_OVERRIDE,
     input_size: Optional[Tuple[int, int]] = None,
     preprocess_device: str = "cpu",
+    warmup: bool = True,
+    backend: str = "auto",
+    ort_threads: Optional[int] = None,
+    ort_execution: Optional[str] = None,
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
         candidates = candidate_weights("pose", small=small, override=override)
         if not candidates:
             raise RuntimeError("no-pose-weights")
+        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
         label_hint = _label_from_override_or_pick("pose", small, override)
-        wrapper = cast(
-            ResilientYOLOProtocol,
-            ResilientYOLORuntime(
-                candidates,
-                task="pose",
-                conf=conf,
-                on_switch=hud_callback,
-            ),
+        wrapper = _acquire_wrapper(
+            "pose",
+            ordered_candidates,
+            conf=conf,
+            hud_callback=hud_callback,
+            backend_preference=backend,
+            ort_threads=ort_threads,
+            ort_execution=ort_execution,
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label_hint, current="pose")
-            with _progress_running_task("Load", f"pose:{label_hint}"):
-                with _silence_ultralytics():
-                    wrapper.prepare()
+            prepared = bool(getattr(wrapper, "_argos_prepared", False))
+            job_label = "Load" if not prepared else "reuse"
+            sp.update(total=1, count=0, job=job_label, model=label_hint, current="pose")
+            if not prepared:
+                with _progress_running_task("Load", f"pose:{label_hint}"):
+                    with _silence_ultralytics():
+                        wrapper.prepare()
+                setattr(wrapper, "_argos_prepared", True)
             attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
-            sp.update(job="warmup", model=wrapper.descriptor())
-            _warmup_wrapper(wrapper, task="pose", conf=conf)
+            if warmup and _warmup_wrapper(wrapper, task="pose", conf=conf):
+                sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLOPose(wrapper, conf=conf)
     except Exception:
@@ -1033,6 +1291,10 @@ def build_obb(
     override: Optional[Union[str, Path]] = LIVE_OBB_OVERRIDE,
     input_size: Optional[Tuple[int, int]] = None,
     preprocess_device: str = "cpu",
+    warmup: bool = True,
+    backend: str = "auto",
+    ort_threads: Optional[int] = None,
+    ort_execution: Optional[str] = None,
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
@@ -1040,23 +1302,28 @@ def build_obb(
         if not candidates:
             raise RuntimeError("no-obb-weights")
         label_hint = _label_from_override_or_pick("obb", small, override)
-        wrapper = cast(
-            ResilientYOLOProtocol,
-            ResilientYOLORuntime(
-                candidates,
-                task="obb",
-                conf=conf,
-                on_switch=hud_callback,
-            ),
+        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
+        wrapper = _acquire_wrapper(
+            "obb",
+            ordered_candidates,
+            conf=conf,
+            hud_callback=hud_callback,
+            backend_preference=backend,
+            ort_threads=ort_threads,
+            ort_execution=ort_execution,
         )
         with _progress_percent_spinner(prefix="LIVE") as sp:
-            sp.update(total=1, count=0, job="Load", model=label_hint, current="obb")
-            with _progress_running_task("Load", f"obb:{label_hint}"):
-                with _silence_ultralytics():
-                    wrapper.prepare()
+            prepared = bool(getattr(wrapper, "_argos_prepared", False))
+            job_label = "Load" if not prepared else "reuse"
+            sp.update(total=1, count=0, job=job_label, model=label_hint, current="obb")
+            if not prepared:
+                with _progress_running_task("Load", f"obb:{label_hint}"):
+                    with _silence_ultralytics():
+                        wrapper.prepare()
+                setattr(wrapper, "_argos_prepared", True)
             attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
-            sp.update(job="warmup", model=wrapper.descriptor())
-            _warmup_wrapper(wrapper, task="obb", conf=conf, iou=iou)
+            if warmup and _warmup_wrapper(wrapper, task="obb", conf=conf, iou=iou):
+                sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
         return _YOLOOBB(wrapper, conf=conf, iou=iou)
     except Exception:

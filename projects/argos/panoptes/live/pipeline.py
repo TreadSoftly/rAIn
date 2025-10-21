@@ -92,11 +92,24 @@ class LivePipeline:
     override: Optional[Path] = None
     display_name: Optional[str] = None
     preprocess_device: str = "auto"
+    warmup: bool = True
+    backend: str = "auto"
+    ort_threads: Optional[int] = None
+    ort_execution: Optional[str] = None
 
     def __post_init__(self) -> None:
         self._hud_notice: Optional[str] = None
         self._hud_notice_until: float = 0.0
         self.preprocess_device = (self.preprocess_device or "auto").strip().lower()
+        self.warmup = bool(self.warmup)
+        self.backend = (self.backend or "auto").strip().lower()
+        exec_mode = (self.ort_execution or "").strip().lower()
+        self.ort_execution = exec_mode or None
+        if self.ort_threads is not None:
+            try:
+                self.ort_threads = max(1, int(self.ort_threads))
+            except Exception:
+                self.ort_threads = None
 
     def _build_source(self) -> FrameSource:
         if isinstance(self.source, str) and self.source.lower().startswith("synthetic"):
@@ -222,6 +235,10 @@ class LivePipeline:
                 override=self.override if self.override is not None else live_tasks.LIVE_DETECT_OVERRIDE,
                 input_size=self.size,
                 preprocess_device=preprocess_device,
+                warmup=self.warmup,
+                backend=self.backend,
+                ort_threads=self.ort_threads,
+                ort_execution=self.ort_execution,
                 hud_callback=self._register_toast,
             )
         if t in ("hm", "heatmap"):
@@ -230,6 +247,10 @@ class LivePipeline:
                 override=self.override if self.override is not None else live_tasks.LIVE_HEATMAP_OVERRIDE,
                 input_size=self.size,
                 preprocess_device=preprocess_device,
+                warmup=self.warmup,
+                backend=self.backend,
+                ort_threads=self.ort_threads,
+                ort_execution=self.ort_execution,
                 hud_callback=self._register_toast,
             )
         if t in ("clf", "classify"):
@@ -238,6 +259,10 @@ class LivePipeline:
                 override=self.override if self.override is not None else live_tasks.LIVE_CLASSIFY_OVERRIDE,
                 input_size=self.size,
                 preprocess_device=preprocess_device,
+                warmup=self.warmup,
+                backend=self.backend,
+                ort_threads=self.ort_threads,
+                ort_execution=self.ort_execution,
                 hud_callback=self._register_toast,
             )
         if t in ("pose", "pse"):
@@ -247,6 +272,10 @@ class LivePipeline:
                 override=self.override if self.override is not None else live_tasks.LIVE_POSE_OVERRIDE,
                 input_size=self.size,
                 preprocess_device=preprocess_device,
+                warmup=self.warmup,
+                backend=self.backend,
+                ort_threads=self.ort_threads,
+                ort_execution=self.ort_execution,
                 hud_callback=self._register_toast,
             )
         if t in ("obb", "object"):
@@ -257,6 +286,10 @@ class LivePipeline:
                 override=self.override if self.override is not None else live_tasks.LIVE_OBB_OVERRIDE,
                 input_size=self.size,
                 preprocess_device=preprocess_device,
+                warmup=self.warmup,
+                backend=self.backend,
+                ort_threads=self.ort_threads,
+                ort_execution=self.ort_execution,
                 hud_callback=self._register_toast,
             )
         raise ValueError(f"Unknown live task: {self.task}")

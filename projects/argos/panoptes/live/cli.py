@@ -470,6 +470,10 @@ def _run_pipeline_worker(
     save_path: Optional[str],
     display_name: str,
     preprocess_device: str,
+    warmup: bool,
+    backend: str,
+    ort_threads: Optional[int],
+    ort_execution: Optional[str],
     result_queue: MPQueue[ResultMessage],
 ) -> None:
     try:
@@ -489,6 +493,10 @@ def _run_pipeline_worker(
             override=override,
             display_name=display_name,
             preprocess_device=preprocess_device,
+            warmup=warmup,
+            backend=backend,
+            ort_threads=ort_threads,
+            ort_execution=ort_execution,
         )
         output = pipeline.run()
         result_queue.put(("ok", idx, output or ""))
@@ -523,6 +531,28 @@ def run(
         metavar="[cpu|gpu|auto]",
         help="Choose where preprocessing runs ('cpu', 'gpu', or 'auto').",
     ),
+    warmup: bool = typer.Option(
+        True,
+        "--warmup/--no-warmup",
+        help="Disable to skip dummy inferences that pre-warm the model.",
+    ),
+    backend: str = typer.Option(
+        "auto",
+        "--backend",
+        metavar="[auto|torch|ort|tensorrt]",
+        help="Select the preferred inference backend.",
+    ),
+    ort_threads: Optional[int] = typer.Option(
+        None,
+        "--ort-threads",
+        help="Override ONNX Runtime intra-op thread count.",
+    ),
+    ort_execution: Optional[str] = typer.Option(
+        None,
+        "--ort-execution",
+        metavar="[sequential|parallel]",
+        help="Set ONNX Runtime execution mode.",
+    ),
 ) -> None:
     """Launch the live webcam/video pipeline."""
 
@@ -535,6 +565,19 @@ def run(
         raise typer.BadParameter("--preprocess-device must be one of cpu/gpu/auto")
 
     _log_event("live.cli.preprocess_device", device=preprocess_device_norm)
+
+    backend_norm = (backend or "auto").strip().lower()
+    if backend_norm not in {"auto", "torch", "ort", "tensorrt"}:
+        raise typer.BadParameter("--backend must be one of auto/torch/ort/tensorrt")
+
+    ort_execution_norm: Optional[str] = None
+    if ort_execution is not None:
+        val = ort_execution.strip().lower()
+        if val not in {"sequential", "parallel"}:
+            raise typer.BadParameter("--ort-execution must be sequential or parallel")
+        ort_execution_norm = val
+
+    _log_event("live.cli.backend", backend=backend_norm, ort_threads=ort_threads, ort_execution=ort_execution_norm)
 
     # Some environments + Click variadic args can mis-route option values.
     # If Typer didn't bind --save/-o, fall back to parsing sys.argv directly.
@@ -618,6 +661,10 @@ def run(
                     save,
                     f"ARGOS Live ({spec.task}:{src_label})",
                     preprocess_device_norm,
+                    warmup,
+                    backend_norm,
+                    ort_threads,
+                    ort_execution_norm,
                     result_queue,
                 ),
             )
