@@ -11,7 +11,7 @@ import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, List, Optional, Tuple, Union, Literal, cast
+from typing import Final, List, Optional, Tuple, Union, Literal
 
 from multiprocessing.queues import Queue as MPQueue
 
@@ -252,12 +252,23 @@ def _parse_specs(tokens: List[str]) -> List[_LiveSpec]:
     specs: List[_LiveSpec] = []
     idx = 0
     total = len(tokens)
+    pending_source: Optional[str] = None
 
     while idx < total:
         task_token = tokens[idx].strip()
         task_key = task_token.lower()
         if task_key not in _TASK_CHOICES:
-            raise typer.BadParameter(f"Unexpected token {task_token!r}; specify a task before the camera/source.")
+            if (
+                pending_source is None
+                and (idx + 1) < total
+                and tokens[idx + 1].strip().lower() in _TASK_CHOICES
+            ):
+                pending_source = task_token
+                idx += 1
+                task_token = tokens[idx].strip()
+                task_key = task_token.lower()
+            else:
+                raise typer.BadParameter(f"Unexpected token {task_token!r}; specify a task before the camera/source.")
 
         task = _TASK_CHOICES[task_key]
         idx += 1
@@ -271,7 +282,10 @@ def _parse_specs(tokens: List[str]) -> List[_LiveSpec]:
                 idx += 1
 
         source: Optional[str] = None
-        if idx < total:
+        if pending_source is not None:
+            source = pending_source
+            pending_source = None
+        if source is None and idx < total:
             candidate_source = tokens[idx].strip()
             if candidate_source.lower() not in _TASK_CHOICES:
                 source = candidate_source
@@ -637,7 +651,7 @@ def run(
     }
     _log_event("live.capabilities", **capabilities) # type: ignore[arg-type]
 
-    result_queue: MPQueue[ResultMessage] = cast(MPQueue[ResultMessage], mp.Queue())
+    result_queue: MPQueue[ResultMessage] = mp.Queue()
     processes: list[mp.Process] = []
     try:
         for idx, spec in enumerate(resolved_specs):

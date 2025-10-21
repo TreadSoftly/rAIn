@@ -306,8 +306,16 @@ def _sort_candidates(
     candidates: Sequence[Path],
     *,
     backend_preference: str,
+    sticky_first: Optional[Path] = None,
 ) -> List[Path]:
     order = _preferred_backend_order(backend_preference)
+    if sticky_first is not None:
+        try:
+            sticky_norm = Path(sticky_first).expanduser().resolve(strict=False)
+        except Exception:
+            sticky_norm = Path(sticky_first)
+    else:
+        sticky_norm = None
 
     def backend_rank(path: Path, idx: int) -> Tuple[float, int]:
         backend = _candidate_backend(path)
@@ -328,6 +336,21 @@ def _sort_candidates(
 
     enumerated = list(enumerate([Path(c) for c in candidates]))
     sorted_enum = sorted(enumerated, key=lambda item: backend_rank(item[1], item[0]))
+    if sticky_norm is not None:
+        primary = None
+        remainder: List[tuple[int, Path]] = []
+        for item in sorted_enum:
+            _, candidate = item
+            try:
+                candidate_norm = candidate.expanduser().resolve(strict=False)
+            except Exception:
+                candidate_norm = candidate
+            if primary is None and candidate_norm == sticky_norm:
+                primary = item
+                continue
+            remainder.append(item)
+        if primary is not None:
+            sorted_enum = [primary] + remainder
     return [entry for _, entry in sorted_enum]
 
 
@@ -1113,7 +1136,12 @@ def build_detect(
         candidates = candidate_weights("detect", small=small, override=override)
         if not candidates:
             raise RuntimeError("no-detect-weights")
-        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
+        override_path = Path(override).expanduser() if override is not None else None
+        ordered_candidates = _sort_candidates(
+            candidates,
+            backend_preference=backend,
+            sticky_first=override_path,
+        )
         label_hint = _label_from_override_or_pick("detect", small, override)
         wrapper = _acquire_wrapper(
             "detect",
@@ -1159,7 +1187,12 @@ def build_heatmap(
         candidates = candidate_weights("heatmap", small=small, override=override)
         if not candidates:
             raise RuntimeError("no-heatmap-weights")
-        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
+        override_path = Path(override).expanduser() if override is not None else None
+        ordered_candidates = _sort_candidates(
+            candidates,
+            backend_preference=backend,
+            sticky_first=override_path,
+        )
         label_hint = _label_from_override_or_pick("heatmap", small, override)
         wrapper = _acquire_wrapper(
             "heatmap",
@@ -1206,7 +1239,12 @@ def build_classify(
         candidates = candidate_weights("classify", small=small, override=override)
         if not candidates:
             raise RuntimeError("no-classify-weights")
-        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
+        override_path = Path(override).expanduser() if override is not None else None
+        ordered_candidates = _sort_candidates(
+            candidates,
+            backend_preference=backend,
+            sticky_first=override_path,
+        )
         label_hint = _label_from_override_or_pick("classify", small, override)
         wrapper = _acquire_wrapper(
             "classify",
@@ -1253,7 +1291,12 @@ def build_pose(
         candidates = candidate_weights("pose", small=small, override=override)
         if not candidates:
             raise RuntimeError("no-pose-weights")
-        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
+        override_path = Path(override).expanduser() if override is not None else None
+        ordered_candidates = _sort_candidates(
+            candidates,
+            backend_preference=backend,
+            sticky_first=override_path,
+        )
         label_hint = _label_from_override_or_pick("pose", small, override)
         wrapper = _acquire_wrapper(
             "pose",
@@ -1302,7 +1345,12 @@ def build_obb(
         if not candidates:
             raise RuntimeError("no-obb-weights")
         label_hint = _label_from_override_or_pick("obb", small, override)
-        ordered_candidates = _sort_candidates(candidates, backend_preference=backend)
+        override_path = Path(override).expanduser() if override is not None else None
+        ordered_candidates = _sort_candidates(
+            candidates,
+            backend_preference=backend,
+            sticky_first=override_path,
+        )
         wrapper = _acquire_wrapper(
             "obb",
             ordered_candidates,
