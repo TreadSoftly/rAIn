@@ -32,6 +32,11 @@ from typing import (
 
 import typer
 
+from panoptes.model.artifact_metadata import (  # type: ignore[import]
+    ARTIFACT_METADATA_VERSION,
+    analyse_artifact,
+)
+
 # ---------------------------------------------------------------------
 # Minimal no-op spinner (works with "with ... as sp: sp.update(...)")
 # ---------------------------------------------------------------------
@@ -568,11 +573,27 @@ def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
 def _write_manifest(selected: List[str], installed: List[str]) -> Path:
     repo_root = Path(__file__).resolve().parents[2]  # .../projects/argos
     rel_model_dir = os.path.relpath(MODEL_DIR.resolve(), repo_root.resolve()).replace("\\", "/")
+    installed_unique = _dedupe(installed)
+    artifacts: Dict[str, Dict[str, object]] = {}
+    for name in installed_unique:
+        path = MODEL_DIR / name
+        if not path.exists():
+            continue
+        try:
+            artifacts[name] = analyse_artifact(path)
+        except Exception as exc:
+            artifacts[name] = {
+                "path": name,
+                "analysis_error": f"{type(exc).__name__}:{exc}",
+            }
     data: Dict[str, object] = {
         "model_dir": rel_model_dir,
         "selected": _dedupe(selected),
-        "installed": _dedupe(installed),
+        "installed": installed_unique,
     }
+    if artifacts:
+        data["artifact_metadata_version"] = ARTIFACT_METADATA_VERSION
+        data["artifacts"] = artifacts
     man = MODEL_DIR / "manifest.json"
     man.write_text(json.dumps(data, indent=2))
     return man

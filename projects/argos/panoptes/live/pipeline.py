@@ -5,6 +5,7 @@ Keeps progress UX similar to other ARGOS tasks and returns the saved path (if an
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ from . import tasks as live_tasks
 from . import config as live_config
 from .config import ModelSelection
 from ._types import NDArrayU8
-from panoptes.logging_config import bind_context # type: ignore[import]
+from panoptes.logging_config import bind_context, current_run_dir  # type: ignore[import]
 
 # Live progress spinner (robust fallback)
 try:
@@ -96,6 +97,7 @@ class LivePipeline:
     backend: str = "auto"
     ort_threads: Optional[int] = None
     ort_execution: Optional[str] = None
+    nms_mode: str = "auto"
 
     def __post_init__(self) -> None:
         self._hud_notice: Optional[str] = None
@@ -103,6 +105,9 @@ class LivePipeline:
         self.preprocess_device = (self.preprocess_device or "auto").strip().lower()
         self.warmup = bool(self.warmup)
         self.backend = (self.backend or "auto").strip().lower()
+        self.nms_mode = (self.nms_mode or "auto").strip().lower()
+        if self.nms_mode not in {"auto", "graph", "torch"}:
+            self.nms_mode = "auto"
         exec_mode = (self.ort_execution or "").strip().lower()
         self.ort_execution = exec_mode or None
         if self.ort_threads is not None:
@@ -110,6 +115,22 @@ class LivePipeline:
                 self.ort_threads = max(1, int(self.ort_threads))
             except Exception:
                 self.ort_threads = None
+        self._last_logged_nms: Optional[str] = None
+        self._nms_summary: Optional[dict[str, object]] = None
+
+    def _persist_nms_summary(self) -> None:
+        if not self._nms_summary:
+            return
+        run_dir = current_run_dir()
+        if run_dir is None:
+            return
+        safe_task = self.task.replace(" ", "_")
+        filename = f"nms_strategy_{safe_task}_{os.getpid()}.json"
+        path = Path(run_dir) / filename
+        try:
+            path.write_text(json.dumps(self._nms_summary, indent=2), encoding="utf-8")
+        except Exception:
+            LOGGER.debug("Failed to write NMS summary", exc_info=True)
 
     def _build_source(self) -> FrameSource:
         if isinstance(self.source, str) and self.source.lower().startswith("synthetic"):
@@ -239,6 +260,7 @@ class LivePipeline:
                 backend=self.backend,
                 ort_threads=self.ort_threads,
                 ort_execution=self.ort_execution,
+                nms_mode=self.nms_mode,
                 hud_callback=self._register_toast,
             )
         if t in ("hm", "heatmap"):
@@ -457,8 +479,44 @@ class LivePipeline:
                             dynamic_label = str(getattr(task, "label"))
                         except Exception:
                             dynamic_label = model_label
-                    if dynamic_label != model_label:
-                        model_label = dynamic_label
+                    nms_mode_active: Optional[str] = None
+                    get_nms_mode = getattr(task, "current_nms_mode", None)
+                    if callable(get_nms_mode):
+                        try:
+                            nms_mode_active = str(get_nms_mode()).lower()
+                        except Exception:
+                            nms_mode_active = None
+                    label_with_nms = dynamic_label
+                    if nms_mode_active:
+                        label_with_nms = f"{dynamic_label} · NMS:{nms_mode_active.upper()}"
+                        if nms_mode_active != self._last_logged_nms:
+                            _log("live.pipeline.nms", task=self.task, mode=nms_mode_active)
+                            self._last_logged_nms = nms_mode_active
+                            summary: dict[str, object] = {
+                                "mode": nms_mode_active,
+                                "task": self.task,
+                                "backend": self.backend,
+                                "override": self.nms_mode,
+                            }
+                            strategy_fn = getattr(task, "last_strategy", None)
+                            if callable(strategy_fn):
+                                try:
+                                    detail = strategy_fn()
+                                    if isinstance(detail, dict):
+                                        summary.update(detail)
+                                except Exception:
+                                    pass
+                            stats_fn = getattr(task, "nms_statistics", None)
+                            if callable(stats_fn):
+                                try:
+                                    counts = stats_fn()
+                                    summary["suppressed_counts"] = {str(k): int(v) for k, v in counts.items()}
+                                except Exception:
+                                    pass
+                            self._nms_summary = summary
+                            self._persist_nms_summary()
+                    if label_with_nms != model_label:
+                        model_label = label_with_nms
                         try:
                             sp.update(model=model_label)
                         except Exception:

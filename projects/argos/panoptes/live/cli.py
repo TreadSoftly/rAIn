@@ -9,6 +9,7 @@ import queue
 import re
 import sys
 import traceback
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, List, Optional, Tuple, Union, Literal
@@ -33,6 +34,8 @@ except ImportError:  # pragma: no cover - fallback for direct package execution
     from ..support_bundle import write_support_bundle  # type: ignore
 
 setup_logging()
+# Silence noisy FutureWarnings emitted by onnxscript when loading YOLO models.
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"onnxscript(\.|$)")
 LOGGER = logging.getLogger(__name__)
 TRACE_LIVE_CLI = os.getenv("PANOPTES_LIVE_TRACE_CLI", "").strip().lower() in {"1", "true", "yes"}
 LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
@@ -488,6 +491,7 @@ def _run_pipeline_worker(
     backend: str,
     ort_threads: Optional[int],
     ort_execution: Optional[str],
+    nms_mode: str,
     result_queue: MPQueue[ResultMessage],
 ) -> None:
     try:
@@ -511,6 +515,7 @@ def _run_pipeline_worker(
             backend=backend,
             ort_threads=ort_threads,
             ort_execution=ort_execution,
+            nms_mode=nms_mode,
         )
         output = pipeline.run()
         result_queue.put(("ok", idx, output or ""))
@@ -556,6 +561,12 @@ def run(
         metavar="[auto|torch|ort|tensorrt]",
         help="Select the preferred inference backend.",
     ),
+    nms_mode: str = typer.Option(
+        "auto",
+        "--nms-mode",
+        metavar="[auto|graph|torch]",
+        help="Override non-max suppression handling: rely on the model graph, force Torch GPU NMS, or auto-detect.",
+    ),
     ort_threads: Optional[int] = typer.Option(
         None,
         "--ort-threads",
@@ -584,6 +595,10 @@ def run(
     if backend_norm not in {"auto", "torch", "ort", "tensorrt"}:
         raise typer.BadParameter("--backend must be one of auto/torch/ort/tensorrt")
 
+    nms_mode_norm = (nms_mode or "auto").strip().lower()
+    if nms_mode_norm not in {"auto", "graph", "torch"}:
+        raise typer.BadParameter("--nms-mode must be one of auto/graph/torch")
+
     ort_execution_norm: Optional[str] = None
     if ort_execution is not None:
         val = ort_execution.strip().lower()
@@ -592,6 +607,7 @@ def run(
         ort_execution_norm = val
 
     _log_event("live.cli.backend", backend=backend_norm, ort_threads=ort_threads, ort_execution=ort_execution_norm)
+    _log_event("live.cli.nms", mode=nms_mode_norm)
 
     # Some environments + Click variadic args can mis-route option values.
     # If Typer didn't bind --save/-o, fall back to parsing sys.argv directly.
@@ -679,6 +695,7 @@ def run(
                     backend_norm,
                     ort_threads,
                     ort_execution_norm,
+                    nms_mode_norm,
                     result_queue,
                 ),
             )

@@ -71,6 +71,11 @@ def write_support_bundle(
         if candidate.exists() and candidate.is_file():
             files_to_include.append((candidate, candidate.name))
 
+    # NMS strategy summaries
+    for nms_summary in run.glob("nms_strategy_*.json"):
+        if nms_summary.is_file():
+            files_to_include.append((nms_summary, nms_summary.name))
+
     # Additional run patterns
     if include_patterns:
         for pattern in include_patterns:

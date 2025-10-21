@@ -13,8 +13,14 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, cast
+
+if TYPE_CHECKING:
+    from typing import Any as OrtSessionOptions
+else:
+    OrtSessionOptions = Any
 
 try:
     import psutil  # type: ignore
@@ -31,7 +37,8 @@ _ORT_CONFIG: Dict[str, Any] = {
     "dml_device_id": None,
 }
 _ORT_PATCH_LOCK = threading.Lock()
-_ORT_PATCHED = False
+_ort_patched = False
+ProviderConfig = Tuple[str, Dict[str, Any]]
 
 
 def _detect_backend(path: Path) -> str:
@@ -77,22 +84,27 @@ class ResilientYOLO:
         task: str,
         conf: float = 0.25,
         on_switch: Optional[Callable[[str], None]] = None,
+        metadata: Optional[Mapping[Path | str, Dict[str, object]]] = None,
     ) -> None:
         if not candidates:
             raise ValueError("ResilientYOLO requires at least one candidate weight")
 
-        self._candidates: List[Path] = [Path(c).expanduser() for c in candidates]
-        self._task = task
-        self._conf = float(conf)
-        self._on_switch = on_switch
+        initial = [Path(c).expanduser() for c in candidates]
+        self._initial_candidates: List[Path] = list(initial)
+        self._candidates: List[Path] = list(initial)
+        self._task: str = task
+        self._conf: float = float(conf)
+        self._on_switch: Optional[Callable[[str], None]] = on_switch
 
         self._current_idx: int = -1
-        self._model: Optional[object] = None
+        self._model: Optional[Any] = None
         self._label: Optional[str] = None
         self._backend: Optional[str] = None
-        self._failures: list[str] = []
-        self._has_success = False
+        self._failures: List[str] = []
+        self._has_success: bool = False
         self._pending_notice: Optional[str] = None
+        self._metadata_by_weight: Dict[str, Dict[str, object]] = {}
+        self.set_candidate_metadata(metadata)
 
     # -------------------------------
     #  Properties / inspection hooks
@@ -105,7 +117,7 @@ class ResilientYOLO:
     def weight_label(self) -> Optional[str]:
         return self._label
 
-    def active_model(self) -> Optional[object]:
+    def active_model(self) -> Optional[Any]:
         try:
             self._ensure_model()
         except Exception:
@@ -116,6 +128,73 @@ class ResilientYOLO:
         label = self._label or "unknown"
         backend = (self._backend or "unknown").upper()
         return f"{label} | {backend}"
+
+    def active_weight_path(self) -> Optional[Path]:
+        if 0 <= self._current_idx < len(self._candidates):
+            return self._candidates[self._current_idx]
+        return None
+
+    def candidates_snapshot(self) -> tuple[str, ...]:
+        return tuple(str(p) for p in self._initial_candidates)
+
+    def set_candidate_metadata(
+        self,
+        metadata: Optional[Mapping[Path | str, Dict[str, object]]],
+    ) -> None:
+        if not metadata:
+            return
+        for key, payload in metadata.items():
+            path = Path(key).expanduser()
+            entry = dict(payload)
+            self._metadata_by_weight[str(path)] = entry
+            self._metadata_by_weight[path.name] = entry
+
+    def metadata_for(self, weight: Optional[Path | str]) -> Dict[str, object]:
+        if weight is None:
+            return {}
+        if isinstance(weight, Path):
+            keys = [str(weight.expanduser()), weight.name]
+        else:
+            keys = [str(weight)]
+            try:
+                keys.append(Path(str(weight)).name)
+            except Exception:
+                pass
+        for key in keys:
+            meta = self._metadata_by_weight.get(key)
+            if isinstance(meta, dict):
+                return meta
+        return {}
+
+    def current_metadata(self) -> Dict[str, object]:
+        return dict(self.metadata_for(self.active_weight_path()))
+
+    def refresh_candidates(
+        self,
+        candidates: Sequence[Path | str],
+        metadata: Optional[Mapping[Path | str, Dict[str, object]]] = None,
+    ) -> None:
+        if metadata:
+            self.set_candidate_metadata(metadata)
+        new_initial = [Path(c).expanduser() for c in candidates]
+        if tuple(new_initial) == tuple(self._initial_candidates):
+            return
+        active = self.active_weight_path()
+        self._initial_candidates = list(new_initial)
+        self._candidates = list(new_initial)
+        self._failures.clear()
+        self._pending_notice = None
+        if active is not None and active in self._candidates:
+            try:
+                self._current_idx = self._candidates.index(active)
+            except ValueError:
+                self._current_idx = -1
+        else:
+            self._model = None
+            self._label = None
+            self._backend = None
+            self._current_idx = -1
+            self._has_success = False
 
     # -------------------------------
     #  Lifecycle management
@@ -343,47 +422,58 @@ def configure_onnxruntime(
 
 
 def _apply_ort_patch() -> None:
-    global _ORT_PATCHED
+    global _ort_patched
     with _ORT_PATCH_LOCK:
-        if _ORT_PATCHED:
+        if _ort_patched:
             return
         try:
-            import onnxruntime as ort  # type: ignore
+            import onnxruntime as ort_module  # type: ignore
         except Exception:
             return
+        ort: Any = ort_module
         if getattr(ort, "_argos_patched", False):
-            _ORT_PATCHED = True
+            _ort_patched = True
             return
 
         original_session = ort.InferenceSession
 
-        def _canonical_providers(value: Optional[Sequence[Any]]) -> Optional[List[Any]]:
+        def _canonical_providers(value: Optional[Sequence[Any]]) -> Optional[List[ProviderConfig]]:
             if value is None:
                 return None
-            tuned: List[Any] = []
-            for entry in value:
-                if isinstance(entry, str):
-                    name = entry
-                    opts: Dict[str, Any] = {}
-                elif isinstance(entry, (list, tuple)) and entry:
-                    name = entry[0]
-                    opts = dict(entry[1]) if len(entry) > 1 else {}
-                else:
+            tuned: List[ProviderConfig] = []
+            for provider_candidate in value:
+                if isinstance(provider_candidate, str):
+                    tuned.append((provider_candidate, {}))
                     continue
-                lower = str(name).lower()
-                arena_strategy = _ORT_CONFIG.get("arena_strategy")
-                if lower.startswith("cuda"):
-                    if arena_strategy:
-                        opts.setdefault("arena_extend_strategy", arena_strategy)
-                    opts.setdefault("cudnn_conv_algo_search", "DEFAULT")
-                if "directml" in lower or lower.startswith("dml"):
-                    device_id = _ORT_CONFIG.get("dml_device_id")
-                    if device_id is not None:
-                        opts.setdefault("device_id", int(device_id))
-                tuned.append((name, opts))
+                if isinstance(provider_candidate, SequenceABC) and not isinstance(provider_candidate, (bytes, str)):
+                    provider_sequence: Sequence[Any] = cast(Sequence[Any], provider_candidate)
+                    seq_entry: List[Any] = list(provider_sequence)
+                    if not seq_entry:
+                        continue
+                    raw_name: object = seq_entry[0]
+                    name_str = str(raw_name)
+                    opts: Dict[str, Any] = {}
+                    if len(seq_entry) > 1:
+                        opts_candidate: object = seq_entry[1]
+                        if isinstance(opts_candidate, MappingABC):
+                            opts_mapping = cast(Mapping[str, object], opts_candidate)
+                            opts = {}
+                            for option_key, option_value in opts_mapping.items():
+                                opts[option_key] = option_value
+                    lower = name_str.lower()
+                    arena_strategy = _ORT_CONFIG.get("arena_strategy")
+                    if lower.startswith("cuda"):
+                        if arena_strategy:
+                            opts.setdefault("arena_extend_strategy", arena_strategy)
+                        opts.setdefault("cudnn_conv_algo_search", "DEFAULT")
+                    if "directml" in lower or lower.startswith("dml"):
+                        device_id = _ORT_CONFIG.get("dml_device_id")
+                        if device_id is not None:
+                            opts.setdefault("device_id", int(device_id))
+                    tuned.append((name_str, opts))
             return tuned or None
 
-        def _apply_session_config(options: "ort.SessionOptions", providers: Optional[Sequence[Any]]) -> None:
+        def _apply_session_config(options: OrtSessionOptions, providers: Optional[List[ProviderConfig]]) -> None:
             options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
             execution_mode = _ORT_CONFIG.get("execution", "sequential")
             options.execution_mode = (
@@ -392,8 +482,7 @@ def _apply_ort_patch() -> None:
 
             has_gpu = False
             if providers:
-                for entry in providers:
-                    name = entry[0] if isinstance(entry, (list, tuple)) else entry
+                for name, _ in providers:
                     name_l = str(name).lower()
                     if "cuda" in name_l or "tensorrt" in name_l or "directml" in name_l:
                         has_gpu = True
@@ -410,72 +499,61 @@ def _apply_ort_patch() -> None:
             options.enable_cpu_mem_arena = True
 
             if has_gpu and _ORT_CONFIG.get("cuda_graph", True):
-                try:
-                    options.add_session_config_entry("session.enable_cuda_graph", "1")
-                except Exception:
-                    pass
+                add_entry = getattr(options, "add_session_config_entry", None)
+                if callable(add_entry):
+                    try:
+                        add_entry("session.enable_cuda_graph", "1")
+                    except Exception:
+                        pass
 
-        def _patched_inference_session(path_or_bytes, *args, **kwargs):
-            providers = kwargs.pop("providers", None)
-            provider_options = kwargs.pop("provider_options", None)
-            sess_options = kwargs.pop("sess_options", None)
-            if args:
-                # Allow positional session options/providers
-                if sess_options is None and isinstance(args[0], ort.SessionOptions):
-                    sess_options = args[0]
-                    args = args[1:]
-                if providers is None and args:
-                    providers = args[0]
-                    args = args[1:]
-            providers = _canonical_providers(providers)
-            if sess_options is None:
-                sess_options = ort.SessionOptions()
+        def _patched_inference_session(path_or_bytes: Any, *args: Any, **kwargs: Any) -> Any:
+            kw_args: Dict[str, Any] = dict(kwargs)
+            providers_raw = kw_args.pop("providers", None)
+            provider_options = kw_args.pop("provider_options", None)
+            sess_options_raw = kw_args.pop("sess_options", None)
 
-            _apply_session_config(sess_options, providers)
+            if isinstance(sess_options_raw, ort.SessionOptions):
+                sess_options_value: Optional[OrtSessionOptions] = sess_options_raw
+            else:
+                sess_options_value = None
 
+            extra_args: List[Any] = list(args)
+            if extra_args:
+                first = extra_args[0]
+                if sess_options_value is None and isinstance(first, ort.SessionOptions):
+                    sess_options_value = first
+                    extra_args.pop(0)
+            if extra_args and providers_raw is None:
+                providers_raw = extra_args.pop(0)
+
+            if isinstance(providers_raw, SequenceABC) and not isinstance(providers_raw, (str, bytes)):
+                providers_sequence: Sequence[Any] = cast(Sequence[Any], providers_raw)
+                providers_input = list(providers_sequence)
+            else:
+                providers_input = None
+
+            providers = _canonical_providers(providers_input)
+            if sess_options_value is None:
+                sess_options_value = ort.SessionOptions()
+
+            _apply_session_config(sess_options_value, providers)
+
+            providers_for_session: Optional[Any] = providers
             if providers is not None and provider_options is None:
                 # Convert tuples into separate provider_options argument if required
                 provider_options = [{**opts} for _, opts in providers]
-                providers = [name for name, _ in providers]
+                providers_for_session = [name for name, _ in providers]
 
             return original_session(
                 path_or_bytes,
-                sess_options=sess_options,
-                providers=providers,
+                sess_options=sess_options_value,
+                providers=providers_for_session,
                 provider_options=provider_options,
-                *args,
-                **kwargs,
+                *tuple(extra_args),
+                **kw_args,
             )
 
         ort.InferenceSession = _patched_inference_session  # type: ignore[assignment]
         setattr(ort, "_argos_patched", True)
-        _ORT_PATCHED = True
+        _ort_patched = True
         LOGGER.debug("Applied Argos ONNX Runtime session patch.")
-
-    # -------------------------------
-    #  Public API
-    # -------------------------------
-    def predict(self, frame: Any, **kwargs: Any) -> Any:
-        self._ensure_model()
-        assert self._model is not None
-
-        try:
-            predict = getattr(self._model, "predict")
-            predict_callable = cast(Callable[..., Any], predict)
-            call_kwargs: dict[str, Any] = dict(kwargs)
-            call_kwargs.setdefault("conf", self._conf)
-            call_kwargs.setdefault("verbose", False)
-            return predict_callable(frame, **call_kwargs)
-        except Exception as exc:
-            if _should_retry(exc) and len(self._candidates) > 1:
-                LOGGER.warning(
-                    "weights.runtime.retry task=%s weight=%s backend=%s reason=%s",
-                    self._task,
-                    self._label,
-                    self._backend,
-                    exc,
-                )
-                self._invalidate_current()
-                return self.predict(frame, **kwargs)
-            raise
-

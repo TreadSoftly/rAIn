@@ -34,13 +34,14 @@ Key change (2025-08-18):
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict, Callable, Iterator
+from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict, Callable, Iterator, TYPE_CHECKING
 from pathlib import Path
 from contextlib import contextmanager
 import logging
 import math
 import time
 import warnings
+from collections import Counter
 
 # ─────────────────────────────────────────────────────────────────────
 # Progress helpers (percent spinner preferred, safe fallbacks if missing)
@@ -76,6 +77,35 @@ try:
     import numpy as np
 except Exception:
     np = None  # type: ignore
+
+try:
+    import onnxruntime as _ort  # type: ignore[import]
+except Exception:
+    _ort = None  # type: ignore
+
+try:
+    import onnx  # type: ignore[import]
+    from onnx import TensorProto, helper  # type: ignore[import]
+except Exception:
+    onnx = None  # type: ignore
+    helper = None  # type: ignore
+    TensorProto = None  # type: ignore
+
+if TYPE_CHECKING:
+    from typing import Sequence as _SequenceAny
+
+    class _OrtInferenceSession(Protocol):
+        def run(
+            self,
+            output_names: Optional[_SequenceAny[str]],
+            input_feed: Dict[str, Any],
+            run_options: Any | None = None,
+        ) -> _SequenceAny[Any]:
+            ...
+
+    ORTInferenceSessionType = _OrtInferenceSession
+else:
+    ORTInferenceSessionType = Any
 
 try:
     import cv2  # type: ignore
@@ -133,7 +163,20 @@ else:  # pragma: no cover - runtime fallback when resilient wrapper missing
         def active_model(self) -> Any:
             raise RuntimeError("panoptes.runtime.resilient_yolo not available")
 
+        def active_weight_path(self) -> Optional[Path]:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
         def set_on_switch(self, *_: object, **__: object) -> None:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+        def refresh_candidates(self, *_: object, **__: object) -> None:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+        def current_metadata(self) -> Dict[str, object]:
+            raise RuntimeError("panoptes.runtime.resilient_yolo not available")
+
+        @property
+        def backend(self) -> Optional[str]:
             raise RuntimeError("panoptes.runtime.resilient_yolo not available")
 
 
@@ -247,6 +290,61 @@ def _warmup_wrapper(model: "ResilientYOLOProtocol", *, task: str, **kwargs: Any)
 
 
 _MODEL_POOL: Dict[Tuple[str, Tuple[str, ...]], "ResilientYOLOProtocol"] = {}
+_ort_nms_session: Optional[ORTInferenceSessionType] = None
+
+
+def _get_ort_nms_session() -> Optional[ORTInferenceSessionType]:
+    """
+    Build (or reuse) a lightweight ONNX Runtime session that wraps NonMaxSuppression.
+    """
+    global _ort_nms_session
+    if _ort_nms_session is not None:
+        return _ort_nms_session
+    if _ort is None or helper is None or TensorProto is None:
+        return None
+    try:
+        boxes_vi = helper.make_tensor_value_info("boxes", TensorProto.FLOAT, [1, "num_boxes", 4])
+        scores_vi = helper.make_tensor_value_info("scores", TensorProto.FLOAT, [1, 1, "num_boxes"])
+        max_output_vi = helper.make_tensor_value_info("max_output_boxes_per_class", TensorProto.INT64, [1])
+        iou_vi = helper.make_tensor_value_info("iou_threshold", TensorProto.FLOAT, [1])
+        score_vi = helper.make_tensor_value_info("score_threshold", TensorProto.FLOAT, [1])
+        indices_vi = helper.make_tensor_value_info("indices", TensorProto.INT64, [None, 3])
+
+        nms_node = helper.make_node(
+            "NonMaxSuppression",
+            [
+                "boxes",
+                "scores",
+                "max_output_boxes_per_class",
+                "iou_threshold",
+                "score_threshold",
+            ],
+            ["indices"],
+        )
+        graph = helper.make_graph(
+            [nms_node],
+            "argos_inline_nms",
+            [boxes_vi, scores_vi, max_output_vi, iou_vi, score_vi],
+            [indices_vi],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
+        # Older onnxruntime builds (including the one bundled with Argos) cap the supported
+        # IR version at 10, so we down-level the lightweight graph before instantiating it.
+        try:
+            setattr(model, "ir_version", 7)
+        except Exception:
+            model.ir_version = 7  # type: ignore[attr-defined]
+        session_options: Any = _ort.SessionOptions()  # type: ignore[attr-defined]
+        session_options.log_severity_level = 3  # type: ignore[attr-defined]
+        providers = list(cast(Sequence[str], _ort.get_available_providers()))  # type: ignore[attr-defined]
+        _ort_nms_session = _ort.InferenceSession(  # type: ignore[attr-defined]
+            model.SerializeToString(),
+            sess_options=session_options,
+            providers=providers,
+        )
+        return _ort_nms_session
+    except Exception:
+        return None
 
 
 def _wrapper_pool_key(task: str, candidates: Sequence[Path]) -> Tuple[str, Tuple[str, ...]]:
@@ -308,6 +406,11 @@ def _sort_candidates(
     backend_preference: str,
     sticky_first: Optional[Path] = None,
 ) -> List[Path]:
+    base_candidates = [Path(c) for c in candidates]
+    meta_sorted = rank_candidates_for_backend(base_candidates, backend_preference)
+    meta_rank_map: Dict[str, int] = {
+        str(Path(p)): idx for idx, p in enumerate(meta_sorted)
+    }
     order = _preferred_backend_order(backend_preference)
     if sticky_first is not None:
         try:
@@ -317,7 +420,8 @@ def _sort_candidates(
     else:
         sticky_norm = None
 
-    def backend_rank(path: Path, idx: int) -> Tuple[float, int]:
+    def backend_rank(path: Path, idx: int) -> Tuple[int, float, int]:
+        meta_idx = meta_rank_map.get(str(path), len(meta_rank_map) + idx)
         backend = _candidate_backend(path)
         base = backend
         bonus = 0.0
@@ -332,9 +436,9 @@ def _sort_candidates(
             base_idx = order.index(base)
         except ValueError:
             base_idx = len(order)
-        return (base_idx + bonus, idx)
+        return (meta_idx, base_idx + bonus, idx)
 
-    enumerated = list(enumerate([Path(c) for c in candidates]))
+    enumerated = list(enumerate(base_candidates))
     sorted_enum = sorted(enumerated, key=lambda item: backend_rank(item[1], item[0]))
     if sticky_norm is not None:
         primary = None
@@ -365,6 +469,12 @@ def _acquire_wrapper(
     ort_execution: Optional[str],
 ) -> "ResilientYOLOProtocol":
     configure_onnxruntime(threads=ort_threads, execution=ort_execution)
+    metadata_map: Dict[Path, Dict[str, object]] = {}
+    for cand in candidates:
+        try:
+            metadata_map[cand] = artifact_metadata(cand)
+        except Exception as exc:
+            metadata_map[cand] = {"analysis_error": f"{type(exc).__name__}:{exc}"}
     key = _wrapper_pool_key(task, candidates)
     wrapper = _MODEL_POOL.get(key)
     if wrapper is None:
@@ -375,6 +485,7 @@ def _acquire_wrapper(
                 task=task,
                 conf=conf,
                 on_switch=hud_callback,
+                metadata=metadata_map,
             ),
         )
         _MODEL_POOL[key] = wrapper
@@ -385,6 +496,12 @@ def _acquire_wrapper(
             backend_preference,
         )
     else:
+        refresh = getattr(wrapper, "refresh_candidates", None)
+        if callable(refresh):
+            try:
+                refresh(candidates, metadata=metadata_map)
+            except Exception:
+                LOGGER.debug("Wrapper refresh failed for task=%s", task, exc_info=True)
         set_switch = getattr(wrapper, "set_on_switch", None)
         if callable(set_switch):
             try:
@@ -409,6 +526,9 @@ try:
         load_obb,          # type: ignore[no-redef]
         candidate_weights, # type: ignore[no-redef]
         pick_weight,       # type: ignore[no-redef]
+        rank_candidates_for_backend,  # type: ignore[no-redef]
+        artifact_metadata,            # type: ignore[no-redef]
+        select_postprocess_strategy,  # type: ignore[no-redef]
     )
 except Exception:  # pragma: no cover
 
@@ -432,6 +552,17 @@ except Exception:  # pragma: no cover
 
     def pick_weight(*_a: object, **_k: object) -> Any:  # type: ignore[no-redef]
         return None
+
+    def rank_candidates_for_backend(
+        *_a: object, **_k: object
+    ) -> list[Path]:  # type: ignore[no-redef]
+        return []
+
+    def artifact_metadata(*_a: object, **_k: object) -> dict[str, object]:  # type: ignore[no-redef]
+        return {}
+
+    def select_postprocess_strategy(*_a: object, **_k: object) -> dict[str, object]:  # type: ignore[no-redef]
+        return {"nms": "torch"}
 
 # ─────────────────────────────────────────────────────────────────────
 # Live overrides — leave as None so the registry fully controls weights
@@ -477,6 +608,16 @@ class ResilientYOLOProtocol(Protocol):
     def predict(self, frame: NDArrayU8, *args: Any, **kwargs: Any) -> Any: ...
     def descriptor(self) -> str: ...
     def active_model(self) -> _Predictor: ...
+    def active_weight_path(self) -> Optional[Path]: ...
+    @property
+    def backend(self) -> Optional[str]: ...
+    def set_on_switch(self, callback: Optional[Callable[[str], None]]) -> None: ...
+    def refresh_candidates(
+        self,
+        candidates: Sequence[Path],
+        metadata: Optional[Dict[Path, Dict[str, object]]] = None,
+    ) -> None: ...
+    def current_metadata(self) -> Dict[str, object]: ...
 
 
 # ---------------------------
@@ -584,15 +725,327 @@ class _LaplacianHeatmap(TaskAdapter):
 class _YOLODetect(TaskAdapter):
     """YOLO-based detector adapter for live mode (boxes)."""
 
-    def __init__(self, model: ResilientYOLOProtocol, *, conf: float = 0.25, iou: float = 0.45) -> None:
+    def __init__(
+        self,
+        model: ResilientYOLOProtocol,
+        *,
+        conf: float = 0.25,
+        iou: float = 0.45,
+        nms_mode: str = "auto",
+    ) -> None:
         self.model = model
         self.conf = float(conf)
         self.iou = float(iou)
         self.names = _names_from_model(model.active_model())
         self.label = model.descriptor()
+        self._strategy_cache: Dict[str, object] = {}
+        self._suppressed_counts: Dict[int, int] = {}
+        mode_norm = (nms_mode or "auto").strip().lower()
+        self._nms_override = mode_norm if mode_norm in {"auto", "graph", "torch", "ort"} else "auto"
+        self._last_nms_mode: str = "auto"
 
     def current_label(self) -> str:
         return self.model.descriptor()
+
+    @staticmethod
+    def _coerce_float(value: object, default: float) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        return default
+
+    @staticmethod
+    def _coerce_int(value: object, default: int) -> int:
+        if isinstance(value, (int, float)):
+            try:
+                return int(value)
+            except Exception:
+                return default
+        return default
+
+    def _postprocess_strategy(self) -> Dict[str, object]:
+        backend = getattr(self.model, "backend", None)
+        active_weight: Optional[Path]
+        try:
+            active_weight = self.model.active_weight_path()
+        except Exception:
+            active_weight = None
+        metadata: Dict[str, object] = {}
+        try:
+            metadata = self.model.current_metadata()
+        except Exception:
+            metadata = {}
+        strategy = select_postprocess_strategy("detect", backend or "auto", weight=active_weight)
+        merged: Dict[str, object] = dict(strategy)
+        if metadata:
+            merged.update(metadata)
+        weight_label = getattr(self.model, "weight_label", None)
+        if weight_label:
+            merged.setdefault("weight", weight_label)
+        override = self._nms_override
+        backend_label = str(backend or "auto").lower()
+        if override != "auto":
+            if override == "graph" and not bool(merged.get("nms_in_graph")):
+                ort_session = _get_ort_nms_session()
+                if ort_session is not None:
+                    merged["nms"] = "ort"
+                    merged["nms_override"] = True
+                else:
+                    LOGGER.warning(
+                        "live.nms.override.unavailable task=%s weight=%s override=graph",
+                        "detect",
+                        merged.get("weight"),
+                    )
+                    merged["nms_override"] = "graph_unavailable"
+            else:
+                merged["nms"] = override
+                merged["nms_override"] = True
+        nms_mode = str(merged.get("nms") or "torch").lower()
+        if nms_mode != "graph":
+            backend_hint = str(merged.get("backend") or backend_label).lower()
+            if backend_hint in {"onnxruntime", "onnx", "onnx-fp16", "onnx-gpu", "tensorrt"}:
+                if _get_ort_nms_session() is not None:
+                    nms_mode = "ort"
+                    merged["nms"] = "ort"
+        merged["nms"] = nms_mode
+        self._last_nms_mode = nms_mode
+        self._strategy_cache = merged
+        return merged
+
+    def current_nms_mode(self) -> str:
+        return self._last_nms_mode
+
+    def last_strategy(self) -> Dict[str, object]:
+        return dict(self._strategy_cache)
+
+    def nms_statistics(self) -> Dict[int, int]:
+        return dict(self._suppressed_counts)
+
+    def _boxes_from_numpy(
+        self,
+        xyxy_any: Any,
+        confs_any: Any,
+        clses_any: Any,
+    ) -> List[Tuple[int, int, int, int, float, Optional[int]]]:
+        np_ = cast(Any, np)
+        assert np_ is not None
+        xyxy_np = np_.asarray(_to_numpy(xyxy_any, dtype=f32), dtype=f32)
+        conf_np = np_.asarray(_to_numpy(confs_any, dtype=f32), dtype=f32).reshape(-1)
+        try:
+            cls_np = np_.asarray(_to_numpy(clses_any, dtype=i64), dtype=i64).reshape(-1)
+        except Exception:
+            shape = getattr(xyxy_np, "shape", ())
+            if shape and len(shape) > 0:
+                length = int(shape[0])
+            else:
+                size_attr = getattr(xyxy_np, "size", None)
+                if size_attr is not None:
+                    length = int(size_attr)
+                else:
+                    try:
+                        length = int(len(xyxy_np))
+                    except Exception:
+                        length = 0
+            cls_np = np_.zeros((max(length, 0),), dtype=int)
+
+        boxes: List[Tuple[int, int, int, int, float, Optional[int]]] = []
+        for (x1, y1, x2, y2), conf_v, cls_v in zip(xyxy_np, conf_np, cls_np):
+            boxes.append((int(x1), int(y1), int(x2), int(y2), float(conf_v), int(cls_v)))
+        return boxes
+
+    def _ort_nms(
+        self,
+        xyxy_any: Any,
+        confs_any: Any,
+        clses_any: Any,
+        strategy: Dict[str, object],
+    ) -> List[Tuple[int, int, int, int, float, Optional[int]]]:
+        if np is None:
+            return self._torch_gpu_nms(xyxy_any, confs_any, clses_any, strategy)
+        session = _get_ort_nms_session()
+        if session is None:
+            return self._torch_gpu_nms(xyxy_any, confs_any, clses_any, strategy)
+
+        np_ = cast(Any, np)
+        xyxy_np = np_.asarray(_to_numpy(xyxy_any, dtype=f32), dtype=np.float32)
+        scores_np = np_.asarray(_to_numpy(confs_any, dtype=f32), dtype=np.float32).reshape(-1)
+        try:
+            cls_np = np_.asarray(_to_numpy(clses_any, dtype=i64), dtype=np.int64).reshape(-1)
+        except Exception:
+            cls_np = np_.zeros((max(int(getattr(xyxy_np, "shape", [0])[0]), 0),), dtype=np.int64)
+
+        if xyxy_np.ndim != 2:
+            xyxy_np = xyxy_np.reshape(-1, 4)
+
+        conf_thres = self._coerce_float(strategy.get("within_graph_conf_thres"), self.conf)
+        conf_thres = self._coerce_float(strategy.get("conf"), conf_thres)
+        mask = scores_np >= conf_thres
+        if not bool(np_.any(mask)):
+            return []
+
+        xyxy_sel = xyxy_np[mask]
+        scores_sel = scores_np[mask]
+        cls_sel = cls_np[mask]
+
+        order = np_.argsort(scores_sel)[::-1]
+        pre_nms_limit = self._coerce_int(strategy.get("max_candidates"), 0)
+        if pre_nms_limit <= 0:
+            max_det_hint = self._coerce_int(strategy.get("max_det"), 300)
+            pre_nms_limit = max(max_det_hint * 4, 512)
+        if order.size > pre_nms_limit > 0:
+            order = order[:pre_nms_limit]
+
+        xyxy_ordered = xyxy_sel[order]
+        scores_ordered = scores_sel[order]
+        cls_ordered = cls_sel[order]
+
+        max_det = self._coerce_int(strategy.get("max_det"), 300)
+        scores_input = scores_ordered.reshape(1, 1, -1).astype(np.float32, copy=False)
+        boxes_input = xyxy_ordered.reshape(1, -1, 4).astype(np.float32, copy=False)
+        max_output = np_.array([max_det if max_det > 0 else xyxy_ordered.shape[0]], dtype=np.int64)
+        iou_thresh = np_.array([float(self.iou)], dtype=np.float32)
+        score_thresh = np_.array([float(conf_thres)], dtype=np.float32)
+
+        try:
+            ort_outputs = session.run(
+                None,
+                {
+                    "boxes": boxes_input,
+                    "scores": scores_input,
+                    "max_output_boxes_per_class": max_output,
+                    "iou_threshold": iou_thresh,
+                    "score_threshold": score_thresh,
+                },
+            )
+        except Exception:
+            return self._torch_gpu_nms(xyxy_any, confs_any, clses_any, strategy)
+
+        if not ort_outputs:
+            return []
+
+        indices_any = ort_outputs[0]
+        if isinstance(indices_any, dict):
+            indices_values = list(cast(Dict[Any, Any], indices_any).values())
+            indices_arr = np_.asarray(indices_values, dtype=np.int64)
+        else:
+            indices_arr = np_.asarray(indices_any, dtype=np.int64)
+
+        if indices_arr.size == 0:
+            return []
+
+        if indices_arr.ndim == 1:
+            if indices_arr.size % 3 != 0:
+                return self._torch_gpu_nms(xyxy_any, confs_any, clses_any, strategy)
+            indices_arr = indices_arr.reshape(-1, 3)
+
+        if indices_arr.ndim != 2 or indices_arr.shape[1] < 3:
+            return self._torch_gpu_nms(xyxy_any, confs_any, clses_any, strategy)
+
+        # Ensure indices are unique while preserving selection order.
+        unique_vals, first_idx = np_.unique(indices_arr[:, 2], return_index=True)
+        order_by_first = np_.argsort(first_idx)
+        keep_idx_ordered = unique_vals[order_by_first]
+        keep_idx_ordered = np_.clip(keep_idx_ordered, 0, xyxy_ordered.shape[0] - 1)
+        if max_det > 0 and keep_idx_ordered.size > max_det:
+            keep_idx_ordered = keep_idx_ordered[:max_det]
+
+        suppressed = int(xyxy_ordered.shape[0] - keep_idx_ordered.size)
+        if suppressed > 0:
+            all_cls_vals = [int(val) for val in cls_ordered.tolist()]
+            kept_cls_vals = [int(cls_ordered[idx]) for idx in keep_idx_ordered.tolist()]
+            before_counts = Counter(all_cls_vals)
+            after_counts = Counter(kept_cls_vals)
+            for cls_idx, total_before in before_counts.items():
+                removed = total_before - after_counts.get(cls_idx, 0)
+                if removed > 0:
+                    self._suppressed_counts[cls_idx] = self._suppressed_counts.get(cls_idx, 0) + int(removed)
+            self._suppressed_counts[-1] = self._suppressed_counts.get(-1, 0) + suppressed
+
+        boxes: List[Tuple[int, int, int, int, float, Optional[int]]] = []
+        for idx in keep_idx_ordered.tolist():
+            x1, y1, x2, y2 = xyxy_ordered[idx]
+            conf_v = float(scores_ordered[idx])
+            cls_v = int(cls_ordered[idx])
+            boxes.append((int(x1), int(y1), int(x2), int(y2), conf_v, cls_v))
+        return boxes
+    def _torch_gpu_nms(
+        self,
+        xyxy_any: Any,
+        confs_any: Any,
+        clses_any: Any,
+        strategy: Dict[str, object],
+    ) -> List[Tuple[int, int, int, int, float, Optional[int]]]:
+        try:
+            import torch  # type: ignore
+            from torchvision.ops import nms as tv_nms  # type: ignore
+        except Exception:
+            return self._boxes_from_numpy(xyxy_any, confs_any, clses_any)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        xyxy_t = torch.as_tensor(xyxy_any, dtype=torch.float32, device=device)
+        scores_t = torch.as_tensor(confs_any, dtype=torch.float32, device=device).reshape(-1)
+        cls_t = torch.as_tensor(clses_any, dtype=torch.int64, device=device).reshape(-1)
+
+        if xyxy_t.ndim != 2:
+            xyxy_t = xyxy_t.reshape(-1, 4)
+
+        conf_thres = self._coerce_float(strategy.get("within_graph_conf_thres"), self.conf)
+        conf_thres = self._coerce_float(strategy.get("conf"), conf_thres)
+        mask = scores_t >= conf_thres
+        if not torch.any(mask):
+            return []
+
+        xyxy_t = xyxy_t[mask]
+        scores_t = scores_t[mask]
+        cls_t = cls_t[mask]
+
+        order = torch.argsort(scores_t, descending=True)
+        pre_nms_limit = self._coerce_int(strategy.get("max_candidates"), 0)
+        if pre_nms_limit <= 0:
+            max_det_hint = self._coerce_int(strategy.get("max_det"), 300)
+            pre_nms_limit = max(max_det_hint * 4, 512)
+        if order.numel() > pre_nms_limit:
+            order = order[:pre_nms_limit]
+
+        xyxy_t = xyxy_t[order]
+        scores_t = scores_t[order]
+        cls_t = cls_t[order]
+
+        keep = tv_nms(xyxy_t, scores_t, float(self.iou))
+        max_det = self._coerce_int(strategy.get("max_det"), 300)
+        if keep.numel() > max_det:
+            keep = keep[:max_det]
+
+        suppressed = int(xyxy_t.shape[0] - keep.numel())
+        if suppressed > 0:
+            kept_cls = cls_t[keep]
+            all_cls_vals = [int(val.item()) for val in cls_t.to(torch.int64).cpu().view(-1)]
+            kept_cls_vals = [int(val.item()) for val in kept_cls.to(torch.int64).cpu().view(-1)]
+            before_counts = Counter(all_cls_vals)
+            after_counts = Counter(kept_cls_vals)
+            for cls_idx, total_before in before_counts.items():
+                removed = total_before - after_counts.get(cls_idx, 0)
+                if removed > 0:
+                    self._suppressed_counts[cls_idx] = self._suppressed_counts.get(cls_idx, 0) + int(removed)
+            self._suppressed_counts[-1] = self._suppressed_counts.get(-1, 0) + suppressed
+
+        xyxy_list: List[List[float]] = []
+        for bbox_tensor in xyxy_t[keep].to(torch.float32).cpu():
+            coords = [float(coord.item()) for coord in bbox_tensor.view(-1)]
+            xyxy_list.append(coords)
+
+        scores_list: List[float] = [
+            float(score.item()) for score in scores_t[keep].to(torch.float32).cpu().view(-1)
+        ]
+        cls_list: List[int] = [
+            int(cls_val.item()) for cls_val in cls_t[keep].to(torch.int64).cpu().view(-1)
+        ]
+
+        boxes: List[Tuple[int, int, int, int, float, Optional[int]]] = []
+        for idx, conf_v in enumerate(scores_list):
+            x1, y1, x2, y2 = xyxy_list[idx]
+            cls_v = cls_list[idx]
+            boxes.append((int(x1), int(y1), int(x2), int(y2), float(conf_v), int(cls_v)))
+        return boxes
 
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[int, int, int, int, float, Optional[int]]]:
         np_ = cast(Any, np)
@@ -604,27 +1057,26 @@ class _YOLODetect(TaskAdapter):
         else:
             res_obj = cast(object, res_any)
 
-        boxes: List[Tuple[int, int, int, int, float, Optional[int]]] = []
         b_obj: Optional[object] = getattr(res_obj, "boxes", None)
         if b_obj is None:
-            return boxes
+            return []
 
         xyxy_any: Any = getattr(b_obj, "xyxy", None)
         confs_any: Any = getattr(b_obj, "conf", None)
         clses_any: Any = getattr(b_obj, "cls", None)
         if xyxy_any is None or confs_any is None or clses_any is None:
-            return boxes
+            return []
 
-        xyxy_np = _to_numpy(xyxy_any, dtype=f32)
-        conf_np = _to_numpy(confs_any, dtype=f32).reshape(-1)
-        try:
-            cls_np = _to_numpy(clses_any, dtype=i64).reshape(-1)
-        except Exception:
-            cls_np = np_.zeros((xyxy_np.shape[0],), dtype=int)
+        self.names = _names_from_model(self.model.active_model())
+        self.label = self.model.descriptor()
 
-        for (x1, y1, x2, y2), conf_v, cls_v in zip(xyxy_np, conf_np, cls_np):
-            boxes.append((int(x1), int(y1), int(x2), int(y2), float(conf_v), int(cls_v)))
-        return boxes
+        strategy = self._postprocess_strategy()
+        nms_mode = str(strategy.get("nms") or "torch").lower()
+        if nms_mode == "graph":
+            return self._boxes_from_numpy(xyxy_any, confs_any, clses_any)
+        if nms_mode == "ort":
+            return self._ort_nms(xyxy_any, confs_any, clses_any, strategy)
+        return self._torch_gpu_nms(xyxy_any, confs_any, clses_any, strategy)
 
     def render(self, frame_bgr: NDArrayU8, result: Boxes) -> NDArrayU8:
         from .overlay import draw_boxes_bgr
@@ -1130,12 +1582,16 @@ def build_detect(
     backend: str = "auto",
     ort_threads: Optional[int] = None,
     ort_execution: Optional[str] = None,
+    nms_mode: str = "auto",
     hud_callback: Optional[Callable[[str], None]] = None,
 ) -> TaskAdapter:
     try:
         candidates = candidate_weights("detect", small=small, override=override)
         if not candidates:
             raise RuntimeError("no-detect-weights")
+        nms_mode_norm = (nms_mode or "auto").strip().lower()
+        if nms_mode_norm not in {"auto", "graph", "torch"}:
+            nms_mode_norm = "auto"
         override_path = Path(override).expanduser() if override is not None else None
         ordered_candidates = _sort_candidates(
             candidates,
@@ -1165,7 +1621,7 @@ def build_detect(
             if warmup and _warmup_wrapper(wrapper, task="detect", conf=conf, iou=iou):
                 sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
-        return _YOLODetect(wrapper, conf=conf, iou=iou)
+        return _YOLODetect(wrapper, conf=conf, iou=iou, nms_mode=nms_mode_norm)
     except Exception:
         with _progress_simple_status("FALLBACK: fast-contour (no-ML)"):
             time.sleep(0.05)

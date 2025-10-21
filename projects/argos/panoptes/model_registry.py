@@ -3,14 +3,16 @@ from __future__ import annotations
 import contextlib
 import functools
 import importlib
+import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Final, Iterable, Optional, Union, Iterator
+from typing import Any, Final, Iterable, Iterator, Mapping, Optional, Sequence, Union, cast
 
 from .logging_config import bind_context
 from .runtime.backend_probe import ort_available, torch_available
+from .model.artifact_metadata import analyse_artifact, ARTIFACT_METADATA_VERSION
 
 # ────────────────────────────────────────────────────────────────
 #  Logging (explicit, human-friendly, no stack noise)
@@ -60,6 +62,57 @@ _MODEL_DIR_B = _ROOT.parent / "model"                           # legacy path (f
 # Prefer packaged dir; only fall back to legacy if it already exists
 MODEL_DIR: Final[Path] = _MODEL_DIR_A if _MODEL_DIR_A.exists() or not _MODEL_DIR_B.exists() else _MODEL_DIR_B
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+_MANIFEST_PATH = MODEL_DIR / "manifest.json"
+_ARTIFACT_METADATA_CACHE: dict[str, dict[str, object]] = {}
+_manifest_metadata_version: Optional[int] = None
+
+
+def _normalize_manifest_artifacts(source: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    result: dict[str, dict[str, object]] = {}
+    for key_candidate, payload_candidate in source.items():
+        if not isinstance(payload_candidate, dict):
+            continue
+        payload_dict: dict[str, object] = cast(dict[str, object], payload_candidate)
+        entry: dict[str, object] = {}
+        for inner_key_candidate, inner_value in payload_dict.items():
+            entry[inner_key_candidate] = inner_value
+        result[key_candidate] = entry
+    return result
+
+
+def _string_list_from(value: object) -> list[str]:
+    items: list[str] = []
+    iterable_value: Optional[Iterable[Any]] = None
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        iterable_value = cast(Sequence[Any], value)
+    elif isinstance(value, set):
+        iterable_value = cast(set[Any], value)
+    if iterable_value is not None:
+        for candidate_obj in iterable_value:
+            if isinstance(candidate_obj, str):
+                items.append(candidate_obj)
+    return items
+
+
+def _bootstrap_manifest_metadata() -> None:
+    global _manifest_metadata_version
+    if not _MANIFEST_PATH.exists():
+        return
+    try:
+        raw = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    version = raw.get("artifact_metadata_version")
+    artifacts_raw = raw.get("artifacts")
+    if isinstance(version, int):
+        _manifest_metadata_version = version
+    if isinstance(artifacts_raw, dict):
+        normalized = _normalize_manifest_artifacts(cast(Mapping[str, object], artifacts_raw))
+        _ARTIFACT_METADATA_CACHE.update(normalized)
+
+
+_bootstrap_manifest_metadata()
 
 
 # ────────────────────────────────────────────────────────────────
@@ -460,6 +513,93 @@ def _require(model: Optional[object], task: str) -> object:
     return model
 
 
+def _artifact_key(path: Path) -> str:
+    return path.name
+
+
+def artifact_metadata(path: Path) -> dict[str, object]:
+    key = _artifact_key(path)
+    cached_entry = _ARTIFACT_METADATA_CACHE.get(key)
+    if cached_entry is not None:
+        return cached_entry
+
+    try:
+        analysed_map: dict[str, Any] = analyse_artifact(path)
+        metadata: dict[str, object] = {
+            meta_key: meta_value for meta_key, meta_value in analysed_map.items()
+        }
+    except Exception as exc:
+        metadata = {
+            "path": path.name,
+            "analysis_error": f"{type(exc).__name__}:{exc}",
+            "nms_in_graph": False,
+            "providers": [],
+        }
+
+    _ARTIFACT_METADATA_CACHE[key] = metadata
+    return metadata
+
+
+def rank_candidates_for_backend(candidates: Sequence[Path], backend: str) -> list[Path]:
+    backend_norm = (backend or "auto").lower()
+    if backend_norm in {"auto", "torch"}:
+        return list(candidates)
+
+    def _score(idx: int, path: Path) -> tuple[int, int]:
+        meta = artifact_metadata(path)
+        nms_in_graph = bool(meta.get("nms_in_graph"))
+        providers_obj = meta.get("providers")
+        providers: list[str] = [provider.lower() for provider in _string_list_from(providers_obj)]
+        has_gpu_provider = any("cuda" in p or "tensorrt" in p for p in providers)
+        suffix = path.suffix.lower()
+        if nms_in_graph and has_gpu_provider:
+            rank = 0
+        elif nms_in_graph:
+            rank = 1
+        elif suffix == ".onnx":
+            rank = 2
+        else:
+            rank = 3
+        return (rank, idx)
+
+    enumerated = list(enumerate([Path(p) for p in candidates]))
+    enumerated.sort(key=lambda item: _score(item[0], item[1]))
+    return [entry for _, entry in enumerated]
+
+
+def select_postprocess_strategy(
+    task: str,
+    backend: str,
+    *,
+    weight: Optional[Union[str, Path]] = None,
+) -> dict[str, object]:
+    backend_norm = (backend or "auto").lower()
+    resolved_weight: Optional[Path]
+    if weight is None:
+        resolved_weight = pick_weight(task)
+    else:
+        resolved_weight = Path(weight).expanduser()
+
+    metadata: dict[str, object] = {}
+    if resolved_weight is not None:
+        metadata = artifact_metadata(resolved_weight)
+
+    nms_mode = "graph" if metadata.get("nms_in_graph") else "torch"
+    if backend_norm.startswith("torch"):
+        nms_mode = "torch"
+
+    return {
+        "task": task,
+        "backend": backend_norm,
+        "weight": str(resolved_weight) if resolved_weight else None,
+        "nms": nms_mode,
+        "max_det": metadata.get("max_det"),
+        "within_graph_conf_thres": metadata.get("within_graph_conf_thres"),
+        "providers": metadata.get("providers"),
+        "metadata_version": _manifest_metadata_version or ARTIFACT_METADATA_VERSION,
+    }
+
+
 # ────────────────────────────────────────────────────────────────
 #  Public helpers
 # ────────────────────────────────────────────────────────────────
@@ -527,4 +667,7 @@ __all__ = [
     "load_obb",
     "set_log_level",
     "set_verbose",
+    "artifact_metadata",
+    "rank_candidates_for_backend",
+    "select_postprocess_strategy",
 ]

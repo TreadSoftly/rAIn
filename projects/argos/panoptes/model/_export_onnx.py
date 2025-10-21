@@ -15,6 +15,7 @@ from typing import (
     ContextManager,
     Generator,
     List,
+    Dict,
     Optional,
     Tuple,
     Sequence,
@@ -23,6 +24,8 @@ from typing import (
     runtime_checkable,
     cast,
 )
+
+import typer
 
 # ---------------------------------------------------------------------
 # Environment safety for reliable ONNX export on fresh installs
@@ -303,14 +306,26 @@ def _try_ultralytics_export(YOLO: _YOLOClassLike, pt: Path, target: Path) -> Tup
             for dynamic in (True, False):
                 for simplify_flag in (True, False):
                     try:
-                        out_any: ExportOut = cast(ExportOut, m.export(  # type: ignore[attr-defined]
-                            format="onnx",
-                            dynamic=dynamic,
-                            simplify=simplify_flag,
-                            imgsz=DEFAULT_IMGSZ,
-                            opset=opset,
-                            device="cpu",
-                        ))
+                        export_kwargs: Dict[str, Any] = {
+                            "format": "onnx",
+                            "dynamic": dynamic,
+                            "simplify": simplify_flag,
+                            "imgsz": DEFAULT_IMGSZ,
+                            "opset": opset,
+                            "device": "cpu",
+                        }
+                        try:
+                            export_kwargs["postprocess"] = "graph"
+                            out_any: ExportOut = cast(
+                                ExportOut,
+                                m.export(**export_kwargs),  # type: ignore[attr-defined]
+                            )
+                        except TypeError:
+                            export_kwargs.pop("postprocess", None)
+                            out_any = cast(
+                                ExportOut,
+                                m.export(**export_kwargs),  # type: ignore[attr-defined]
+                            )
                         # Some versions return str, some a path-like, some a list
                         if isinstance(out_any, (list, tuple)) and out_any:
                             outp_path = Path(str(out_any[0]))
@@ -319,11 +334,22 @@ def _try_ultralytics_export(YOLO: _YOLOClassLike, pt: Path, target: Path) -> Tup
                         else:
                             outp_path = _latest_exported_onnx()
 
-                        if outp_path and outp_path.exists():
-                            if outp_path.resolve() != target.resolve():
-                                shutil.copy2(outp_path, target)
-                            if _validate_weight(target):
-                                return True, None
+                            if outp_path and outp_path.exists():
+                                if outp_path.resolve() != target.resolve():
+                                    shutil.copy2(outp_path, target)
+                                if _validate_weight(target):
+                                    try:
+                                        from panoptes.model.artifact_metadata import analyse_artifact  # type: ignore[import]
+
+                                        meta = analyse_artifact(target)
+                                        if not meta.get("nms_in_graph"):
+                                            typer.secho(
+                                                f"Warning: ONNX export for {target.name} lacks in-graph NMS.",
+                                                fg="yellow",
+                                            )
+                                    except Exception:
+                                        pass
+                                    return True, None
                             try:
                                 target.unlink(missing_ok=True)
                             except TypeError:
