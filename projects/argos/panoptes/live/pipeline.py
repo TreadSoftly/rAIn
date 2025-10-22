@@ -353,6 +353,29 @@ class LivePipeline:
         Run the pipeline. Returns path of saved video if a VideoSink was used,
         else None. Press 'q' or 'Esc' in the preview window to exit (when GUI available).
         """
+        def _pretty_provider_label(raw: Optional[str]) -> Optional[str]:
+            if not raw:
+                return None
+            token = raw.strip()
+            lowered = token.lower()
+            mapping = {
+                "cudaexecutionprovider": "CUDA",
+                "cudnnexecutionprovider": "CUDA",
+                "cpuexecutionprovider": "CPU",
+                "dmlexecutionprovider": "DirectML",
+                "directmlexecutionprovider": "DirectML",
+                "tensorrtexecutionprovider": "TensorRT",
+            }
+            if lowered in mapping:
+                return mapping[lowered]
+            if lowered.startswith("cuda:"):
+                return "CUDA" + token[len("cuda"):]
+            if lowered == "cuda":
+                return "CUDA"
+            if lowered == "cpu":
+                return "CPU"
+            return token
+
         with bind_context(live_task=self.task, source=str(self.source)):
             _log(
                 "live.pipeline.start",
@@ -461,7 +484,19 @@ class LivePipeline:
                     result = task.infer(frame_bgr)
                     frame_anno = task.render(frame_bgr, result)
 
-                    device = hw.gpu or "CPU"
+                    provider_label: Optional[str] = None
+                    model_obj = getattr(task, "model", None)
+                    if model_obj is not None:
+                        try:
+                            provider_seq = getattr(model_obj, "providers", None)
+                        except Exception:
+                            provider_seq = None
+                        if provider_seq:
+                            try:
+                                provider_label = provider_seq[0]
+                            except Exception:
+                                provider_label = None
+                    device = _pretty_provider_label(provider_label) or (hw.gpu or "CPU")
                     notice = self._active_notice(now)
                     dynamic_label = model_label
                     current_label_fn = getattr(task, "current_label", None)

@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import traceback
 from os import PathLike
 from pathlib import Path
@@ -38,9 +39,11 @@ from typing import (
     Any,
     Callable,
     Dict,
+    List,
     Literal,
     Mapping,
     MutableMapping,
+    Set,
     Optional,
     Sequence,
     Tuple,
@@ -49,11 +52,11 @@ from typing import (
     overload,
 )
 
-from panoptes.logging_config import setup_logging # type: ignore[import]
-from panoptes.runtime.onnx_spec import desired_ort_spec # type: ignore[import]
+from panoptes.logging_config import setup_logging  # type: ignore[import]
+from panoptes.runtime.onnx_spec import desired_ort_spec  # type: ignore[import]
 
 try:
-    from panoptes.model_registry import WEIGHT_PRIORITY as _BOOTSTRAP_WEIGHT_PRIORITY # type: ignore[import]
+    from panoptes.model_registry import WEIGHT_PRIORITY as _BOOTSTRAP_WEIGHT_PRIORITY  # type: ignore[import]
 except Exception:  # pragma: no cover - bootstrap still works even if registry import fails
     _BOOTSTRAP_WEIGHT_PRIORITY: dict[str, list[Path]] = {} # type: ignore[assignment]
 
@@ -82,6 +85,23 @@ APP = "rAIn"
 
 if os.name == "nt":
     os.environ.setdefault("PYTHONUTF8", "1")
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _is_truthy(value: str) -> bool:
+    return value.strip().lower() in _TRUTHY
+
+
+def _ensure_default_tensorrt_env() -> None:
+    if os.environ.get("ORT_DISABLE_TENSORRT"):
+        return
+    if _is_truthy(os.environ.get("ARGOS_ENABLE_TENSORRT", "")):
+        return
+    os.environ["ORT_DISABLE_TENSORRT"] = "1"
+
+
+_ensure_default_tensorrt_env()
 
 setup_logging()
 _LOG = logging.getLogger(__name__)
@@ -119,6 +139,9 @@ VENVS: Path = DATA / "venvs"
 SENTINEL: Path = CFG / "first_run.json"
 
 VENV: Path = VENVS / f"py{sys.version_info.major}{sys.version_info.minor}-argos"
+STATE: Path = DATA / "state"
+CAPABILITIES_FILE: Path = STATE / "capabilities.json"
+CUDA_STATE_DIR: Path = STATE / "cuda"
 
 
 def _venv_executable_path() -> Path:
@@ -190,8 +213,26 @@ def _run(
     return None
 
 def _ensure_dirs() -> None:
-    for p in (CFG, DATA, VENVS):
+    for p in (CFG, DATA, VENVS, STATE, CUDA_STATE_DIR):
         p.mkdir(parents=True, exist_ok=True)
+
+
+def _site_packages_root() -> Path:
+    if os.name == "nt":
+        return VENV / "Lib" / "site-packages"
+    return VENV / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+
+
+def _as_str_key_dict(obj: object) -> Dict[str, Any]:
+    if isinstance(obj, Mapping):
+        mapping_view = cast(Mapping[Any, Any], obj)
+        result: Dict[str, Any] = {}
+        for key_obj, value in mapping_view.items():
+            key_str = key_obj if isinstance(key_obj, str) else str(key_obj)
+            result[key_str] = value
+        return result
+    return {}
+
 
 def _module_present(mod: str) -> bool:
     code = f"import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('{mod}') else 1)"
@@ -211,18 +252,305 @@ def _has_distribution(name: str) -> bool:
         return True
     except PackageNotFoundError:
         return False
-    except Exception:
+
+
+def _gather_paths_from_root(root: Path, *, include_nvidia_prefix: bool) -> list[Path]:
+    if not root.exists():
+        return []
+    patterns = ("nvidia/**/bin", "nvidia/**/lib") if include_nvidia_prefix else ("**/bin", "**/lib")
+    discovered: list[Path] = []
+    for pattern in patterns:
+        try:
+            for candidate in root.glob(pattern):
+                try:
+                    if candidate.is_dir():
+                        resolved = candidate.resolve()
+                        if resolved not in discovered:
+                            discovered.append(resolved)
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return discovered
+
+
+_REQUIRED_CUDA_DLLS: tuple[str, ...] = (
+    "cublas64_12.dll",
+    "cublasLt64_12.dll",
+    "cudart64_12.dll",
+    "cudnn64_9.dll",
+    "cudnn_cnn_infer64_9.dll",
+    "cudnn_cnn_train64_9.dll",
+    "cudnn_ops_infer64_9.dll",
+    "cudnn_ops_train64_9.dll",
+)
+
+
+def _discover_cuda_library_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    site_root = _site_packages_root()
+    dirs.extend(_gather_paths_from_root(site_root, include_nvidia_prefix=True))
+    dirs.extend(_gather_paths_from_root(CUDA_STATE_DIR, include_nvidia_prefix=False))
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for path in dirs:
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+    return deduped
+
+
+def _detect_missing_cuda_dlls(directories: Sequence[Path]) -> list[str]:
+    missing: list[str] = []
+    normalized = [p.resolve() for p in directories if p.exists()]
+    for dll_name in _REQUIRED_CUDA_DLLS:
+        found = False
+        for directory in normalized:
+            dll_path = directory / dll_name
+            if dll_path.exists():
+                found = True
+                break
+        if not found:
+            missing.append(dll_name)
+    return missing
+
+
+def _collect_torch_metadata() -> Dict[str, Any]:
+    vpy = str(venv_python())
+    script = textwrap.dedent(
+        """\
+        import json
+        import sys
+
+        payload: dict[str, object] = {}
+        try:
+            import torch  # type: ignore
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            payload["installed"] = False
+            payload["error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            payload["installed"] = True
+            payload["version"] = getattr(torch, "__version__", None)
+            cuda_version = getattr(getattr(torch, "version", None), "cuda", None)
+            payload["cuda_version"] = str(cuda_version) if cuda_version is not None else None
+            try:
+                payload["cuda_available"] = bool(getattr(torch, "cuda", None) and torch.cuda.is_available())
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                payload["cuda_available"] = False
+                payload["cuda_error"] = f"{type(exc).__name__}: {exc}"
+        sys.stdout.write(json.dumps(payload))
+        """
+    )
+    proc = subprocess.run(
+        [vpy, "-c", script],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.stdout:
+        try:
+            data = json.loads(proc.stdout.strip())
+            return _as_str_key_dict(data)
+        except Exception:
+            pass
+    return {"installed": False, "error": proc.stderr.strip() or "torch metadata unavailable"}
+
+
+def _collect_torchaudio_metadata() -> Dict[str, Any]:
+    vpy = str(venv_python())
+    script = textwrap.dedent(
+        """\
+        import json
+        import sys
+
+        payload: dict[str, object] = {}
+        try:
+            import torchaudio  # type: ignore
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            payload["installed"] = False
+            payload["error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            payload["installed"] = True
+            payload["version"] = getattr(torchaudio, "__version__", None)
+        sys.stdout.write(json.dumps(payload))
+        """
+    )
+    proc = subprocess.run(
+        [vpy, "-c", script],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.stdout:
+        try:
+            data = json.loads(proc.stdout.strip())
+            return _as_str_key_dict(data)
+        except Exception:
+            pass
+    return {"installed": False, "error": proc.stderr.strip() or "torchaudio metadata unavailable"}
+
+
+def _torch_meta_has_cuda(meta: object) -> bool:
+    meta_dict = _as_str_key_dict(meta)
+    if not meta_dict:
         return False
+    cuda_version_obj = meta_dict.get("cuda_version")
+    if isinstance(cuda_version_obj, str) and cuda_version_obj.strip():
+        return True
+    cuda_available_obj = meta_dict.get("cuda_available")
+    if isinstance(cuda_available_obj, bool):
+        return cuda_available_obj
+    return bool(cuda_available_obj)
+
+
+def _collect_ort_metadata() -> Dict[str, Any]:
+    vpy = str(venv_python())
+    script = textwrap.dedent(
+        """\
+        import json
+        import sys
+
+        payload: dict[str, object] = {}
+        try:
+            import onnxruntime as ort  # type: ignore
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            payload["available"] = False
+            payload["error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            payload["available"] = True
+            payload["version"] = getattr(ort, "__version__", None)
+            try:
+                providers = list(getattr(ort, "get_available_providers", lambda: [])())
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                providers = []
+                payload["providers_error"] = f"{type(exc).__name__}: {exc}"
+            payload["providers"] = providers
+        sys.stdout.write(json.dumps(payload))
+        """
+    )
+    proc = subprocess.run(
+        [vpy, "-c", script],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.stdout:
+        try:
+            data = json.loads(proc.stdout.strip())
+            return _as_str_key_dict(data)
+        except Exception:
+            pass
+    return {"available": False, "error": proc.stderr.strip() or "onnxruntime metadata unavailable"}
+
+
+def _preferred_accelerator_from_env() -> str:
+    return os.getenv("ARGOS_ACCELERATOR", "").strip().lower()
+
+
+def _refresh_capabilities_cache(log: bool = False) -> Dict[str, Any]:
+    info: Dict[str, Any] = {}
+    env_preferred = _preferred_accelerator_from_env()
+    info["timestamp"] = time.time()
+    info["torch"] = _collect_torch_metadata()
+    info["onnxruntime"] = _collect_ort_metadata()
+    cuda_dirs: List[Path] = _discover_cuda_library_dirs()
+    info["cuda"] = {
+        "dll_dirs": [str(path_obj) for path_obj in cuda_dirs],
+        "missing_dlls": _detect_missing_cuda_dlls(cuda_dirs),
+    }
+    preferred_accelerator = env_preferred
+    if not preferred_accelerator:
+        ort_meta_obj = _as_str_key_dict(info.get("onnxruntime"))
+        providers_obj = ort_meta_obj.get("providers")
+        if isinstance(providers_obj, Sequence) and not isinstance(providers_obj, (str, bytes)):
+            providers_seq = cast(Sequence[Any], providers_obj)
+            lowered = [str(provider).lower() for provider in providers_seq]
+            if any("cuda" in p for p in lowered):
+                preferred_accelerator = "cuda"
+            elif any("directml" in p or "dml" in p for p in lowered):
+                preferred_accelerator = "directml"
+        if not preferred_accelerator:
+            cuda_meta_obj = _as_str_key_dict(info.get("cuda"))
+            if cuda_meta_obj.get("dll_dirs"):
+                preferred_accelerator = "cuda"
+    info["preferred_accelerator"] = preferred_accelerator or "cpu"
+    try:
+        CAPABILITIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CAPABILITIES_FILE.write_text(json.dumps(info, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception as exc:
+        if log:
+            _print(f"ensure warning: could not write capability cache ({exc})")
+    return info
+
+
+def read_capabilities() -> Dict[str, Any]:
+    try:
+        if CAPABILITIES_FILE.exists():
+            data = json.loads(CAPABILITIES_FILE.read_text(encoding="utf-8"))
+            return _as_str_key_dict(data)
+    except Exception:
+        pass
+    return {}
+
+
+def _record_capabilities_step() -> None:
+    _refresh_capabilities_cache(log=True)
+
+def _nvidia_smi_candidates() -> list[str]:
+    candidates: list[str] = []
+    smi = shutil.which("nvidia-smi")
+    if smi:
+        candidates.append(smi)
+    windows_root = os.environ.get("SystemRoot", "")
+    program_files = os.environ.get("ProgramFiles", "")
+    extra = [
+        os.path.join(windows_root, "System32", "nvidia-smi.exe"),
+        os.path.join(program_files, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"),
+        "/usr/bin/nvidia-smi",
+        "/usr/local/bin/nvidia-smi",
+        "/bin/nvidia-smi",
+    ]
+    seen: set[str] = set()
+    for path in candidates + extra:
+        if not path:
+            continue
+        norm = os.path.normpath(path)
+        key = norm.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if os.path.exists(norm):
+            candidates.append(norm)
+    # Drop the initial executable duplicates we introduced above.
+    unique: list[str] = []
+    seen.clear()
+    for path in candidates:
+        norm = os.path.normpath(path)
+        key = norm.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(norm)
+    return unique
+
 
 def _has_cuda() -> bool:
-    smi = shutil.which("nvidia-smi")
-    if not smi:
-        return False
-    try:
-        _run([smi, "-L"], check=True, capture=True)
+    accel_hint = os.getenv("ARGOS_ACCELERATOR", "").strip().lower()
+    if accel_hint == "cuda":
         return True
-    except Exception:
-        return False
+    if os.getenv("CUDA_VISIBLE_DEVICES", "").strip():
+        return True
+    for smi in _nvidia_smi_candidates():
+        try:
+            _run([smi, "-L"], check=True, capture=True)
+            return True
+        except Exception:
+            continue
+    return False
 
 def _constraints_args() -> list[str]:
     c = ARGOS / "constraints.txt"
@@ -250,7 +578,27 @@ def _torch_pins_from_requirements() -> Tuple[str, str]:
                 torch_spec = s
             if low.startswith(("torchvision==", "torchvision>", "torchvision<", "torchvision>=", "torchvision<=")):
                 tv_spec = s
+    env_torch = os.getenv("ARGOS_TORCH_SPEC", "").strip()
+    if env_torch:
+        torch_spec = env_torch if env_torch.startswith("torch") else f"torch=={env_torch}"
+    env_tv = os.getenv("ARGOS_TORCHVISION_SPEC", "").strip()
+    if env_tv:
+        tv_spec = env_tv if env_tv.startswith("torch") else f"torchvision=={env_tv}"
     return torch_spec, tv_spec
+
+
+_CUDA_RUNTIME_PACKAGES: tuple[str, ...] = (
+    "nvidia-cuda-runtime-cu12>=12.1.105",
+    "nvidia-cublas-cu12>=12.1.3.1",
+    "nvidia-cudnn-cu12>=9.1.0.70",
+    "nvidia-curand-cu12>=10.3.2.106",
+    "nvidia-cusolver-cu12>=11.4.5.107",
+    "nvidia-cusparse-cu12>=12.1.2.106",
+    "nvidia-cufft-cu12>=11.0.2.107",
+    "nvidia-nvjitlink-cu12>=12.3.101",
+)
+
+TorchInstallPlan = Tuple[List[str], str, Optional[List[str]], bool]
 
 def _ensure_numpy_floor_for_torch() -> None:
     """
@@ -264,61 +612,197 @@ def _ensure_numpy_floor_for_torch() -> None:
     else:
         spec = "numpy>=1.26,<2.0"
         note = "NumPy >=1.26,<2.0"
-    _print(f" ensuring {note} for Torch/Tv .")
+    _print(f"-> ensuring {note} for Torch/Tv .")
     _run([str(venv_python()), "-m", "pip", "install", "--upgrade", *_constraints_args(), spec], check=True, capture=False)
+
+
+def _ensure_cuda_runtime_packages() -> None:
+    accelerator = os.getenv("ARGOS_ACCELERATOR", "").strip().lower()
+    if not accelerator and _has_cuda():
+        accelerator = "cuda"
+    if accelerator != "cuda":
+        return
+    _print("-> ensuring CUDA runtime wheels …")
+    cmd = [
+        str(venv_python()),
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--only-binary=:all:",
+        *_constraints_args(),
+        *_CUDA_RUNTIME_PACKAGES,
+    ]
+    _run(cmd, check=True, capture=False)
 
 def _install_torch_if_needed(cpu_only: bool) -> None:
     """
-    Install Torch/Torchvision if missing with robust fallbacks:
-      1) Try requirement specs + constraints (with CPU index when cpu_only).
-      2) On failure, ensure NumPy floor and retry.
-      3) On failure, fall back to curated pairs (with +cpu local tags on CPU index).
-    """
-    if _module_present("torch") and _module_present("torchvision"):
-        return
+    Install Torch/Torchvision if missing with robust fallbacks.
 
+    Preference order:
+      1) Respect explicit specs from requirements/env (with accelerator-aware indexes).
+      2) Retry once NumPy floor is ensured.
+      3) Try curated accelerator-specific fallbacks (CUDA first when enabled).
+      4) Fall back to known CPU wheels so the environment remains usable.
+    """
     torch_spec, tv_spec = _torch_pins_from_requirements()
 
-    # Use CPU wheels index on Win/Linux when CPU-only; macOS uses default (MPS wheels).
+    accelerator = os.getenv("ARGOS_ACCELERATOR", "").strip().lower()
+    prefer_cuda = accelerator == "cuda" and not cpu_only
+    is_macos = sys.platform.startswith("darwin")
+
     vpy = str(venv_python())
     base_cmd = [vpy, "-m", "pip", "install"]
-    idx: list[str] = []
-    if cpu_only and (os.name == "nt" or sys.platform.startswith("linux")):
-        idx = ["--index-url", "https://download.pytorch.org/whl/cpu"]
 
-    def _try_install(pkgs: list[str], label: str) -> bool:
+    torch_present = _module_present("torch")
+    tv_present = _module_present("torchvision")
+    if torch_present and tv_present:
+        torch_meta = _collect_torch_metadata()
+        has_cuda_build = _torch_meta_has_cuda(torch_meta)
+        if prefer_cuda and not has_cuda_build:
+            _print("-> existing Torch build lacks CUDA; reinstalling with CUDA support .")
+            try:
+                _run([vpy, "-m", "pip", "uninstall", "-y", "torch", "torchvision"], check=False, capture=False)
+            except Exception:
+                pass
+            torch_present = False
+            tv_present = False
+        else:
+            return
+    elif torch_present or tv_present:
+        # Partial install; remove stale components so we can reinstall cleanly.
         try:
-            _print(f"→ installing Torch ({label}) …")
-            _run([*base_cmd, *idx, *_constraints_args(), *pkgs], check=True, capture=False)
+            _run([vpy, "-m", "pip", "uninstall", "-y", "torch", "torchvision"], check=False, capture=False)
+        except Exception:
+            pass
+        torch_present = tv_present = False
+
+    env_index = os.getenv("ARGOS_TORCH_INDEX_URL", "").strip()
+    env_extra_index = os.getenv("ARGOS_TORCH_EXTRA_INDEX_URL", "").strip()
+
+    primary_idx: List[str] = []
+    if env_index:
+        primary_idx.extend(["--index-url", env_index])
+    if env_extra_index:
+        primary_idx.extend(["--extra-index-url", env_extra_index])
+
+    if not primary_idx and prefer_cuda:
+        primary_idx = ["--index-url", "https://download.pytorch.org/whl/cu121", "--extra-index-url", "https://pypi.org/simple"]
+    if not primary_idx and cpu_only and (os.name == "nt" or sys.platform.startswith("linux")):
+        primary_idx = ["--index-url", "https://download.pytorch.org/whl/cpu"]
+
+    gpu_idx: List[str] = primary_idx if prefer_cuda else ["--index-url", "https://download.pytorch.org/whl/cu121", "--extra-index-url", "https://pypi.org/simple"]
+    cpu_idx: List[str] = [] if is_macos else ["--index-url", "https://download.pytorch.org/whl/cpu"]
+
+    def _effective_idx(override: Optional[List[str]]) -> List[str]:
+        if override is not None:
+            return override
+        return primary_idx
+
+    def _try_install(pkgs: List[str], label: str, idx_override: Optional[List[str]] = None) -> bool:
+        try:
+            _print(f"-> installing Torch ({label}) .")
+            cmd = [*base_cmd, *_effective_idx(idx_override), *_constraints_args(), *pkgs]
+            _run(cmd, check=True, capture=False)
             return True
         except Exception:
             return False
 
-    # 1) Requirements + constraints (preferred)
-    if _try_install([torch_spec, tv_spec], "requirements"):
-        return
+    attempted: Set[Tuple[str, str]] = set()
 
-    # 2) Add NumPy floor and retry
-    _ensure_numpy_floor_for_torch()
-    if _try_install([torch_spec, tv_spec], "requirements+numpy"):
-        return
+    def _run_sequence(sequence: Sequence[TorchInstallPlan]) -> bool:
+        for pkgs, label, idx_override, require_cuda in sequence:
+            key = (pkgs[0], pkgs[1] if len(pkgs) > 1 else "")
+            if key in attempted:
+                continue
+            attempted.add(key)
+            if not _try_install(pkgs, label, idx_override=idx_override):
+                continue
+            if require_cuda:
+                meta = _collect_torch_metadata()
+                if _torch_meta_has_cuda(meta):
+                    return True
+                _print("-> Torch installed without CUDA support; trying next CUDA candidate .")
+                try:
+                    _run([vpy, "-m", "pip", "uninstall", "-y", "torch", "torchvision"], check=False, capture=False)
+                except Exception:
+                    pass
+                continue
+            return True
+        return False
 
-    # 3) Curated fallback pairs
-    if cpu_only and (os.name == "nt" or sys.platform.startswith("linux")):
-        for pair in (["torch==2.4.1+cpu", "torchvision==0.19.1+cpu"],
-                     ["torch==2.5.1+cpu", "torchvision==0.20.1+cpu"]):
-            if _try_install(pair, f"fallback {'/'.join(pair)}"):
-                return
-    else:
-        for pair in (["torch==2.4.1", "torchvision==0.19.1"],
-                     ["torch==2.5.1", "torchvision==0.20.1"]):
-            if _try_install(pair, f"fallback {'/'.join(pair)}"):
-                return
+    has_gpu_capability = prefer_cuda or (_has_cuda() and not cpu_only)
+    if has_gpu_capability:
+        prefer_cuda = True
 
-    raise RuntimeError("Torch/Torchvision installation failed after multiple attempts.")
+    gpu_candidates: List[TorchInstallPlan] = []
+    if has_gpu_capability:
+        gpu_candidates.extend(
+            [
+                (["torch==2.5.1+cu121", "torchvision==0.20.1+cu121"], "fallback torch==2.5.1+cu121/torchvision==0.20.1+cu121", gpu_idx, True),
+                (["torch==2.4.1+cu121", "torchvision==0.19.1+cu121"], "fallback torch==2.4.1+cu121/torchvision==0.19.1+cu121", gpu_idx, True),
+            ]
+        )
+
+    installed = False
+    if gpu_candidates and _run_sequence(gpu_candidates):
+        installed = True
+
+    if not installed:
+        general_candidates: List[TorchInstallPlan] = [([torch_spec, tv_spec], "requirements", None, prefer_cuda)]
+        if _run_sequence(general_candidates):
+            installed = True
+
+    if not installed:
+        _ensure_numpy_floor_for_torch()
+        numpy_candidates: List[TorchInstallPlan] = [([torch_spec, tv_spec], "requirements+numpy", None, prefer_cuda)]
+        if _run_sequence(numpy_candidates):
+            installed = True
+
+    if not installed:
+        if is_macos:
+            cpu_pairs: Sequence[List[str]] = (
+                ["torch==2.4.1", "torchvision==0.19.1"],
+                ["torch==2.5.1", "torchvision==0.20.1"],
+            )
+        else:
+            cpu_pairs = (
+                ["torch==2.4.1+cpu", "torchvision==0.19.1+cpu"],
+                ["torch==2.5.1+cpu", "torchvision==0.20.1+cpu"],
+            )
+        cpu_candidates: List[TorchInstallPlan] = [
+            (pair, f"fallback {'/'.join(pair)}", cpu_idx, False) for pair in cpu_pairs
+        ]
+        if _run_sequence(cpu_candidates):
+            installed = True
+
+    if not installed:
+        raise RuntimeError("Torch/Torchvision installation failed after multiple attempts.")
+
+    torch_meta = _collect_torch_metadata()
+    torch_installed = bool(torch_meta.get("installed"))
+    if torch_installed:
+        torch_version_obj = torch_meta.get("version")
+        torch_version = str(torch_version_obj) if isinstance(torch_version_obj, str) else ""
+        if torch_version:
+            audio_meta = _collect_torchaudio_metadata()
+            audio_version_obj = audio_meta.get("version")
+            audio_version = str(audio_version_obj) if isinstance(audio_version_obj, str) else ""
+            if audio_version != torch_version:
+                spec = f"torchaudio=={torch_version}"
+                index_override: Optional[List[str]]
+                if "+cu" in torch_version:
+                    index_override = gpu_idx
+                elif "+cpu" in torch_version:
+                    index_override = cpu_idx
+                else:
+                    index_override = None
+                _try_install([spec], f"align torchaudio {torch_version}", idx_override=index_override)
+
+    return
 
 def _ensure_opencv_gui() -> None:
-    _print("\x1a ensuring OpenCV (GUI-capable) .")
+    _print("-> ensuring OpenCV (GUI-capable) .")
     uninstall_targets = [
         pkg for pkg in ("opencv-python-headless", "opencv-contrib-python-headless")
         if _has_distribution(pkg)
@@ -564,6 +1048,35 @@ def ensure_onnxruntime(
     attempts: list[dict[str, object]] = summary["attempts"]  # type: ignore[assignment]
     ort_spec = desired_ort_spec()
     summary["spec"] = ort_spec
+    accelerator_hint = os.getenv("ARGOS_ACCELERATOR", "").strip().lower()
+    summary["accelerator"] = accelerator_hint or None
+
+    def providers_match_expectation(providers: Optional[object]) -> bool:
+        if accelerator_hint not in {"cuda", "directml", "tensorrt"}:
+            return True
+        if not providers:
+            return False
+        if isinstance(providers, Sequence) and not isinstance(providers, (str, bytes)):
+            provider_items: Sequence[Any] = cast(Sequence[Any], providers)
+        else:
+            provider_items = (providers,)
+        lowered = [str(p).lower() for p in provider_items]
+        if accelerator_hint == "cuda":
+            return any("cuda" in p for p in lowered)
+        if accelerator_hint == "directml":
+            return any("directml" in p or "dml" in p for p in lowered)
+        if accelerator_hint == "tensorrt":
+            return any("tensorrt" in p for p in lowered)
+        return True
+
+    def expected_provider_label() -> Optional[str]:
+        if accelerator_hint == "cuda":
+            return "CUDAExecutionProvider"
+        if accelerator_hint == "directml":
+            return "DmlExecutionProvider"
+        if accelerator_hint == "tensorrt":
+            return "TensorrtExecutionProvider"
+        return None
 
     def record(action: str, info: Optional[dict[str, object]] = None) -> None:
         entry: dict[str, object] = {"action": action}
@@ -625,16 +1138,37 @@ def ensure_onnxruntime(
         summary["onnx_version"] = data.get("onnx_version")
         summary["providers"] = data.get("providers")
         summary["error"] = None
+        summary["providers_ok"] = providers_match_expectation(data.get("providers"))
         os.environ.pop("ARGOS_DISABLE_ONNX", None)
         log(f"-> onnxruntime ready (v{data.get('version') or '?'}, providers={data.get('providers') or []})")
+        providers_raw = data.get("providers")
+        if isinstance(providers_raw, Sequence) and not isinstance(providers_raw, (str, bytes)):
+            providers_seq: Sequence[Any] = cast(Sequence[Any], providers_raw)
+        elif providers_raw is None:
+            providers_seq = ()
+        else:
+            providers_seq = (providers_raw,)
+        providers_list = [str(p) for p in providers_seq]
+        if accelerator_hint == "cuda" and summary["providers_ok"]:
+            log(f"-> CUDA execution provider active (providers={providers_list})")
+        elif accelerator_hint == "directml" and summary["providers_ok"]:
+            log(f"-> DirectML execution provider active (providers={providers_list})")
         return summary
 
-    if _probe_onnx_success(info):
+    if _probe_onnx_success(info) and providers_match_expectation(info.get("providers")):
         result = _succeed(info, healed=False)
         _last_onnx_summary = result
         return result
 
-    summary["error"] = info.get("error")
+    summary["providers"] = info.get("providers")
+    summary["providers_ok"] = providers_match_expectation(info.get("providers"))
+    if _probe_onnx_success(info) and not summary["providers_ok"] and accelerator_hint:
+        summary["error"] = f"onnxruntime missing expected {accelerator_hint} provider ({expected_provider_label() or accelerator_hint})"
+        log(
+            f"-> onnxruntime present but missing expected {accelerator_hint.upper()} provider; reinstalling {ort_spec}"
+        )
+    else:
+        summary["error"] = info.get("error")
     summary["onnx_version"] = info.get("onnx_version")
     performed_heal = False
 
@@ -655,10 +1189,12 @@ def ensure_onnxruntime(
         performed_heal = True
 
     info = run_probe("probe-after-pip")
-    if _probe_onnx_success(info):
+    if _probe_onnx_success(info) and providers_match_expectation(info.get("providers")):
         result = _succeed(info, healed=performed_heal)
         _last_onnx_summary = result
         return result
+    summary["providers"] = info.get("providers")
+    summary["providers_ok"] = providers_match_expectation(info.get("providers"))
 
     def _error_indicates_vcredist(error: Optional[object]) -> bool:
         if not error:
@@ -671,13 +1207,15 @@ def ensure_onnxruntime(
         return False
 
     reinstall_attempted = False
-    if uninstall_packages(["onnxruntime", "onnxruntime-gpu"], label="pip-uninstall-onnxruntime"):
+    if uninstall_packages(["onnxruntime", "onnxruntime-gpu", "onnxruntime-directml"], label="pip-uninstall-onnxruntime"):
         reinstall_attempted = True
         if install_packages([ort_spec], label="pip-onnxruntime-reinstall"):
             performed_heal = True
     if reinstall_attempted:
         info = run_probe("probe-after-reinstall")
-        if _probe_onnx_success(info):
+        summary["providers"] = info.get("providers")
+        summary["providers_ok"] = providers_match_expectation(info.get("providers"))
+        if _probe_onnx_success(info) and summary["providers_ok"]:
             result = _succeed(info, healed=True)
             _last_onnx_summary = result
             return result
@@ -697,12 +1235,19 @@ def ensure_onnxruntime(
                 if install_packages([ort_spec], label="pip-onnxruntime-postvcredist"):
                     performed_heal = True
                 info = run_probe("probe-after-vcredist")
-                if _probe_onnx_success(info):
+                summary["providers"] = info.get("providers")
+                summary["providers_ok"] = providers_match_expectation(info.get("providers"))
+                if _probe_onnx_success(info) and summary["providers_ok"]:
                     result = _succeed(info, healed=True)
                     _last_onnx_summary = result
                     return result
 
-    summary["error"] = info.get("error")
+    if summary.get("providers_ok") is False and accelerator_hint:
+        summary["error"] = summary.get("error") or (
+            f"onnxruntime missing expected {accelerator_hint} provider ({expected_provider_label() or accelerator_hint})"
+        )
+    else:
+        summary["error"] = info.get("error")
     summary["providers"] = info.get("providers")
     summary["healed"] = performed_heal and summary["installed"]
 
@@ -855,7 +1400,8 @@ def _ensure_weights_ultralytics(*, preset: Optional[str] = None, explicit_names:
 
     live_small_names: list[str] = []
     for key in ("detect_small", "heatmap_small"):
-        for p in _BOOTSTRAP_WEIGHT_PRIORITY.get(key, []):
+        seq = cast(Sequence[Path], _BOOTSTRAP_WEIGHT_PRIORITY.get(key, []))
+        for p in seq:
             path_obj = Path(p)
             if path_obj.suffix.lower() == ".onnx":
                 live_small_names.append(path_obj.name)
@@ -993,16 +1539,133 @@ def _move_pytest_cache_out_of_repo() -> None:
         )
 
 def _ensure_sitecustomize() -> None:
-    pyver = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    sp = VENV / ("Lib" if os.name == "nt" else "lib") / pyver / "site-packages"
+    sp = _site_packages_root()
     sc = sp / "sitecustomize.py"
-    if not sc.exists():
-        sp.mkdir(parents=True, exist_ok=True)
-        sc.write_text(
-            "import os\n"
-            f"os.environ.setdefault('PYTHONPYCACHEPREFIX', r'{(DATA / 'pycache')}'.replace('\\\\','/'))\n",
-            encoding="utf-8",
-        )
+    sp.mkdir(parents=True, exist_ok=True)
+    pycache_dir = (DATA / "pycache").resolve()
+    content = textwrap.dedent(
+        f"""\
+        import json
+        import os
+        from pathlib import Path
+
+        _CAPS_PATH = Path({repr(str(CAPABILITIES_FILE))})
+        _CUDA_STATE_DIR = Path({repr(str(CUDA_STATE_DIR))})
+        _TRUTHY = {{'1', 'true', 'yes', 'on'}}
+
+
+        def _is_truthy(value: str) -> bool:
+            return value.strip().lower() in _TRUTHY
+
+
+        def _ensure_pycache_prefix() -> None:
+            target = {repr(str(pycache_dir))}
+            if target:
+                os.environ.setdefault("PYTHONPYCACHEPREFIX", target)
+
+
+        def _load_capabilities() -> dict[str, object]:
+            try:
+                if _CAPS_PATH.exists():
+                    data = json.loads(_CAPS_PATH.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                pass
+            return {{}}
+
+
+        def _preferred_accelerator(capabilities: dict[str, object]) -> str:
+            env_hint = os.environ.get("ARGOS_ACCELERATOR", "").strip().lower()
+            if env_hint:
+                return env_hint
+            pref = capabilities.get("preferred_accelerator")
+            if isinstance(pref, str):
+                return pref.strip().lower()
+            return ""
+
+
+        def _extend_cuda_paths(capabilities: dict[str, object]) -> None:
+            candidate_dirs: list[str] = []
+            cuda_section = capabilities.get("cuda")
+            if isinstance(cuda_section, dict):
+                raw_dirs = cuda_section.get("dll_dirs")
+                if isinstance(raw_dirs, (list, tuple)):
+                    for entry in raw_dirs:
+                        if isinstance(entry, str) and entry:
+                            candidate_dirs.append(entry)
+            if not candidate_dirs:
+                base = Path(__file__).resolve().parent
+                search_roots = [base, _CUDA_STATE_DIR]
+                for root in search_roots:
+                    if not root.exists():
+                        continue
+                    patterns = ("nvidia/**/bin", "nvidia/**/lib") if root == base else ("**/bin", "**/lib")
+                    for pattern in patterns:
+                        try:
+                            for item in root.glob(pattern):
+                                try:
+                                    if item.is_dir():
+                                        candidate_dirs.append(str(item.resolve()))
+                                except Exception:
+                                    continue
+                        except Exception:
+                            continue
+            if not candidate_dirs:
+                return
+
+            def _merge_env_var(key: str, additions: list[str]) -> None:
+                if not key:
+                    return
+                current = os.environ.get(key, "")
+                existing = [p for p in current.split(os.pathsep) if p] if current else []
+                parts = additions + existing
+                seen: set[str] = set()
+                merged: list[str] = []
+                for part in parts:
+                    norm = os.path.normcase(part) if hasattr(os.path, "normcase") else part
+                    if norm in seen:
+                        continue
+                    seen.add(norm)
+                    merged.append(part)
+                os.environ[key] = os.pathsep.join(merged)
+
+            _merge_env_var("PATH", candidate_dirs)
+            if os.name != "nt":
+                _merge_env_var("LD_LIBRARY_PATH", candidate_dirs)
+
+
+        def _ensure_accelerator_env(capabilities: dict[str, object]) -> None:
+            if os.environ.get("ARGOS_ACCELERATOR"):
+                return
+            pref = capabilities.get("preferred_accelerator")
+            if isinstance(pref, str) and pref:
+                os.environ["ARGOS_ACCELERATOR"] = pref.strip().lower()
+            elif capabilities.get("cuda"):
+                # If CUDA metadata exists but no explicit preference, assume CUDA.
+                os.environ.setdefault("ARGOS_ACCELERATOR", "cuda")
+
+
+        def _ensure_tensorrt_default() -> None:
+            if os.environ.get("ORT_DISABLE_TENSORRT"):
+                return
+            if _is_truthy(os.environ.get("ARGOS_ENABLE_TENSORRT", "")):
+                return
+            os.environ["ORT_DISABLE_TENSORRT"] = "1"
+
+
+        _capabilities = _load_capabilities()
+        _ensure_accelerator_env(_capabilities)
+        _ensure_pycache_prefix()
+        _extend_cuda_paths(_capabilities)
+        _ensure_tensorrt_default()
+        """
+    )
+    if sc.exists():
+        existing = sc.read_text(encoding="utf-8")
+        if existing == content:
+            return
+    sc.write_text(content, encoding="utf-8")
 
 def _create_launchers() -> None:
     sh = HERE / "argos"
@@ -1192,6 +1855,7 @@ def _ensure(
     steps: list[tuple[str, Callable[[], None]]] = [
         ("Create venv", _create_venv),
         ("Install Torch", lambda: _install_torch_if_needed(cpu_only)),
+        ("Ensure CUDA runtime (wheels)", _ensure_cuda_runtime_packages),
         ("Ensure OpenCV (GUI)", _ensure_opencv_gui),
         (
             "Install Argos (editable)",
@@ -1201,11 +1865,13 @@ def _ensure(
                 extras=extras_tuple,
             ),
         ),
+        ("Sitecustomize (pycache & CUDA env)", _ensure_sitecustomize),
         (
             "Ensure ONNX Runtime",
             _ensure_onnx_runtime_packages,
         ),
         ("Align Torch deps", _ensure_sympy_alignment),
+        ("Record capabilities", _record_capabilities_step),
         (
             "Ensure weights",
             (lambda: None)
@@ -1213,7 +1879,6 @@ def _ensure(
             else (lambda: _ensure_weights_ultralytics(preset=preset, explicit_names=weight_names)),
         ),
         ("Move pytest cache", _move_pytest_cache_out_of_repo),
-        ("Sitecustomize (pycache outside)", _ensure_sitecustomize),
         ("pip check (soft)", _pip_check_soft),
     ]
 
@@ -1241,6 +1906,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--weights-preset", choices=["all", "default", "nano", "perception"], help="Preset for weights (overrides env)")
     p.add_argument("--reinstall", action="store_true", help="Force reinstall of Argos editable package")
     p.add_argument("--with-dev", action="store_true", help="Install Argos with [dev] extras as well")
+    p.add_argument("--print-capabilities", action="store_true", help="Print cached accelerator/runtime capabilities")
     p.add_argument(
         "--extras",
         help="Comma-separated Argos extras to install (e.g., audio,onnx-tools)",
@@ -1251,6 +1917,11 @@ def main(argv: list[str]) -> int:
 
     if args.print_venv:
         _print(str(venv_python()))
+        return 0
+
+    if getattr(args, "print_capabilities", False):
+        info = _refresh_capabilities_cache(log=False)
+        _print(json.dumps(info, indent=2, sort_keys=True))
         return 0
 
     cpu_only = bool(args.cpu_only or not _has_cuda())

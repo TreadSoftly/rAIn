@@ -18,9 +18,6 @@ $env:ARGOS_FORCE_PLAIN_PROGRESS = '1'
 $env:ARGOS_SKIP_WEIGHTS = '1'
 Remove-Item Env:ARGOS_ASSUME_YES -ErrorAction SilentlyContinue
 
-# Prefer CPU-only wheels for PyTorch in the exporter sandbox
-$env:ARGOS_TORCH_VERSION = '2.4.1'
-$env:ARGOS_TORCH_INDEX_URL = 'https://download.pytorch.org/whl/cpu'
 # Modern opset cascade for YOLOv8/11/12 exports
 $env:ARGOS_ONNX_OPSETS = '21 20 19 18 17'
 # Default export image size (can be overridden by user)
@@ -102,6 +99,154 @@ if (-not $OsIsWindows) {
     $OsIsMac = ($env:OSTYPE -like '*darwin*')
   }
 }
+
+# --- Accelerator / runtime preferences ---
+$torchVersionBase = '2.4.1'
+$torchVisionVersionBase = '0.19.1'
+$cudaSuffix = '+cu121'
+$cudaWheelIndex = 'https://download.pytorch.org/whl/cu121'
+$cpuWheelIndex = 'https://download.pytorch.org/whl/cpu'
+$defaultOrtSpec = if ($OsIsWindows) { 'onnxruntime>=1.22,<1.23' } elseif ($OsIsMac) { 'onnxruntime>=1.22,<1.24' } else { 'onnxruntime>=1.22,<1.24' }
+
+function Find-NvidiaSmiPath {
+  $candidates = @()
+  try {
+    $cmd = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) {
+      $candidates += $cmd.Source
+    }
+    elseif ($cmd -and $cmd.Path) {
+      $candidates += $cmd.Path
+    }
+  } catch {}
+
+  $windowsPaths = @()
+  if ($env:SystemRoot) {
+    $windowsPaths += (Join-Path $env:SystemRoot 'System32\nvidia-smi.exe')
+  }
+  if ($env:ProgramFiles) {
+    $windowsPaths += (Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe')
+  }
+  foreach ($p in $windowsPaths) {
+    if ($p -and (Test-Path -LiteralPath $p)) {
+      $candidates += $p
+    }
+  }
+
+  $linuxPaths = @(
+    '/usr/bin/nvidia-smi',
+    '/usr/local/bin/nvidia-smi',
+    '/bin/nvidia-smi'
+  )
+  foreach ($p in $linuxPaths) {
+    if ($p -and (Test-Path -LiteralPath $p)) {
+      $candidates += $p
+    }
+  }
+
+  $seen = @{}
+  foreach ($item in $candidates) {
+    if (-not $item) { continue }
+    $key = $item.ToLowerInvariant()
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+    return $item
+  }
+  return $null
+}
+
+$accelerator = 'cpu'
+$nvidiaSmiPath = Find-NvidiaSmiPath
+$nvidiaSmiValidated = $false
+if ($nvidiaSmiPath) {
+  try {
+    & $nvidiaSmiPath -L > $null 2>&1
+    $nvidiaSmiValidated = $true
+  } catch {
+    $nvidiaSmiValidated = $false
+  }
+}
+
+$videoControllers = $null
+if (-not $nvidiaSmiValidated -and $OsIsWindows) {
+  try {
+    $videoControllers = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
+  } catch { $videoControllers = $null }
+}
+
+if ($nvidiaSmiValidated) {
+  $accelerator = 'cuda'
+}
+elseif ($OsIsWindows -and $videoControllers) {
+  if ($videoControllers | Where-Object { $_.Name -match 'NVIDIA' }) {
+    $accelerator = 'cuda'
+  }
+  elseif ($videoControllers | Where-Object { $_.Name -match 'AMD|Radeon|Intel' }) {
+    $accelerator = 'directml'
+  }
+}
+elseif ($env:CUDA_VISIBLE_DEVICES -and $env:CUDA_VISIBLE_DEVICES.Trim() -ne '') {
+  $accelerator = 'cuda'
+}
+
+switch ($accelerator) {
+  'cuda' {
+    $env:ARGOS_ACCELERATOR = 'cuda'
+    $env:ARGOS_TORCH_SPEC = "torch==$torchVersionBase$cudaSuffix"
+    $env:ARGOS_TORCHVISION_SPEC = "torchvision==$torchVisionVersionBase$cudaSuffix"
+    $env:ARGOS_TORCH_INDEX_URL = $cudaWheelIndex
+    $env:ARGOS_TORCH_EXTRA_INDEX_URL = 'https://pypi.org/simple'
+    $env:ARGOS_ONNXRUNTIME_SPEC = 'onnxruntime-gpu>=1.22,<1.23'
+  }
+  'directml' {
+    $env:ARGOS_ACCELERATOR = 'directml'
+    $env:ARGOS_TORCH_SPEC = "torch==$torchVersionBase+cpu"
+    $env:ARGOS_TORCHVISION_SPEC = "torchvision==$torchVisionVersionBase+cpu"
+    $env:ARGOS_TORCH_INDEX_URL = $cpuWheelIndex
+    Remove-Item Env:ARGOS_TORCH_EXTRA_INDEX_URL -ErrorAction SilentlyContinue
+    $env:ARGOS_ONNXRUNTIME_SPEC = 'onnxruntime-directml>=1.22,<1.23'
+  }
+  Default {
+    $env:ARGOS_ACCELERATOR = 'cpu'
+    if ($OsIsMac) {
+      $env:ARGOS_TORCH_SPEC = "torch==$torchVersionBase"
+      $env:ARGOS_TORCHVISION_SPEC = "torchvision==$torchVisionVersionBase"
+      Remove-Item Env:ARGOS_TORCH_INDEX_URL -ErrorAction SilentlyContinue
+    }
+    else {
+      $env:ARGOS_TORCH_SPEC = "torch==$torchVersionBase+cpu"
+      $env:ARGOS_TORCHVISION_SPEC = "torchvision==$torchVisionVersionBase+cpu"
+      $env:ARGOS_TORCH_INDEX_URL = $cpuWheelIndex
+    }
+    Remove-Item Env:ARGOS_TORCH_EXTRA_INDEX_URL -ErrorAction SilentlyContinue
+    $env:ARGOS_ONNXRUNTIME_SPEC = $defaultOrtSpec
+  }
+}
+
+function Format-ControllerNames {
+  param([Parameter()][object[]]$Controllers)
+  if (-not $Controllers) { return @() }
+  $names = @()
+  foreach ($item in $Controllers) {
+    try {
+      if ($item -and $item.Name) {
+        $names += [string]$item.Name
+      }
+    } catch {}
+  }
+  return $names
+}
+
+$controllerNames = Format-ControllerNames -Controllers $videoControllers
+$nvidiaStatus = if ($nvidiaSmiValidated) { 'validated' } elseif ($nvidiaSmiPath) { 'present' } else { 'missing' }
+$cudaVisible = ''
+if ($env:CUDA_VISIBLE_DEVICES) {
+  $cudaVisible = $env:CUDA_VISIBLE_DEVICES
+}
+Write-Host ("- Accelerator probe: {0} (nvidia-smi={1}; controllers={2}; CUDA_VISIBLE_DEVICES={3})" -f `
+  $accelerator.ToUpperInvariant(), $nvidiaStatus, `
+  ($controllerNames -join ', '), `
+  $cudaVisible) -ForegroundColor DarkCyan
 
 # --- Python ensure (auto-install if needed) ---
 $script:pyExe = $null

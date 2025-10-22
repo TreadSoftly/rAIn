@@ -64,7 +64,8 @@ def test_ort_available_failure(monkeypatch: MonkeyPatch) -> None:
 def test_desired_ort_spec_matches_packaging() -> None:
     spec = desired_ort_spec()
     if sys.version_info >= (3, 10):
-        expected = "onnxruntime>=1.22,<1.23" if platform.system() == "Windows" else "onnxruntime>=1.22,<1.24"
+        expected_cpu = "onnxruntime>=1.22,<1.23" if platform.system() == "Windows" else "onnxruntime>=1.22,<1.24"
     else:
-        expected = "onnxruntime==1.19.2"
-    assert spec == expected
+        expected_cpu = "onnxruntime==1.19.2"
+    expected_gpu = expected_cpu.replace("onnxruntime", "onnxruntime-gpu")
+    assert spec in {expected_cpu, expected_gpu}

@@ -14,6 +14,7 @@ except Exception:
     setattr(_argos_typing_mod, "Self", _ArgosTypingSelf)
 
 import fnmatch
+import json
 import logging
 import os
 import re
@@ -26,7 +27,7 @@ import warnings
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Final, Iterable, Iterator, List, Literal, Optional, Protocol, cast
+from typing import Any, Callable, Dict, Final, Iterable, Iterator, List, Literal, Mapping, Optional, Protocol, Sequence, Tuple, cast
 from dataclasses import dataclass
 
 # Force nested progress off for all offline CLI commands before any internal modules import.
@@ -42,11 +43,12 @@ try:
 except Exception:
     pass
 
-import typer # type: ignore[import]
+import typer  # type: ignore[import]
 
-from panoptes.logging_config import bind_context, setup_logging # type: ignore[import]
-from .ffmpeg_utils import resolve_ffmpeg # type: ignore[import]
-from .support_bundle import write_support_bundle # type: ignore[import]
+from panoptes.logging_config import bind_context, setup_logging  # type: ignore[import]
+from panoptes.runtime import backend_probe  # type: ignore[import]
+from .ffmpeg_utils import resolve_ffmpeg  # type: ignore[import]
+from .support_bundle import write_support_bundle  # type: ignore[import]
 
 setup_logging()
 LOGGER = logging.getLogger(__name__)
@@ -184,6 +186,27 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if val is None:
         return default
     return val.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_caps_object(obj: object) -> Dict[str, Any]:
+    if isinstance(obj, Mapping):
+        mapping_view = cast(Mapping[Any, Any], obj)
+        result: Dict[str, Any] = {}
+        for key_obj, value in mapping_view.items():
+            key_str = key_obj if isinstance(key_obj, str) else str(key_obj)
+            result[key_str] = value
+        return result
+    return {}
+
+
+def _tuple_of_strings(value: object) -> Tuple[str, ...]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        seq = cast(Sequence[Any], value)
+        items: List[str] = []
+        for item in seq:
+            items.append(str(item))
+        return tuple(items)
+    return ()
 
 
 # ────────────────────────────────────────────────────────────
@@ -1157,6 +1180,69 @@ def _snapshot_results(bases: Optional[list[Path]] = None) -> set[Path]:
 # ────────────────────────────────────────────────────────────
 #  command
 # ────────────────────────────────────────────────────────────
+@app.command("diagnostics")
+def diagnostics_command(
+    section: str = typer.Argument("gpu", help="Which diagnostics block to display (gpu)"),
+    *,
+    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON capability payload."),
+) -> None:
+    """
+    Display cached capability information (accelerator detection, providers, runtime DLLs).
+    """
+    section_lower = section.strip().lower()
+    if section_lower not in {"gpu", "accelerator", "hardware"}:
+        raise typer.BadParameter(f"Unsupported diagnostics topic: {section}")
+
+    caps_obj = backend_probe._get_capabilities()  # type: ignore[attr-defined]
+    bootstrap_mod = getattr(backend_probe, "_BOOTSTRAP", None)
+    if (not caps_obj) and bootstrap_mod is not None and hasattr(bootstrap_mod, "_refresh_capabilities_cache"):
+        try:
+            caps_obj = bootstrap_mod._refresh_capabilities_cache(log=False)  # type: ignore[attr-defined]
+        except Exception:
+            caps_obj = None
+
+    caps_dict = _normalize_caps_object(caps_obj)
+
+    if as_json:
+        typer.echo(json.dumps(caps_dict, indent=2, sort_keys=True))
+        return
+
+    preferred_value = caps_dict.get("preferred_accelerator")
+    preferred = preferred_value if isinstance(preferred_value, str) else "unknown"
+    typer.echo(f"Preferred accelerator : {preferred}")
+
+    torch_meta = _normalize_caps_object(caps_dict.get("torch"))
+    if torch_meta:
+        torch_version = str(torch_meta.get("version") or "unknown")
+        cuda_version = str(torch_meta.get("cuda_version") or "n/a")
+        cuda_available = "yes" if bool(torch_meta.get("cuda_available")) else "no"
+        typer.echo(f"Torch             ver : {torch_version}")
+        typer.echo(f"Torch CUDA version    : {cuda_version} (cuda_available={cuda_available})")
+
+    ort_meta = _normalize_caps_object(caps_dict.get("onnxruntime"))
+    if ort_meta:
+        ort_version = str(ort_meta.get("version") or "unknown")
+        providers = ", ".join(_tuple_of_strings(ort_meta.get("providers")))
+        typer.echo(f"ONNX Runtime ver : {ort_version}")
+        typer.echo(f"ONNX providers   : {providers or 'n/a'}")
+
+    cuda_meta = _normalize_caps_object(caps_dict.get("cuda"))
+    if cuda_meta:
+        missing_tuple = tuple(s for s in _tuple_of_strings(cuda_meta.get("missing_dlls")) if s)
+        if missing_tuple:
+            typer.echo("Missing CUDA DLLs : " + ", ".join(missing_tuple))
+        else:
+            typer.echo("Missing CUDA DLLs : none detected")
+
+    caps_path_obj: Optional[object] = None
+    if bootstrap_mod is not None:
+        caps_path_obj = getattr(bootstrap_mod, "CAPABILITIES_FILE", None)
+    if isinstance(caps_path_obj, Path):
+        typer.echo(f"Capabilities cache : {caps_path_obj}")
+    elif isinstance(caps_path_obj, str) and caps_path_obj:
+        typer.echo(f"Capabilities cache : {caps_path_obj}")
+
+
 @app.command()
 def target(  # noqa: C901
     inputs: List[str] = typer.Argument(..., metavar="INPUT [d|hm|gj|clf|pose|obb|FLAGS|help|man]"),
@@ -1682,11 +1768,38 @@ def target(  # noqa: C901
 # ────────────────────────────────────────────────────────────
 #  entry-point glue
 # ────────────────────────────────────────────────────────────
+def _normalize_command_alias() -> None:
+    """Rewrite legacy console-script aliases (d/hm/etc.) to the Typer command."""
+    if len(sys.argv) <= 1:
+        return
+
+    first = sys.argv[1]
+    if not first:
+        return
+
+    lowered = first.lower()
+    if lowered in {"target", "diagnostics"} or lowered in _HELP_NAMES:
+        return
+
+    alias_target = _ALIAS.get(lowered)
+    if alias_target is not None:
+        sys.argv = [sys.argv[0], "target", first, *sys.argv[2:]]
+        return
+
+    if lowered == "all":
+        sys.argv = [sys.argv[0], "target", first, *sys.argv[2:]]
+        return
+
+    if not first.startswith("-"):
+        sys.argv = [sys.argv[0], "target", *sys.argv[1:]]
+
+
 def _prepend_argv(token: str) -> None:
     sys.argv = sys.argv[:1] + [token] + sys.argv[1:]
 
 def main() -> None:  # pragma: no cover
     try:
+        _normalize_command_alias()
         app()
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("cli.run.error", exc_info=True)

@@ -38,6 +38,19 @@ from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, 
 from pathlib import Path
 from contextlib import contextmanager
 import logging
+import os
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _tensorrt_disabled() -> bool:
+    return os.environ.get("ORT_DISABLE_TENSORRT", "").strip().lower() in _TRUTHY
+
+
+def _filter_providers(providers: Sequence[str]) -> List[str]:
+    if _tensorrt_disabled():
+        return [p for p in providers if "tensorrt" not in p.lower()]
+    return list(providers)
 import math
 import time
 import warnings
@@ -338,7 +351,8 @@ def _get_ort_nms_session() -> Optional[ORTInferenceSessionType]:
             model.ir_version = 7  # type: ignore[attr-defined]
         session_options: Any = _ort.SessionOptions()  # type: ignore[attr-defined]
         session_options.log_severity_level = 3  # type: ignore[attr-defined]
-        providers = list(cast(Sequence[str], _ort.get_available_providers()))  # type: ignore[attr-defined]
+        raw_providers = cast(Sequence[str], _ort.get_available_providers())  # type: ignore[attr-defined]
+        providers = _filter_providers(raw_providers)
         _ort_nms_session = _ort.InferenceSession(  # type: ignore[attr-defined]
             model.SerializeToString(),
             sess_options=session_options,
@@ -375,24 +389,37 @@ def _preferred_backend_order(preference: str) -> List[str]:
     providers_l = [p.lower() for p in (providers or [])]
     has_cuda = any("cuda" in p for p in providers_l)
     has_dml = any("dml" in p or "directml" in p for p in providers_l)
+    disable_tensorrt = os.environ.get("ORT_DISABLE_TENSORRT", "").strip().lower() in _TRUTHY
 
     order: List[str]
     if pref == "tensorrt":
-        order = ["tensorrt", "onnx", "torch"]
+        if disable_tensorrt:
+            order = ["onnx", "torch"]
+        else:
+            order = ["tensorrt", "onnx", "torch"]
     elif pref == "ort":
-        order = ["onnx", "tensorrt", "torch"]
+        order = ["onnx"]
+        if not disable_tensorrt:
+            order.append("tensorrt")
+        order.append("torch")
     elif pref == "torch":
-        order = ["torch", "onnx", "tensorrt"]
+        order = ["torch", "onnx"]
+        if not disable_tensorrt:
+            order.append("tensorrt")
     else:
-        order = ["tensorrt"]
+        order = []
+        if not disable_tensorrt:
+            order.append("tensorrt")
         if ort_ok:
-            order.append("onnx")
             if has_cuda or has_dml:
                 order.append("onnx-gpu")
+            order.append("onnx")
         order.append("torch")
 
     # Add defaults to guarantee coverage
-    base = ["tensorrt", "onnx", "onnx-gpu", "torch"]
+    base: List[str] = ["onnx-gpu", "onnx", "torch"]
+    if not disable_tensorrt:
+        base.insert(0, "tensorrt")
     seen: set[str] = set()
     final: List[str] = []
     for item in order + base:

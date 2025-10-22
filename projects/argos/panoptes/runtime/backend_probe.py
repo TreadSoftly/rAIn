@@ -14,7 +14,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional, Tuple, Iterable, Sequence, Callable, cast
+from typing import Any, Dict, Optional, Tuple, Iterable, Sequence, Callable, cast
 
 import importlib.util as importlib_util
 
@@ -40,6 +40,23 @@ def _load_bootstrap_module() -> Optional[Any]:
 
 
 _BOOTSTRAP = _load_bootstrap_module()
+_cap_cache: Optional[Dict[str, Any]] = None
+
+
+def _get_capabilities() -> Optional[Dict[str, Any]]:
+    global _cap_cache
+    if _cap_cache is not None:
+        return _cap_cache
+    if _BOOTSTRAP is None or not hasattr(_BOOTSTRAP, "read_capabilities"):
+        return None
+    try:
+        data = _BOOTSTRAP.read_capabilities()  # type: ignore[call-arg]
+        if isinstance(data, dict):
+            _cap_cache = cast(Dict[str, Any], data)
+            return _cap_cache
+    except Exception:
+        LOG.exception("capabilities.read_failed")
+    return None
 
 
 def _heal_lock_path() -> Path:
@@ -89,6 +106,36 @@ def _try_import_ort() -> Tuple[bool, Optional[str], Optional[list[str]], Optiona
     return True, version, providers, None
 
 
+def _log_ort_status(
+    ok: bool,
+    version: Optional[str],
+    providers: Optional[Sequence[str]],
+    reason: Optional[str],
+    accelerator_hint: str,
+) -> None:
+    providers_list = list(providers or [])
+    if ok:
+        if LOG.isEnabledFor(logging.INFO):
+            LOG.info("onnxruntime available (v%s, providers=%s)", version or "?", providers_list)
+        if accelerator_hint in {"cuda", "directml", "tensorrt"}:
+            lowered = [p.lower() for p in providers_list]
+            expected = False
+            if accelerator_hint == "cuda":
+                expected = any("cuda" in p for p in lowered)
+            elif accelerator_hint == "directml":
+                expected = any("dml" in p or "directml" in p for p in lowered)
+            elif accelerator_hint == "tensorrt":
+                expected = any("tensorrt" in p for p in lowered)
+            if not expected:
+                LOG.error(
+                    "onnxruntime providers missing expected accelerator (wanted %s, providers=%s)",
+                    accelerator_hint,
+                    providers_list,
+                )
+    else:
+        LOG.error("onnxruntime unavailable: %s", reason or "unknown")
+
+
 def torch_available() -> bool:
     """Return True if ``torch`` can be imported."""
     try:
@@ -104,8 +151,19 @@ def ort_available() -> Tuple[bool, Optional[str], Optional[list[str]], Optional[
     if os.environ.get("ARGOS_DISABLE_ONNX"):
         return False, None, None, "disabled via ARGOS_DISABLE_ONNX"
 
+    accelerator_hint = os.environ.get("ARGOS_ACCELERATOR", "").strip().lower()
+    if not accelerator_hint:
+        caps = _get_capabilities()
+        if caps:
+            pref = caps.get("preferred_accelerator")
+            if isinstance(pref, str):
+                accelerator_hint = pref.strip().lower()
+            if accelerator_hint and not os.environ.get("ARGOS_ACCELERATOR"):
+                os.environ["ARGOS_ACCELERATOR"] = accelerator_hint
+
     ok, version, providers, reason = _try_import_ort()
     if ok:
+        _log_ort_status(True, version, providers, reason, accelerator_hint)
         return True, version, providers, reason
 
     heal_reason = reason
@@ -143,6 +201,7 @@ def ort_available() -> Tuple[bool, Optional[str], Optional[list[str]], Optional[
             if summary.get("installed"):
                 ok, version, providers, reason = _try_import_ort()
                 if ok:
+                    _log_ort_status(True, version, providers, reason, accelerator_hint)
                     return True, version, providers, reason
             heal_reason = summary.get("error") or heal_reason
             if summary.get("providers") and not providers:
@@ -150,4 +209,5 @@ def ort_available() -> Tuple[bool, Optional[str], Optional[list[str]], Optional[
             if summary.get("ort_version") and not version:
                 version = str(summary.get("ort_version"))
 
+    _log_ort_status(False, version, providers, heal_reason, accelerator_hint)
     return False, version, providers, heal_reason

@@ -27,6 +27,11 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     psutil = None
 
+try:
+    import onnxruntime as _ort  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    _ort = None  # type: ignore
+
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
 LOGGER.setLevel(logging.ERROR)
@@ -40,6 +45,48 @@ _ORT_CONFIG: Dict[str, Any] = {
 }
 _ORT_PATCH_LOCK = threading.Lock()
 _ort_patched = False
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _tensorrt_disabled() -> bool:
+    return os.environ.get("ORT_DISABLE_TENSORRT", "").strip().lower() in _TRUTHY
+
+
+def _filtered_available_providers() -> List[str]:
+    if _ort is None:
+        return []
+    try:
+        providers_raw = cast(Sequence[str], _ort.get_available_providers())  # type: ignore[attr-defined]
+        providers_list = list(providers_raw)
+    except Exception:
+        return []
+    if _tensorrt_disabled():
+        providers_list = [p for p in providers_list if "tensorrt" not in p.lower()]
+    return providers_list
+
+
+def _format_provider_label(name: str) -> str:
+    token = name.strip()
+    lowered = token.lower()
+    mapping = {
+        "cudaexecutionprovider": "CUDA",
+        "cudnnexecutionprovider": "CUDA",
+        "cpuexecutionprovider": "CPU",
+        "dmlexecutionprovider": "DirectML",
+        "directmlexecutionprovider": "DirectML",
+        "tensorrtexecutionprovider": "TensorRT",
+    }
+    if lowered in mapping:
+        return mapping[lowered]
+    if lowered.startswith("cuda:"):
+        return "CUDA" + token[len("cuda"):]
+    if lowered == "cuda":
+        return "CUDA"
+    if lowered == "cpu":
+        return "CPU"
+    return token
+
+
 ProviderConfig = Tuple[str, Dict[str, Any]]
 
 
@@ -105,6 +152,7 @@ class ResilientYOLO:
         self._failures: List[str] = []
         self._has_success: bool = False
         self._pending_notice: Optional[str] = None
+        self._providers: List[str] = []
         self._metadata_by_weight: Dict[str, Dict[str, object]] = {}
         self.set_candidate_metadata(metadata)
 
@@ -119,6 +167,10 @@ class ResilientYOLO:
     def weight_label(self) -> Optional[str]:
         return self._label
 
+    @property
+    def providers(self) -> List[str]:
+        return [_format_provider_label(p) for p in self._providers]
+
     def active_model(self) -> Optional[Any]:
         try:
             self._ensure_model()
@@ -129,7 +181,10 @@ class ResilientYOLO:
     def descriptor(self) -> str:
         label = self._label or "unknown"
         backend = (self._backend or "unknown").upper()
-        return f"{label} | {backend}"
+        provider_hint = ""
+        if self._providers:
+            provider_hint = f" ({_format_provider_label(self._providers[0])})"
+        return f"{label} | {backend}{provider_hint}"
 
     def active_weight_path(self) -> Optional[Path]:
         if 0 <= self._current_idx < len(self._candidates):
@@ -254,6 +309,24 @@ class ResilientYOLO:
                     continue
         return None
 
+    @staticmethod
+    def _providers_from_model(model: object) -> List[str]:
+        candidates: List[Any] = []
+        for attr in ("predictor", "model"):
+            candidate = getattr(model, attr, None)
+            if candidate is not None:
+                candidates.append(candidate)
+        for candidate in candidates:
+            for attr in ("session", "sess", "onnx_session"):
+                session = getattr(candidate, attr, None)
+                if session is None:
+                    continue
+                try:
+                    return list(session.get_providers())  # type: ignore[attr-defined]
+                except Exception:
+                    continue
+        return []
+
     def _switch_to(self, idx: int, weight: Path) -> None:
         model = self._instantiate(weight)
         previous_backend = self._backend
@@ -264,6 +337,13 @@ class ResilientYOLO:
         self._current_idx = idx
 
         device = self._device_of(model)
+        providers_used: List[str] = []
+        if self._backend == "onnxruntime":
+            providers_used = self._providers_from_model(model)
+        elif self._backend == "torch":
+            if device:
+                providers_used = [str(device)]
+        self._providers = [p for p in providers_used if p]
         LOGGER.debug(
             "weights.select.success task=%s weight=%s backend=%s device=%s",
             self._task,
@@ -346,6 +426,7 @@ class ResilientYOLO:
         self._model = None
         self._label = None
         self._backend = None
+        self._providers = []
         setattr(self, "_argos_prepared", False)
 
     def predict(self, frame: Any, **kwargs: Any) -> Any:
@@ -425,6 +506,7 @@ def configure_onnxruntime(
 
 def _apply_ort_patch() -> None:
     global _ort_patched
+    global _ort
     with _ORT_PATCH_LOCK:
         if _ort_patched:
             return
@@ -432,6 +514,7 @@ def _apply_ort_patch() -> None:
             import onnxruntime as ort_module  # type: ignore
         except Exception:
             return
+        _ort = ort_module  # type: ignore
         ort: Any = ort_module
         if getattr(ort, "_argos_patched", False):
             _ort_patched = True
@@ -443,8 +526,12 @@ def _apply_ort_patch() -> None:
             if value is None:
                 return None
             tuned: List[ProviderConfig] = []
+            disable_tensorrt = _tensorrt_disabled()
             for provider_candidate in value:
                 if isinstance(provider_candidate, str):
+                    name_lower = provider_candidate.lower()
+                    if disable_tensorrt and "tensorrt" in name_lower:
+                        continue
                     tuned.append((provider_candidate, {}))
                     continue
                 if isinstance(provider_candidate, SequenceABC) and not isinstance(provider_candidate, (bytes, str)):
@@ -463,6 +550,8 @@ def _apply_ort_patch() -> None:
                             for option_key, option_value in opts_mapping.items():
                                 opts[option_key] = option_value
                     lower = name_str.lower()
+                    if disable_tensorrt and "tensorrt" in lower:
+                        continue
                     arena_strategy = _ORT_CONFIG.get("arena_strategy")
                     if lower.startswith("cuda"):
                         if arena_strategy:
@@ -533,6 +622,11 @@ def _apply_ort_patch() -> None:
                 providers_input = list(providers_sequence)
             else:
                 providers_input = None
+
+            if providers_input is None and _tensorrt_disabled():
+                filtered_default = _filtered_available_providers()
+                if filtered_default:
+                    providers_input = filtered_default
 
             providers = _canonical_providers(providers_input)
             if sess_options_value is None:

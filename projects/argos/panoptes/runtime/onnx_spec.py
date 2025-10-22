@@ -8,6 +8,7 @@ pyproject/requirements.
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 
@@ -21,6 +22,9 @@ def desired_ort_spec() -> str:
     - Other platforms + Python >= 3.10 -> >=1.22,<1.24
     - Legacy Python (<3.10) falls back to the last supported LTS.
     """
+    env_override = os.getenv("ARGOS_ONNXRUNTIME_SPEC", "").strip()
+    if env_override:
+        return env_override
     if sys.version_info >= (3, 10):
         if platform.system() == "Windows":
             return "onnxruntime>=1.22,<1.23"
