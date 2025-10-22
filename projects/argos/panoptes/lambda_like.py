@@ -10,7 +10,7 @@ import sys
 import urllib.request
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, Protocol, Union
+from typing import Any, Callable, Literal, Optional, Protocol, TextIO, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -21,14 +21,12 @@ from .heatmap import heatmap_overlay
 from .model_registry import load_detector, load_segmenter
 
 _LOG = logging.getLogger("panoptes.lambda_like")
-if not _LOG.handlers:
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(h)
-_LOG.setLevel(logging.WARNING)
+_LOG.addHandler(logging.NullHandler())
+_LOG.setLevel(logging.ERROR)
 
 def _say(msg: str) -> None:
-    _LOG.info(f"[panoptes] {msg}")
+    if _LOG.isEnabledFor(logging.DEBUG):
+        _LOG.debug("[panoptes] %s", msg)
 
 def set_log_level(level: int) -> None:
     _LOG.setLevel(level)
@@ -125,12 +123,11 @@ def run_inference(
 
     boxes_data = res.boxes.data  # type: ignore
     try:
-        import torch  # type: ignore
         if hasattr(boxes_data, "cpu"):
-            boxes_arr = boxes_data.cpu().numpy().astype(np.float32)  # type: ignore
+            boxes_arr = boxes_data.cpu().numpy().astype(np.float32)  # type: ignore[attr-defined]
         else:
             boxes_arr = np.asarray(boxes_data, dtype=np.float32)
-    except ImportError:           # pragma: no cover
+    except Exception:
         boxes_arr = np.asarray(boxes_data, dtype=np.float32)
 
     return boxes_arr.reshape(-1, 6) if boxes_arr.size else np.empty((0, 6), dtype=np.float32)
@@ -149,7 +146,7 @@ def _silence_stdio(enabled: bool):
     if not enabled:
         yield
         return
-    devnull = open(os.devnull, "w", buffering=1, encoding="utf-8", errors="ignore")
+    devnull: TextIO = open(os.devnull, "w", buffering=1, encoding="utf-8", errors="ignore")
     try:
         with redirect_stdout(devnull), redirect_stderr(devnull):
             yield
@@ -165,22 +162,18 @@ class SpinnerLike(Protocol):
 
 
 def _update_job(progress: Optional[SpinnerLike], text: str) -> None:
-    """
-    Update the single parent Halo/Rich spinner's JOB field.
-    We never create our own progress UI. If a caller passes a spinner that
-    does not implement `job=`, we fall back to `current=` just so text
-    is not lost (no new UI is created).
-    """
+    """Update the shared spinner's job field (fallback to legacy current=...)."""
     if progress is None:
         return
     try:
-        progress.update(job=text)
-    except Exception:
+        progress.update(job=str(text))
+    except TypeError:
         try:
-            progress.update(current=text)
+            progress.update(current=str(text))
         except Exception:
-            # Never raise here; progress is purely cosmetic.
             pass
+    except Exception:
+        pass
 
 
 def run_single(  # noqa: C901

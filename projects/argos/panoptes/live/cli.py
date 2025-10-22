@@ -37,35 +37,32 @@ setup_logging()
 # Silence noisy FutureWarnings emitted by onnxscript when loading YOLO models.
 warnings.filterwarnings("ignore", category=FutureWarning, module=r"onnxscript(\.|$)")
 LOGGER = logging.getLogger(__name__)
-TRACE_LIVE_CLI = os.getenv("PANOPTES_LIVE_TRACE_CLI", "").strip().lower() in {"1", "true", "yes"}
-LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
-ESSENTIAL_CLI_EVENTS = {
-    "live.cli.start",
-    "live.cli.selection",
-    "live.cli.cameras",
-    "live.cli.tokens",
-    "live.capabilities",
-}
-BASIC_KEYS = ("task", "source", "tokens", "error", "reason")
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.setLevel(logging.ERROR)
+_ERROR_TOKENS = ("error", "fail", "failed", "exception", "warning")
+_ERROR_KEYS = ("error", "reason", "status")
 
 
 def _log_event(event: str, **info: object) -> None:
-    if not LOGGER.isEnabledFor(logging.INFO):
+    event_lower = event.lower()
+    should_emit = any(token in event_lower for token in _ERROR_TOKENS)
+    if not should_emit:
+        for key in _ERROR_KEYS:
+            value = info.get(key)
+            if isinstance(value, str):
+                if value and value.strip().lower() not in {"ok", "success"}:
+                    should_emit = True
+                    break
+            elif value not in (None, 0, False):
+                should_emit = True
+                break
+    if not should_emit:
         return
-    if not TRACE_LIVE_CLI and event not in ESSENTIAL_CLI_EVENTS:
-        return
-    if info:
-        if TRACE_LIVE_CLI or LOG_DETAIL:
-            detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        else:
-            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
-            detail = " ".join(detail_parts)
-        if detail:
-            LOGGER.info("%s %s", event, detail)
-        else:
-            LOGGER.info(event)
+    detail = " ".join(f"{key}={info[key]}" for key in sorted(info) if info[key] is not None)
+    if detail:
+        LOGGER.error("%s %s", event, detail)
     else:
-        LOGGER.info(event)
+        LOGGER.error("%s", event)
 
 from .pipeline import LivePipeline # noqa: E402
 from . import tasks as live_tasks  # noqa: E402
@@ -76,7 +73,7 @@ os.environ.setdefault("PANOPTES_PROGRESS_TAIL", "none")          # hide [DONE] [
 os.environ.setdefault("PANOPTES_PROGRESS_FINAL_NEWLINE", "0")    # keep line anchored
 os.environ.setdefault("PANOPTES_NESTED_PROGRESS", "0")           # avoid nested spinners under live
 os.environ.setdefault("OPENCV_VIDEOIO_ENABLE_OBSENSOR", "0")     # silence obsensor backend noise
-TRACE_DISCOVERY = os.getenv("PANOPTES_LIVE_TRACE_DISCOVERY", "").strip().lower() in {"1", "true", "yes"}
+TRACE_DISCOVERY = False
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich")
 

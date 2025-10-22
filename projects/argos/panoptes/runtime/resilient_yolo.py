@@ -28,6 +28,8 @@ except Exception:  # pragma: no cover - optional dependency
     psutil = None
 
 LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.setLevel(logging.ERROR)
 
 _ORT_CONFIG: Dict[str, Any] = {
     "threads": None,
@@ -224,7 +226,7 @@ class ResilientYOLO:
         from ultralytics import YOLO  # type: ignore
 
         backend = _detect_backend(weight)
-        LOGGER.info(
+        LOGGER.debug(
             "weights.select.try task=%s weight=%s backend=%s",
             self._task,
             weight,
@@ -262,7 +264,7 @@ class ResilientYOLO:
         self._current_idx = idx
 
         device = self._device_of(model)
-        LOGGER.info(
+        LOGGER.debug(
             "weights.select.success task=%s weight=%s backend=%s device=%s",
             self._task,
             weight,
@@ -271,7 +273,7 @@ class ResilientYOLO:
         )
         event = "live.model.selected" if not self._has_success else "live.model.switched"
         self._has_success = True
-        LOGGER.info(
+        LOGGER.debug(
             "%s task=%s weight=%s backend=%s device=%s",
             event,
             self._task,

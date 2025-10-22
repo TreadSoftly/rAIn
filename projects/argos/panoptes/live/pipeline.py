@@ -36,37 +36,33 @@ except Exception:  # pragma: no cover
         return _N()
 
 LOGGER = logging.getLogger(__name__)
-TRACE_PIPELINE = os.getenv("PANOPTES_LIVE_TRACE_PIPELINE", "").strip().lower() in {"1", "true", "yes"}
-LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
-ESSENTIAL_EVENTS = {
-    "live.pipeline.start",
-    "live.pipeline.stop",
-    "live.pipeline.end",
-    "live.pipeline.capture.error",
-    "live.pipeline.video_init.error",
-    "live.pipeline.sinks",
-}
-BASIC_KEYS = ("task", "source", "reason", "error", "frames", "model", "video_path")
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.setLevel(logging.ERROR)
+_ERROR_TOKENS = ("error", "fail", "failed", "exception", "warning")
+_ERROR_KEYS = ("error", "reason")
 
 FramePacket = Tuple[NDArrayU8, float]
 
 def _log(event: str, **info: object) -> None:
-    if not LOGGER.isEnabledFor(logging.INFO):
+    event_lower = event.lower()
+    should_emit = any(token in event_lower for token in _ERROR_TOKENS)
+    if not should_emit:
+        for key in _ERROR_KEYS:
+            value = info.get(key)
+            if isinstance(value, str):
+                if value and value.strip().lower() not in {"ok", "success"}:
+                    should_emit = True
+                    break
+            elif value not in (None, 0, False):
+                should_emit = True
+                break
+    if not should_emit:
         return
-    if not TRACE_PIPELINE and event not in ESSENTIAL_EVENTS:
-        return
-    if info:
-        if TRACE_PIPELINE or LOG_DETAIL:
-            detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        else:
-            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
-            detail = " ".join(detail_parts)
-        if detail:
-            LOGGER.info("%s %s", event, detail)
-        else:
-            LOGGER.info(event)
+    detail = " ".join(f"{key}={info[key]}" for key in sorted(info) if info[key] is not None)
+    if detail:
+        LOGGER.error("%s %s", event, detail)
     else:
-        LOGGER.info(event)
+        LOGGER.error("%s", event)
 
 
 def _results_dir() -> Path:
@@ -488,7 +484,7 @@ class LivePipeline:
                             nms_mode_active = None
                     label_with_nms = dynamic_label
                     if nms_mode_active:
-                        label_with_nms = f"{dynamic_label} · NMS:{nms_mode_active.upper()}"
+                        label_with_nms = f"{dynamic_label} | NMS:{nms_mode_active.upper()}"
                         if nms_mode_active != self._last_logged_nms:
                             _log("live.pipeline.nms", task=self.task, mode=nms_mode_active)
                             self._last_logged_nms = nms_mode_active

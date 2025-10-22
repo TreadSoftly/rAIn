@@ -49,15 +49,13 @@ except Exception:  # pragma: no cover
 
 # ---- logging ----------------------------------------------------------------
 _LOG = logging.getLogger("panoptes.predict_obb_mp4")
-if not _LOG.handlers:
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(h)
-_LOG.setLevel(logging.WARNING)
+_LOG.addHandler(logging.NullHandler())
+_LOG.setLevel(logging.ERROR)
 
 
 def _say(msg: str) -> None:
-    _LOG.info(f"[panoptes] {msg}")
+    if _LOG.isEnabledFor(logging.INFO):
+        _LOG.info("[panoptes] %s", msg)
 
 
 # ---- helpers ----------------------------------------------------------------

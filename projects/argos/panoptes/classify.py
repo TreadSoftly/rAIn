@@ -22,7 +22,6 @@ Progress policy (single‑line UX)
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Sequence, Tuple, Union, cast
 
@@ -41,12 +40,8 @@ else:
 
 # ─────────────────────────── logging ────────────────────────────
 _LOG = logging.getLogger("panoptes.classify")
-if not _LOG.handlers:
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(h)
-# QUIET BY DEFAULT so we don’t break the single‑line spinner UX
-_LOG.setLevel(logging.WARNING)
+_LOG.addHandler(logging.NullHandler())
+_LOG.setLevel(logging.ERROR)
 
 
 # ------------------------------ helpers ---------------------------------------

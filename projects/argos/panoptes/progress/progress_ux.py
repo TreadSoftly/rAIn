@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import re
 import sys
@@ -44,6 +45,7 @@ except Exception:  # pragma: no cover
     Halo = None
 
 CSI = "\x1b["  # define once (avoid reassignment warnings)
+_TRUE_ENV = {"1", "true", "yes", "on"}
 
 
 def _fallback_colors():
@@ -307,6 +309,7 @@ class DynamicSpinner:
         if "current" in kwargs and "item" not in kwargs:
             kwargs["item"] = kwargs.pop("current")
         self._state.update(kwargs)
+        _export_progress_state(self._state)
         return self
 
     @property
@@ -333,18 +336,17 @@ def enabled_spinner(
         spinner_type: str = "dots",
     ) -> Spinner:
         chosen_stream = stream or sys.stderr
-        if _should_enable_spinners(enabled, chosen_stream):
-            return DynamicSpinner(
-                text_fn,
-                state,
-                interval=interval,
-                colors=colors,
-                spinner_type=spinner_type,
-                enabled=True,
-                stream=chosen_stream,
-                final_newline=final_newline,
-            )
-        return NullSpinner()
+        active = _should_enable_spinners(enabled, chosen_stream)
+        return DynamicSpinner(
+            text_fn,
+            state,
+            interval=interval,
+            colors=colors,
+            spinner_type=spinner_type,
+            enabled=active,
+            stream=chosen_stream,
+            final_newline=final_newline,
+        )
     return _ctor
 
 
@@ -460,7 +462,7 @@ def percent_spinner(
 
         seg_head_item = f"{F.GREEN}{S.BRIGHT}[File:{S.RESET_ALL}{F.RED}{S.BRIGHT}"
         seg_tail_item = f"{S.RESET_ALL}{F.GREEN}{S.BRIGHT}]"
-        seg_head_job = f"{F.CYAN}{S.BRIGHT}[Job:{S.RESET_ALL}{F.RED}{S.BRIGHT}"
+        seg_head_job = f"{F.CYAN}{S.BRIGHT}[Job:{S.RESET_ALL}{F.YELLOW}{S.BRIGHT}"
         seg_tail_job = f"{S.RESET_ALL}{F.CYAN}{S.BRIGHT}]"
         seg_head_mod = f"{F.WHITE}{S.BRIGHT}[Model:{S.RESET_ALL}{F.RED}{S.BRIGHT}"
         seg_tail_mod = f"{S.RESET_ALL}{F.WHITE}{S.BRIGHT}]"
@@ -528,7 +530,34 @@ def percent_spinner(
         return f"{head}{mid_text}{tail}"
 
     # Pass selected interval to the DynamicSpinner via the ctor
-    return ctor(text_fn, state={"count": 0, "total": 1, "item": None}, interval=float(interval), spinner_type=spinner_type)
+    return ctor(text_fn, state={"count": 0, "total": 1, "item": None, "job": None}, interval=float(interval), spinner_type=spinner_type)
+
+def _serialise_export_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+def _export_progress_state(state: Dict[str, Any]) -> None:
+    path = os.environ.get("PANOPTES_PROGRESS_EXPORT")
+    if not path:
+        return
+    try:
+        payload = {
+            key: _serialise_export_value(val)
+            for key, val in state.items()
+        }
+        payload["ts"] = time.time()
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def osc8(label: str, target: str) -> str:

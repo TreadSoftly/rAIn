@@ -26,6 +26,7 @@ from typing import (
     Protocol,
     Set,
     Tuple,
+    TextIO,
     cast,
     runtime_checkable,
 )
@@ -388,7 +389,7 @@ def _latest_exported_onnx() -> Optional[Path]:
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 # ---------------------------------------------------------------------
-# Spinner adapter (byte progress → single-line UX)
+# Spinner adapter (byte progress â†’ single-line UX)
 # ---------------------------------------------------------------------
 class _DownloadSpinnerAdapter:
     def __init__(self, spinner: _ProgressLike, *, items_total: int, items_done: int, label: Optional[str] = None) -> None:
@@ -544,20 +545,41 @@ def _fetch_one(name: str, dst: Path, *, spinner: Optional[_ProgressLike], items_
 
 
 def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
-    results: List[Tuple[str, str]] = []
+    combined: Dict[int, Tuple[str, str]] = {}
     failed: List[str] = []
+    todo: List[Tuple[int, str]] = []
+    present_count = 0
+
+    for idx, nm in enumerate(names):
+        base = Path(nm).name
+        target = MODEL_DIR / base
+        if target.exists() and _validate_weight(target):
+            combined[idx] = (base, "present")
+            present_count += 1
+        else:
+            todo.append((idx, nm))
+
+    if present_count == len(names):
+        if not QUIET and present_count:
+            typer.secho(f"Skipping {present_count} weights already present.", fg="cyan")
+        ordered = [combined[i] for i in range(len(names))]
+        return ordered, failed
+
+    if present_count and not QUIET:
+        typer.secho(f"Skipping {present_count} weights already present.", fg="cyan")
+
     with percent_spinner(prefix="FETCH MODELS") as sp:
-        total = len(names)
+        total = len(todo)
         sp.update(total=max(1, total), count=0)
         done = 0
-        for nm in names:
+        for idx, nm in todo:
             try:
                 sp.update(current=nm, job="start", model=nm)
             except Exception:
                 pass
 
             base, action = _fetch_one(nm, MODEL_DIR, spinner=sp, items_total=total, items_done=done)
-            results.append((base, action))
+            combined[idx] = (base, action)
             if action == "failed":
                 failed.append(base)
 
@@ -567,7 +589,8 @@ def _fetch_all(names: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
             except Exception:
                 pass
 
-    return results, failed
+    ordered = [combined[i] for i in range(len(names)) if i in combined]
+    return ordered, failed
 
 
 def _write_manifest(selected: List[str], installed: List[str]) -> Path:
@@ -744,7 +767,7 @@ def _ask_custom() -> List[str]:
     names = _build_combo(vers, sizes, tasks, formats=formats)
     typer.secho("\nPreview (will be fetched):", bold=True)
     for n in names:
-        typer.echo(f"  • {n}")
+        typer.echo(f"  â€¢ {n}")
 
     extra = typer.prompt("Optional: add exact extra names (comma-sep) or press Enter", default="").strip()
     if extra:
@@ -805,11 +828,22 @@ def _quick_check() -> None:
         expected = sum(1 for p in raw_dir.glob("*") if p.suffix.lower() in exts)
     expected = max(1, expected)
 
-    _ok(f"→ running: {py} {' '.join(args)}")
+    _ok(f"â†’ running: {py} {' '.join(args)}")
 
     def _list_created() -> List[Path]:
         return sorted([p for p in results_dir.glob("*") if p.is_file()],
                       key=lambda p: p.name.lower())
+
+    progress_path = results_dir / ".smoke-progress.jsonl"
+    try:
+        progress_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    env = os.environ.copy()
+    env["PANOPTES_PROGRESS_EXPORT"] = str(progress_path)
 
     with percent_spinner(prefix=f"ARGOS TESTING {task.upper()}") as sp:
         sp.update(total=float(expected), count=0, current="starting", job="spawn", model=task)
@@ -817,10 +851,12 @@ def _quick_check() -> None:
         proc = subprocess.Popen([py, *args],
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL,
-                                cwd=repo_root)
+                                cwd=repo_root,
+                                env=env)
 
         done_reported = 0
         last_poll = 0.0
+        progress_fp: Optional[TextIO] = None
 
         try:
             while True:
@@ -828,6 +864,43 @@ def _quick_check() -> None:
                 now_t = time.monotonic()
                 if now_t - last_poll >= 0.25:
                     last_poll = now_t
+                    had_export_update = False
+
+                    if progress_fp is None and progress_path.exists():
+                        try:
+                            progress_fp = progress_path.open("r", encoding="utf-8")
+                        except Exception:
+                            progress_fp = None
+
+                    if progress_fp is not None:
+                        while True:
+                            pos = progress_fp.tell()
+                            line = progress_fp.readline()
+                            if not line:
+                                progress_fp.seek(pos)
+                                break
+                            try:
+                                data = json.loads(line)
+                            except Exception:
+                                continue
+                            updates: Dict[str, Any] = {}
+                            tot = data.get("total")
+                            cnt = data.get("count")
+                            if isinstance(tot, (int, float)):
+                                updates["total"] = float(tot)
+                            if isinstance(cnt, (int, float)):
+                                updates["count"] = float(cnt)
+                            for key in ("item", "job", "model"):
+                                val = data.get(key)
+                                if isinstance(val, str) and val.strip():
+                                    updates[key] = val.strip()
+                            if updates:
+                                had_export_update = True
+                                try:
+                                    sp.update(**updates)
+                                except Exception:
+                                    pass
+
                     created = _list_created()
                     n = len(created)
                     if n > expected:
@@ -838,10 +911,14 @@ def _quick_check() -> None:
                     delta = n - done_reported
                     if delta > 0:
                         try:
-                            sp.update(count=done_reported + delta,
-                                      current=(created[-1].name if created else "working"),
-                                      job="process",
-                                      model=task)
+                            params: Dict[str, Any] = {
+                                "count": done_reported + delta,
+                                "current": (created[-1].name if created else "working"),
+                                "model": task,
+                            }
+                            if not had_export_update:
+                                params["job"] = f"outputs {done_reported + delta}/{max(expected, n)}"
+                            sp.update(**params)
                         except Exception:
                             pass
                         done_reported = n
@@ -853,6 +930,16 @@ def _quick_check() -> None:
                 proc.terminate()
             except Exception:
                 pass
+            if progress_fp is not None:
+                try:
+                    progress_fp.close()
+                except Exception:
+                    pass
+
+    try:
+        progress_path.unlink()
+    except Exception:
+        pass
 
     if not QUIET:
         typer.secho("Smoke check completed.", fg="green")
@@ -869,7 +956,7 @@ def _confirm_and_fetch(names: List[str]) -> None:
     _ensure_env_hint()
     typer.secho("\nSelected:", bold=True)
     for n in names:
-        typer.echo(f"  • {n}")
+        typer.echo(f"  â€¢ {n}")
 
     ok = typer.confirm(f"\nProceed to download/install into {osc8_link('panoptes/model', MODEL_DIR)}/?", default=True)
     if not ok:

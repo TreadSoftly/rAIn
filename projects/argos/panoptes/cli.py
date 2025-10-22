@@ -50,36 +50,39 @@ from .support_bundle import write_support_bundle # type: ignore[import]
 
 setup_logging()
 LOGGER = logging.getLogger(__name__)
-TRACE_OFFLINE_CLI = os.getenv("PANOPTES_CLI_TRACE", "").strip().lower() in {"1", "true", "yes"}
-LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
-ESSENTIAL_CLI_EVENTS = {
-    "cli.run.start",
-    "cli.run.complete",
-    "cli.run.error",
-    "cli.item.start",
-    "cli.item.outputs",
-    "cli.run.dry",
-}
-BASIC_KEYS = ("task", "input", "count", "reason", "weight", "outputs", "inputs")
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.setLevel(logging.ERROR)
+
+_ERROR_TOKENS = ("error", "fail", "failed", "exception", "warning")
+_ERROR_KEYS = ("error", "reason", "status")
+
+
+def _should_log(event: str, info: dict[str, object]) -> bool:
+    event_lower = event.lower()
+    if any(token in event_lower for token in _ERROR_TOKENS):
+        return True
+    for key in _ERROR_KEYS:
+        value = info.get(key)
+        if isinstance(value, str):
+            if value and value.strip().lower() not in {"ok", "success"}:
+                return True
+        elif value not in (None, 0, False):
+            return True
+    return False
+
+
+def _format_detail(info: dict[str, object]) -> str:
+    return " ".join(f"{key}={info[key]}" for key in sorted(info) if info[key] is not None)
 
 
 def _log_event(event: str, **info: object) -> None:
-    if not LOGGER.isEnabledFor(logging.INFO):
+    if not _should_log(event, info):
         return
-    if not TRACE_OFFLINE_CLI and event not in ESSENTIAL_CLI_EVENTS:
-        return
-    if info:
-        if TRACE_OFFLINE_CLI or LOG_DETAIL:
-            detail = ' '.join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        else:
-            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
-            detail = ' '.join(detail_parts)
-        if detail:
-            LOGGER.info("%s %s", event, detail)
-        else:
-            LOGGER.info("%s", event)
+    detail = _format_detail(info)
+    if detail:
+        LOGGER.error("%s %s", event, detail)
     else:
-        LOGGER.info("%s", event)
+        LOGGER.error("%s", event)
 
 # Diagnostics (always attach; best-effort — never crash if missing)
 try:
@@ -1050,20 +1053,20 @@ class _JobAwareProxy:
             return None
 
     def update(self, **kw: Any) -> "_JobAwareProxy":
-        # Map legacy 'current' to 'job'
-        cur = kw.pop("current", None)
-        if cur is not None:
-            txt = str(cur).strip()
-            if txt:
-                kw.setdefault("job", txt)
+        job_val: Optional[str] = None
 
-        # Normalize synonyms → canonical keys
-        # job
-        if not any(k in kw for k in ("job",)):
-            for k in self._JOB_KEYS:
-                if k in kw and isinstance(kw[k], (str, int, float)):
-                    kw["job"] = str(kw.pop(k))
-                    break
+        def _maybe_set_job(val: Any) -> None:
+            nonlocal job_val
+            if job_val is None and val not in (None, ""):
+                job_val = str(val)
+
+        _maybe_set_job(kw.pop("current", None))
+        if "job" in kw:
+            _maybe_set_job(kw.pop("job"))
+        for k in self._JOB_KEYS:
+            if k in kw:
+                _maybe_set_job(kw.pop(k))
+
         # total
         if "total" not in kw:
             for k in self._TOT_KEYS:
@@ -1096,22 +1099,15 @@ class _JobAwareProxy:
                     kw["model"] = Path(val).name if k != "model" else str(val)
                     break
 
+        if job_val is not None:
+            kw["job"] = job_val
+
         nested_total = self._pop_int(kw, "total")
         nested_count = self._pop_int(kw, "count")
         if nested_total is None:
             nested_total = self._pop_int(kw, "progress_total")
         if nested_count is None:
             nested_count = self._pop_int(kw, "progress_count")
-
-        if (nested_total is not None) or (nested_count is not None):
-            job_val = kw.get("job")
-            if isinstance(job_val, str) and job_val:
-                if (nested_total is not None) and (nested_count is not None) and ("/" not in job_val):
-                    kw["job"] = f"{job_val} ({nested_count}/{nested_total})"
-            elif (nested_total is not None) or (nested_count is not None):
-                left = "?" if nested_count is None else str(nested_count)
-                right = "?" if nested_total is None else str(nested_total)
-                kw["job"] = f"{left}/{right}"
 
         if not kw:
             return self

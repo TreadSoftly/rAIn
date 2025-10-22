@@ -39,38 +39,32 @@ from panoptes.logging_config import bind_context # type: ignore[import]
 
 
 LOGGER = logging.getLogger(__name__)
-TRACE_SINKS = os.getenv("PANOPTES_LIVE_TRACE_SINKS", "").strip().lower() in {"1", "true", "yes"}
-LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
-ESSENTIAL_SINK_EVENTS = {
-    "live.display.init",
-    "live.display.fallback",
-    "live.display.backend",
-    "live.sink.video.init",
-    "live.sink.video.opened",
-    "live.sink.video.fallback",
-    "live.sink.video.disabled",
-    "live.sink.video.closed",
-}
-BASIC_KEYS = ("backend", "path", "codec", "reason", "size", "fps")
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.setLevel(logging.ERROR)
+_ERROR_TOKENS = ("error", "fail", "failed", "exception", "warning")
+_ERROR_KEYS = ("error", "reason")
 
 
 def _log(event: str, **info: object) -> None:
-    if not LOGGER.isEnabledFor(logging.INFO):
+    event_lower = event.lower()
+    should_emit = any(token in event_lower for token in _ERROR_TOKENS)
+    if not should_emit:
+        for key in _ERROR_KEYS:
+            value = info.get(key)
+            if isinstance(value, str):
+                if value and value.strip().lower() not in {"ok", "success"}:
+                    should_emit = True
+                    break
+            elif value not in (None, 0, False):
+                should_emit = True
+                break
+    if not should_emit:
         return
-    if not TRACE_SINKS and event not in ESSENTIAL_SINK_EVENTS:
-        return
-    if info:
-        if TRACE_SINKS or LOG_DETAIL:
-            detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        else:
-            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
-            detail = " ".join(detail_parts)
-        if detail:
-            LOGGER.info("%s %s", event, detail)
-        else:
-            LOGGER.info(event)
+    detail = " ".join(f"{key}={info[key]}" for key in sorted(info) if info[key] is not None)
+    if detail:
+        LOGGER.error("%s %s", event, detail)
     else:
-        LOGGER.info(event)
+        LOGGER.error("%s", event)
 
 
 class _VideoWriterLike(Protocol):

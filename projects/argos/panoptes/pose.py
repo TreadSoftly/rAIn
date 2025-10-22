@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Tuple, Union, cast
 
@@ -36,12 +35,8 @@ def _require_cv2() -> Any:
 
 # ─────────────────────────── logging ────────────────────────────
 _LOG = logging.getLogger("panoptes.pose")
-if not _LOG.handlers:
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(h)
-# QUIET BY DEFAULT
-_LOG.setLevel(logging.WARNING)
+_LOG.addHandler(logging.NullHandler())
+_LOG.setLevel(logging.ERROR)
 
 
 def _pupdate(progress: Any | None, **kwargs: Any) -> None:

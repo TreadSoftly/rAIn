@@ -19,6 +19,8 @@ from typing import Any, Optional, Tuple, Iterable, Sequence, Callable, cast
 import importlib.util as importlib_util
 
 LOG = logging.getLogger(__name__)
+LOG.addHandler(logging.NullHandler())
+LOG.setLevel(logging.ERROR)
 
 
 def _load_bootstrap_module() -> Optional[Any]:
@@ -122,7 +124,9 @@ def ort_available() -> Tuple[bool, Optional[str], Optional[list[str]], Optional[
                         except Exception as exc:
                             LOG.exception("onnx.heal.venv_python_failed: %s", exc)
                     def _heal_log(msg: str) -> None:
-                        LOG.info("onnx.heal %s", msg)
+                        msg_lower = msg.lower()
+                        if "error" in msg_lower or "fail" in msg_lower:
+                            LOG.error("onnx.heal %s", msg)
                     summary = ensure(venv_py, log=_heal_log)
                 except Exception as exc:
                     LOG.exception("onnx.heal.ensure_exception: %s", exc)
@@ -131,10 +135,11 @@ def ort_available() -> Tuple[bool, Optional[str], Optional[list[str]], Optional[
                 summary = {"installed": False, "error": f"heal already in progress ({lock_path})"}
 
         if summary:
-            try:
-                LOG.info("onnx.heal.summary %s", json.dumps(summary, default=str))
-            except Exception:
-                LOG.info("onnx.heal.summary %s", summary)
+            if summary.get("error"):
+                try:
+                    LOG.error("onnx.heal.summary %s", json.dumps(summary, default=str))
+                except Exception:
+                    LOG.error("onnx.heal.summary %s", summary)
             if summary.get("installed"):
                 ok, version, providers, reason = _try_import_ort()
                 if ok:

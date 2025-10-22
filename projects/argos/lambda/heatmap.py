@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import sys
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Iterable
@@ -41,15 +40,13 @@ except Exception:  # pragma: no cover
 
 # ───────────────────────── logging ─────────────────────────────────────
 _LOG = logging.getLogger("lambda.heatmap")
-if not _LOG.handlers:
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(h)
-_LOG.setLevel(logging.INFO)
+_LOG.addHandler(logging.NullHandler())
+_LOG.setLevel(logging.ERROR)
 
 
 def _say(msg: str) -> None:
-    _LOG.info(f"[panoptes] {msg}")
+    if _LOG.isEnabledFor(logging.INFO):
+        _LOG.info("[panoptes] %s", msg)
 
 
 # ───────────────────────── single, authoritative model ──────────────────────────

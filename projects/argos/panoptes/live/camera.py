@@ -61,11 +61,11 @@ else:
 from ._types import NDArrayU8
 from panoptes.logging_config import bind_context  # type: ignore[import]
 
-TRACE_CAMERA = os.getenv("PANOPTES_LIVE_TRACE_CAMERA", "").strip().lower() in {"1", "true", "yes"}
+TRACE_CAMERA = False
 _enable_dshow_env = os.getenv("PANOPTES_LIVE_ENABLE_DSHOW", "").strip().lower()
 ENABLE_DSHOW = _enable_dshow_env != "0" and _enable_dshow_env not in {"false", "no", "off"}
-LOG_DETAIL = os.getenv("PANOPTES_LOG_DETAIL", "").strip().lower() in {"1", "true", "yes"}
-BASIC_KEYS = ("source", "error", "reason", "backend", "mode", "task")
+_ERROR_TOKENS = ("error", "fail", "failed", "exception", "warning")
+_ERROR_KEYS = ("error", "reason")
 PREFERRED_FOURCC = ("MJPG", "YUY2")
 DEFAULT_WARMUP_FRAMES = 5
 
@@ -126,23 +126,30 @@ def _temporary_cv2_log_level() -> Iterator[None]:
 
 
 LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.setLevel(logging.ERROR)
 
 
 def _log(event: str, **info: object) -> None:
-    if not LOGGER.isEnabledFor(logging.INFO):
+    event_lower = event.lower()
+    should_emit = any(token in event_lower for token in _ERROR_TOKENS)
+    if not should_emit:
+        for key in _ERROR_KEYS:
+            value = info.get(key)
+            if isinstance(value, str):
+                if value and value.strip().lower() not in {"ok", "success"}:
+                    should_emit = True
+                    break
+            elif value not in (None, 0, False):
+                should_emit = True
+                break
+    if not should_emit:
         return
-    if info:
-        if TRACE_CAMERA or LOG_DETAIL:
-            detail = " ".join(f"{k}={info[k]}" for k in sorted(info) if info[k] is not None)
-        else:
-            detail_parts = [f"{k}={info[k]}" for k in BASIC_KEYS if info.get(k) is not None]
-            detail = " ".join(detail_parts)
-        if detail:
-            LOGGER.info("%s %s", event, detail)
-        else:
-            LOGGER.info(event)
+    detail = " ".join(f"{key}={info[key]}" for key in sorted(info) if info[key] is not None)
+    if detail:
+        LOGGER.error("%s %s", event, detail)
     else:
-        LOGGER.info(event)
+        LOGGER.error("%s", event)
 
 
 class FrameSource(Protocol):

@@ -320,12 +320,18 @@ def _try_ultralytics_export(YOLO: _YOLOClassLike, pt: Path, target: Path) -> Tup
                                 ExportOut,
                                 m.export(**export_kwargs),  # type: ignore[attr-defined]
                             )
-                        except TypeError:
+                        except Exception as exc_post:
                             export_kwargs.pop("postprocess", None)
-                            out_any = cast(
-                                ExportOut,
-                                m.export(**export_kwargs),  # type: ignore[attr-defined]
-                            )
+                            last_err = f"opset={opset}, dynamic={dynamic}, simplify={simplify_flag}: postprocess={exc_post}"
+                            try:
+                                out_any = cast(
+                                    ExportOut,
+                                    m.export(**export_kwargs),  # type: ignore[attr-defined]
+                                )
+                                last_err = None
+                            except Exception as exc_without:
+                                last_err = f"opset={opset}, dynamic={dynamic}, simplify={simplify_flag}: {exc_without}"
+                                continue
                         # Some versions return str, some a path-like, some a list
                         if isinstance(out_any, (list, tuple)) and out_any:
                             outp_path = Path(str(out_any[0]))
@@ -334,27 +340,27 @@ def _try_ultralytics_export(YOLO: _YOLOClassLike, pt: Path, target: Path) -> Tup
                         else:
                             outp_path = _latest_exported_onnx()
 
-                            if outp_path and outp_path.exists():
-                                if outp_path.resolve() != target.resolve():
-                                    shutil.copy2(outp_path, target)
-                                if _validate_weight(target):
-                                    try:
-                                        from panoptes.model.artifact_metadata import analyse_artifact  # type: ignore[import]
+                        if outp_path and outp_path.exists():
+                            if outp_path.resolve() != target.resolve():
+                                shutil.copy2(outp_path, target)
+                            if _validate_weight(target):
+                                try:
+                                    from panoptes.model.artifact_metadata import analyse_artifact  # type: ignore[import]
 
-                                        meta = analyse_artifact(target)
-                                        if not meta.get("nms_in_graph"):
-                                            typer.secho(
-                                                f"Warning: ONNX export for {target.name} lacks in-graph NMS.",
-                                                fg="yellow",
-                                            )
-                                    except Exception:
-                                        pass
-                                    return True, None
-                            try:
-                                target.unlink(missing_ok=True)
-                            except TypeError:
-                                if target.exists():
-                                    target.unlink()
+                                    meta = analyse_artifact(target)
+                                    if not meta.get("nms_in_graph"):
+                                        typer.secho(
+                                            f"Warning: ONNX export for {target.name} lacks in-graph NMS.",
+                                            fg="yellow",
+                                        )
+                                except Exception:
+                                    pass
+                                return True, None
+                        try:
+                            target.unlink(missing_ok=True)
+                        except TypeError:
+                            if target.exists():
+                                target.unlink()
                     except Exception as e:
                         last_err = f"opset={opset}, dynamic={dynamic}, simplify={simplify_flag}: {e}"
     return False, last_err

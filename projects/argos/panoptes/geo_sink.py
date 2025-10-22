@@ -40,13 +40,8 @@ from PIL import Image
 __all__ = ["to_geojson"]
 
 _LOG = logging.getLogger("panoptes.geo_sink")
-if not _LOG.handlers:
-    import sys as _sys
-    h = logging.StreamHandler(_sys.stderr)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(h)
-# QUIET so we don’t interfere with the one-line progress UX
-_LOG.setLevel(logging.WARNING)
+_LOG.addHandler(logging.NullHandler())
+_LOG.setLevel(logging.ERROR)
 
 # ───────────────────────── optional progress (opt-in) ────────────────────────
 _ENABLE_NESTED = os.getenv("PANOPTES_NESTED_PROGRESS", "").strip().lower() in {

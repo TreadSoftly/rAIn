@@ -4,7 +4,6 @@ import colorsys
 import contextlib
 import logging
 import os
-import sys
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -48,12 +47,8 @@ except Exception:  # pragma: no cover
 
 # ─────────────────────────── logging ────────────────────────────
 _LOG = logging.getLogger("panoptes.heatmap")
-if not _LOG.handlers:
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(logging.Formatter("%(message)s"))
-    _LOG.addHandler(h)
-# QUIET BY DEFAULT so we don’t break the single-line spinner UX
-_LOG.setLevel(logging.WARNING)
+_LOG.addHandler(logging.NullHandler())
+_LOG.setLevel(logging.ERROR)
 
 def _dbg(msg: str) -> None:
     _LOG.debug(f"[panoptes] {msg}")

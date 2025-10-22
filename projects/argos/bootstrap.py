@@ -85,6 +85,8 @@ if os.name == "nt":
 
 setup_logging()
 _LOG = logging.getLogger(__name__)
+_LOG.addHandler(logging.NullHandler())
+_LOG.setLevel(logging.ERROR)
 
 StrPath = Union[str, PathLike[str]]
 
@@ -375,8 +377,13 @@ def _ensure_sympy_alignment() -> None:
         from importlib_metadata import PackageNotFoundError, version as pkg_version  # type: ignore
 
     try:
-        torch_version = pkg_version("torch")
+        torch_version = cast(str, pkg_version("torch"))
     except PackageNotFoundError:
+        return
+    except Exception:
+        torch_version = None
+
+    if not torch_version:
         return
 
     required_sympy: Optional[str] = None
@@ -387,8 +394,10 @@ def _ensure_sympy_alignment() -> None:
         return
 
     try:
-        sympy_version = pkg_version("sympy")
+        sympy_version = cast(str, pkg_version("sympy"))
     except PackageNotFoundError:
+        sympy_version = None
+    except Exception:
         sympy_version = None
 
     if sympy_version == required_sympy:
@@ -527,7 +536,7 @@ def _install_windows_vcredist(
             return False
 
 
-_LAST_ONNX_SUMMARY: Optional[dict[str, object]] = None
+_last_onnx_summary: Optional[dict[str, object]] = None
 
 
 def ensure_onnxruntime(
@@ -540,7 +549,7 @@ def ensure_onnxruntime(
 
     Returns a summary dict describing the actions taken and the resulting state.
     """
-    global _LAST_ONNX_SUMMARY
+    global _last_onnx_summary
     py = venv_py or venv_python()
     summary: dict[str, object] = {
         "installed": False,
@@ -622,7 +631,7 @@ def ensure_onnxruntime(
 
     if _probe_onnx_success(info):
         result = _succeed(info, healed=False)
-        _LAST_ONNX_SUMMARY = result
+        _last_onnx_summary = result
         return result
 
     summary["error"] = info.get("error")
@@ -648,7 +657,7 @@ def ensure_onnxruntime(
     info = run_probe("probe-after-pip")
     if _probe_onnx_success(info):
         result = _succeed(info, healed=performed_heal)
-        _LAST_ONNX_SUMMARY = result
+        _last_onnx_summary = result
         return result
 
     def _error_indicates_vcredist(error: Optional[object]) -> bool:
@@ -670,7 +679,7 @@ def ensure_onnxruntime(
         info = run_probe("probe-after-reinstall")
         if _probe_onnx_success(info):
             result = _succeed(info, healed=True)
-            _LAST_ONNX_SUMMARY = result
+            _last_onnx_summary = result
             return result
 
     if os.name == "nt":
@@ -690,7 +699,7 @@ def ensure_onnxruntime(
                 info = run_probe("probe-after-vcredist")
                 if _probe_onnx_success(info):
                     result = _succeed(info, healed=True)
-                    _LAST_ONNX_SUMMARY = result
+                    _last_onnx_summary = result
                     return result
 
     summary["error"] = info.get("error")
@@ -703,21 +712,21 @@ def ensure_onnxruntime(
         f"?? onnxruntime unavailable after automated healing: {summary['error'] or 'unknown'}; "
         "ARGOS_DISABLE_ONNX=1"
     )
-    _LAST_ONNX_SUMMARY = summary
+    _last_onnx_summary = summary
     return summary
 
 def get_last_onnx_summary() -> Optional[dict[str, object]]:
     """Return the most recent ONNX Runtime summary captured by bootstrap ensure."""
-    return _LAST_ONNX_SUMMARY
+    return _last_onnx_summary
 
 
 
 
 def _ensure_onnx_runtime_packages() -> None:
     """Guarantee ONNX + ONNX Runtime availability during bootstrap."""
-    global _LAST_ONNX_SUMMARY
+    global _last_onnx_summary
     summary = ensure_onnxruntime(venv_python(), log=_print)
-    _LAST_ONNX_SUMMARY = summary
+    _last_onnx_summary = summary
     if not summary.get("installed"):
         reason = summary.get("error") or "unknown"
         providers = summary.get("providers")

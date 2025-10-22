@@ -206,6 +206,8 @@ except Exception:  # pragma: no cover
         return False, None, None, "backend probe unavailable"
 
 LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.setLevel(logging.ERROR)
 
 @contextmanager
 def _silence_ultralytics() -> Iterator[None]:
