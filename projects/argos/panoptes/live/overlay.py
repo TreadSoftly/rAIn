@@ -60,6 +60,9 @@ _INSTANCE_PALETTE: List[Tuple[int, int, int]] = [
     (0, 197, 255), (255, 178, 29), (23, 204, 146), (255, 105, 97),
     (52, 148, 230), (222, 98, 98), (141, 218, 139), (255, 160, 122),
     (255, 215, 0), (255, 127, 80), (154, 205, 50), (106, 90, 205),
+    (64, 224, 208), (255, 99, 195), (0, 255, 127), (255, 140, 0),
+    (147, 112, 219), (72, 209, 204), (255, 69, 0), (46, 204, 113),
+    (64, 156, 255), (220, 20, 60), (189, 255, 0), (0, 255, 204),
 ]
 
 
@@ -71,6 +74,13 @@ class _TrackedInstance:
     y: float
     last_seen: int
     track_id: int
+
+
+@dataclass
+class _MaskState:
+    mask: np.ndarray
+    centroid: Tuple[float, float]
+    velocity: Tuple[float, float]
 
 
 class _InstanceColorTracker:
@@ -104,9 +114,9 @@ class _InstanceColorTracker:
             self._used_colors.add(best.color)
             return best.color, best.track_id
 
-        color = self._next_color()
         track_id = self._next_track_id
         self._next_track_id += 1
+        color = self._next_color(track_id)
         new_entry = _TrackedInstance(
             cls_id=cls_id,
             color=color,
@@ -132,12 +142,20 @@ class _InstanceColorTracker:
             color = self.palette[0] if self.palette else (0, 197, 255)
         return color, -1
 
-    def _next_color(self) -> Tuple[int, int, int]:
-        for color in self.palette:
-            if color not in self._used_colors:
-                return color
-        # palette exhausted this frame; reuse in order
-        return self.palette[0] if self.palette else (0, 197, 255)
+    def _next_color(self, track_id: int) -> Tuple[int, int, int]:
+        if not self.palette:
+            return (0, 197, 255)
+        base = self.palette[track_id % len(self.palette)]
+        tier = (track_id // len(self.palette)) % 3
+        if tier == 0:
+            return base
+        r, g, b = base
+        factor = 1.12 if tier == 1 else 0.9
+        return (
+            max(0, min(255, int(r * factor))),
+            max(0, min(255, int(g * factor))),
+            max(0, min(255, int(b * factor))),
+        )
 
 
 _INSTANCE_COLOR_TRACKER = _InstanceColorTracker(_INSTANCE_PALETTE)
@@ -157,42 +175,83 @@ class _MaskTemporalSmoother:
     def __init__(self, *, keep_radius: int = 2, ttl_frames: int = 10) -> None:
         self.keep_radius = max(0, int(keep_radius))
         self.ttl_frames = max(1, int(ttl_frames))
-        self._previous: Dict[int, np.ndarray] = {}
+        self._states: Dict[int, _MaskState] = {}
         self._ages: Dict[int, int] = {}
         self._seen: set[int] = set()
+        if cv2 is not None and self.keep_radius > 0:
+            size = self.keep_radius * 2 + 1
+            self._base_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+        else:
+            self._base_kernel = None
 
     def start_frame(self) -> None:
         self._seen.clear()
 
-    def smooth(self, track_id: int, mask: np.ndarray) -> np.ndarray:
+    def smooth(self, track_id: int, mask: np.ndarray, edges: Optional[np.ndarray] = None) -> Tuple[np.ndarray, Tuple[float, float]]:
         if track_id < 0:
-            return mask
-        mask_bool = mask.astype(bool, copy=False)
-        prev = self._previous.get(track_id)
-        if prev is None or prev.shape != mask_bool.shape:
-            stable = mask_bool.copy()
-        else:
-            stable = mask_bool
-            if cv2 is not None:
-                k = self.keep_radius * 2 + 1
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-                mask_u8 = mask_bool.astype(np.uint8)
-                prev_u8 = prev.astype(np.uint8)
-                curr_dilated = cv2.dilate(mask_u8, kernel, iterations=1).astype(bool)
-                prev_eroded = cv2.erode(prev_u8, kernel, iterations=1).astype(bool)
-                carry = prev & curr_dilated
-                stable = mask_bool | carry | (prev_eroded & curr_dilated)
-                stable = cv2.morphologyEx(stable.astype(np.uint8), cv2.MORPH_CLOSE, kernel, iterations=1).astype(bool)
+            coords = np.nonzero(mask)
+            if coords[0].size:
+                centroid = (float(coords[1].mean()), float(coords[0].mean()))
             else:
-                stable = mask_bool | prev
-        self._previous[track_id] = stable
+                centroid = (0.0, 0.0)
+            return mask, centroid
+        mask_bool = mask.astype(bool, copy=False)
+        ys, xs = np.nonzero(mask_bool)
+        if ys.size == 0:
+            return mask_bool, (0.0, 0.0)
+        centroid = (float(xs.mean()), float(ys.mean()))
+        state = self._states.get(track_id)
+        if state is None or state.mask.shape != mask_bool.shape:
+            stable = mask_bool.copy()
+            velocity = (0.0, 0.0)
+        else:
+            prev_mask = state.mask
+            prev_centroid = state.centroid
+            velocity = (centroid[0] - prev_centroid[0], centroid[1] - prev_centroid[1])
+            shift_x = int(round(velocity[0]))
+            shift_y = int(round(velocity[1]))
+            prev_shift = prev_mask
+            if shift_x != 0 or shift_y != 0:
+                prev_shift = np.roll(prev_mask, shift_y, axis=0)
+                prev_shift = np.roll(prev_shift, shift_x, axis=1)
+                if shift_y > 0:
+                    prev_shift[:shift_y, :] = False
+                elif shift_y < 0:
+                    prev_shift[shift_y:, :] = False
+                if shift_x > 0:
+                    prev_shift[:, :shift_x] = False
+                elif shift_x < 0:
+                    prev_shift[:, shift_x:] = False
+            dilations = self.keep_radius
+            speed = (velocity[0] ** 2 + velocity[1] ** 2) ** 0.5
+            if speed > 1.5:
+                dilations += 1
+            if speed > 4.0:
+                dilations += 1
+            if cv2 is not None and dilations > 0:
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilations * 2 + 1, dilations * 2 + 1))
+                curr_dilated = cv2.dilate(mask_bool.astype(np.uint8), kernel, iterations=1).astype(bool)
+            else:
+                curr_dilated = mask_bool
+            carry = prev_shift & curr_dilated
+            stable = mask_bool | carry
+            if cv2 is not None:
+                smooth_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                stable = cv2.morphologyEx(stable.astype(np.uint8), cv2.MORPH_CLOSE, smooth_kernel, iterations=1).astype(bool)
+            else:
+                stable = stable | prev_shift
+        if edges is not None and cv2 is not None:
+            edge_hint = edges & mask_bool
+            if edge_hint.any():
+                stable = stable | edge_hint
+        self._states[track_id] = _MaskState(mask=stable, centroid=centroid, velocity=velocity if 'velocity' in locals() else (0.0, 0.0))
         self._ages[track_id] = self.ttl_frames
         self._seen.add(track_id)
-        return stable
+        return stable, centroid
 
     def finalize_frame(self) -> None:
         stale: List[int] = []
-        for track_id, age in self._ages.items():
+        for track_id, age in list(self._ages.items()):
             if track_id in self._seen:
                 continue
             next_age = age - 1
@@ -200,9 +259,27 @@ class _MaskTemporalSmoother:
                 stale.append(track_id)
             else:
                 self._ages[track_id] = next_age
+                state = self._states.get(track_id)
+                if state is not None:
+                    faded = state.mask
+                    if cv2 is not None and self._base_kernel is not None:
+                        faded = cv2.erode(faded.astype(np.uint8), self._base_kernel, iterations=1).astype(bool)
+                    else:
+                        faded = faded.copy()
+                        faded[1:-1, 1:-1] &= (
+                            faded[1:-1, 1:-1]
+                            & faded[:-2, 1:-1]
+                            & faded[2:, 1:-1]
+                            & faded[1:-1, :-2]
+                            & faded[1:-1, 2:]
+                        )
+                    if not faded.any():
+                        stale.append(track_id)
+                    else:
+                        self._states[track_id] = _MaskState(mask=faded, centroid=state.centroid, velocity=(0.0, 0.0))
         for track_id in stale:
             self._ages.pop(track_id, None)
-            self._previous.pop(track_id, None)
+            self._states.pop(track_id, None)
 
 
 def new_mask_smoother(*, keep_radius: int = 2, ttl_frames: int = 10) -> _MaskTemporalSmoother:
@@ -349,6 +426,15 @@ def draw_masks_bgr(
     smoother_local = smoother
     if smoother_local is not None:
         smoother_local.start_frame()
+    if cv2 is not None:
+        try:
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(frame_gray, 40, 120)
+            frame_edges_bool: Optional[np.ndarray] = edges.astype(bool)
+        except Exception:
+            frame_edges_bool = None
+    else:
+        frame_edges_bool = None
     try:
         for m_u8, conf, cls_id in instances:
             try:
@@ -367,10 +453,12 @@ def draw_masks_bgr(
                 ys, xs = np.nonzero(mask_bool)
                 color, track_id = _stable_mask_assignment(cls_id, xs, ys, tracker_local)
                 if smoother_local is not None and track_id >= 0:
-                    mask_bool = smoother_local.smooth(track_id, mask_bool)
+                    mask_bool, centroid = smoother_local.smooth(track_id, mask_bool, frame_edges_bool)
                     if not np.any(mask_bool):
                         continue
                     ys, xs = np.nonzero(mask_bool)
+                else:
+                    centroid = (float(xs.mean()), float(ys.mean())) if xs.size else (0.0, 0.0)
                 fill_color = tuple(int(color[i] * 0.15 + 255 * 0.85) for i in range(3))
                 outline_color = tuple(min(255, int(color[i] * 0.6 + 255 * 0.4)) for i in range(3))
 
@@ -382,10 +470,17 @@ def draw_masks_bgr(
 
                     outline_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                     expanded = cv2.dilate(mask_u8, outline_kernel, iterations=1)
+                    expanded_bool = expanded.astype(bool)
+                    shrunk_bool = shrunk.astype(bool)
                     border = cv2.subtract(expanded, shrunk)
                     outline_mask = border.astype(bool)
                     if not outline_mask.any():
                         outline_mask = mask_bool & ~fill_mask
+                    if frame_edges_bool is not None:
+                        ring_mask = expanded_bool & ~shrunk_bool
+                        edge_hint = frame_edges_bool & ring_mask
+                        if edge_hint.any():
+                            outline_mask = outline_mask | edge_hint
                 else:
                     inner = mask_bool.copy()
                     if inner.any():
@@ -399,7 +494,13 @@ def draw_masks_bgr(
                     fill_mask = inner if inner.any() else mask_bool
                     outline_mask = mask_bool & ~fill_mask
 
-                fill_alpha = alpha * 0.25
+                conf_clamped = float(max(0.0, min(1.0, conf)))
+                fill_alpha = alpha * (0.05 + 0.18 * (1.0 - conf_clamped))
+                if np.any(mask_bool):
+                    area_ratio = float(np.count_nonzero(mask_bool)) / float(H * W)
+                    if area_ratio > 0.2:
+                        fill_alpha *= 0.6
+                fill_alpha = min(fill_alpha, alpha * 0.25)
                 inv_fill_alpha = 1.0 - fill_alpha
                 # Blend
                 if np.any(fill_mask):
@@ -411,6 +512,10 @@ def draw_masks_bgr(
                 if outline_mask.any():
                     outline_vec = np.array(outline_color, dtype=np.uint8)
                     out[outline_mask] = outline_vec
+                    if cv2 is not None:
+                        inner_outline = cv2.erode(outline_mask.astype(np.uint8), np.ones((2, 2), dtype=np.uint8), iterations=1).astype(bool)
+                        if inner_outline.any():
+                            out[inner_outline] = (245, 245, 245)
 
                 if cls_id is not None and names:
                     label = names.get(int(cls_id), str(cls_id))
@@ -423,8 +528,8 @@ def draw_masks_bgr(
                     if conf_txt:
                         label_parts.append(conf_txt)
                 if label_parts and cv2 is not None and ys.size:
-                    # find a spot to draw label: first pixel of mask bounding box
-                    y0, x0 = int(ys.min()), int(xs.min())
+                    x0 = int(max(0.0, min(float(W - 1), centroid[0])))
+                    y0 = int(max(0.0, min(float(H - 1), centroid[1])))
                     txt = " ".join(label_parts)
                     cv2.putText(out, txt, (x0 + 2, max(0, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 245, 200), 2)
             except Exception:
@@ -539,10 +644,28 @@ def draw_obb_bgr(
     if cv2 is None:
         return frame
 
-    for pts4, conf, cls_id in obbs:
+    palette = _INSTANCE_PALETTE
+    count_colors = len(palette) if palette else 1
+    for idx, (pts4, conf, cls_id) in enumerate(obbs):
         try:
             pts = np.array(pts4, dtype=np.int32).reshape((-1, 1, 2))  # type: ignore
-            cv2.polylines(frame, [pts], isClosed=True, color=(0, 210, 255), thickness=1)
+            base = palette[idx % count_colors] if count_colors else (0, 210, 255)
+            tier = (idx // max(1, count_colors)) % 3
+            if tier == 0:
+                edge_color = base
+            elif tier == 1:
+                edge_color = tuple(min(255, int(c * 1.15)) for c in base)
+            else:
+                edge_color = tuple(max(0, int(c * 0.85)) for c in base)
+            fill_color = tuple(int(edge_color[i] * 0.4 + 255 * 0.6) for i in range(3))
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            cv2.fillPoly(mask, [pts], 255)
+            if mask.any():
+                fill_alpha = 0.18
+                region = frame[mask > 0].astype(np.float32, copy=False)
+                blended = region * (1.0 - fill_alpha) + np.array(fill_color, dtype=np.float32) * fill_alpha
+                frame[mask > 0] = blended.astype(np.uint8, copy=False)
+            cv2.polylines(frame, [pts], isClosed=True, color=edge_color, thickness=2, lineType=cv2.LINE_AA)
             if cls_id is not None and names:
                 label = names.get(int(cls_id), str(cls_id))
             else:
