@@ -24,11 +24,13 @@ from typing import (
     List,
     Optional,
     Protocol,
+    Sequence,
     Set,
     Tuple,
     TextIO,
     cast,
     runtime_checkable,
+    Mapping,
 )
 
 import typer
@@ -944,10 +946,73 @@ def _quick_check() -> None:
     if not QUIET:
         typer.secho("Smoke check completed.", fg="green")
 
+
+def _verify_cuda_provider_post_smoke() -> None:
+    try:
+        from panoptes import bootstrap as bootstrap_mod  # type: ignore[import]
+    except Exception:
+        return
+
+    bootstrap_any = cast(Any, bootstrap_mod)
+    ensure_raw = getattr(bootstrap_any, "ensure_onnxruntime", None)
+    venv_python_raw = getattr(bootstrap_any, "venv_python", None)
+    state_root = getattr(bootstrap_any, "STATE", None)
+    if not callable(ensure_raw) or not callable(venv_python_raw) or state_root is None:
+        return
+
+    def _noop_log(message: str) -> None:
+        return None
+
+    def _str_or_none(value: object) -> Optional[str]:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+        return None
+
+    try:
+        venv_result = venv_python_raw()
+    except Exception:
+        return
+    venv_path = venv_result if isinstance(venv_result, Path) else Path(str(venv_result))
+
+    try:
+        summary_obj = ensure_raw(venv_path, log=_noop_log)
+    except Exception:
+        return
+    if not isinstance(summary_obj, dict):
+        return
+    summary_mapping = cast(Mapping[Any, Any], summary_obj)
+    summary: Dict[str, Any] = {str(key): value for key, value in summary_mapping.items()}
+    if not summary.get("installed") or summary.get("providers_ok") is False:
+        return
+
+    providers_value: object = summary.get("providers")
+    if isinstance(providers_value, Sequence) and not isinstance(providers_value, (str, bytes)):
+        providers_list = [str(provider) for provider in cast(Sequence[Any], providers_value)]
+    elif providers_value is None:
+        providers_list = []
+    else:
+        providers_list = [str(providers_value)]
+
+    payload: Dict[str, Any] = {
+        "timestamp": float(time.time()),
+        "version": _str_or_none(summary.get("ort_version")),
+        "providers": providers_list,
+        "expected_provider": _str_or_none(summary.get("expected_provider")),
+    }
+    marker_dir = state_root if isinstance(state_root, Path) else Path(str(state_root))
+    try:
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        marker_path = marker_dir / "ort_validation.json"
+        marker_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------
 # Entry (interactive)
 # ---------------------------------------------------------------------
-def _confirm_and_fetch(names: List[str]) -> None:
+def _confirm_and_fetch(names: List[str], *, auto_confirm: bool = False) -> None:
     names = _dedupe(names)
     if not names:
         _warn("Nothing selected. Exiting.")
@@ -958,10 +1023,14 @@ def _confirm_and_fetch(names: List[str]) -> None:
     for n in names:
         typer.echo(f"  â€¢ {n}")
 
-    ok = typer.confirm(f"\nProceed to download/install into {osc8_link('panoptes/model', MODEL_DIR)}/?", default=True)
-    if not ok:
-        _warn("Cancelled.")
-        raise typer.Exit(code=0)
+    ok = True
+    if not auto_confirm:
+        ok = typer.confirm(f"\nProceed to download/install into {osc8_link('panoptes/model', MODEL_DIR)}/?", default=True)
+        if not ok:
+            _warn("Cancelled.")
+            raise typer.Exit(code=0)
+    elif not QUIET:
+        _ok("Proceeding without prompt (non-interactive).")
 
     installed: List[str] = []
     results, failed = _fetch_all(names)
@@ -980,9 +1049,15 @@ def _confirm_and_fetch(names: List[str]) -> None:
         _ok("\nAll selected items installed successfully.")
 
     _quick_check()
+    _verify_cuda_provider_post_smoke()
 
 
 def main() -> None:
+    non_interactive = "--non-interactive" in sys.argv[1:]
+    if non_interactive:
+        _confirm_and_fetch(DEFAULT_PACK, auto_confirm=True)
+        return
+
     choice = _menu()
     if choice == 0:
         raise typer.Exit(code=0)

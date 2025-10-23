@@ -85,6 +85,8 @@ class LivePipeline:
     headless: bool = False
     conf: float = 0.25
     iou: float = 0.45
+    camera_auto_exposure: Optional[str] = None
+    camera_exposure: Optional[float] = None
     duration: Optional[float] = None  # seconds; None = until user closes
     override: Optional[Path] = None
     display_name: Optional[str] = None
@@ -102,6 +104,9 @@ class LivePipeline:
         self.warmup = bool(self.warmup)
         self.backend = (self.backend or "auto").strip().lower()
         self.nms_mode = (self.nms_mode or "auto").strip().lower()
+        if self.camera_auto_exposure is not None:
+            auto_val = self.camera_auto_exposure.strip().lower()
+            self.camera_auto_exposure = auto_val or None
         if self.nms_mode not in {"auto", "graph", "torch"}:
             self.nms_mode = "auto"
         exec_mode = (self.ort_execution or "").strip().lower()
@@ -113,6 +118,13 @@ class LivePipeline:
                 self.ort_threads = None
         self._last_logged_nms: Optional[str] = None
         self._nms_summary: Optional[dict[str, object]] = None
+        healed_provider = os.environ.pop("PANOPTES_ORT_HEALED", "").strip()
+        if healed_provider:
+            provider_label = healed_provider
+            if provider_label.endswith("ExecutionProvider"):
+                provider_label = provider_label.replace("ExecutionProvider", "").strip()
+            formatted = provider_label.upper() if provider_label else "CUDA"
+            self._register_toast(f"{formatted} acceleration restored; ONNX Runtime is using the GPU provider.")
 
     def _persist_nms_summary(self) -> None:
         if not self._nms_summary:
@@ -138,6 +150,8 @@ class LivePipeline:
                 width=(self.size[0] if self.size else None),
                 height=(self.size[1] if self.size else None),
                 fps=self.fps,
+                auto_exposure=self.camera_auto_exposure,
+                exposure=self.camera_exposure,
             )
         except RuntimeError as exc:
             alt_source = self._autoprobe_camera(exc)

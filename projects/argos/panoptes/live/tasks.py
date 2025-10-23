@@ -34,7 +34,7 @@ Key change (2025-08-18):
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict, Callable, Iterator, TYPE_CHECKING
+from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict, Callable, Iterator, TYPE_CHECKING, NamedTuple
 from pathlib import Path
 from contextlib import contextmanager
 import logging
@@ -213,10 +213,20 @@ def configure_onnxruntime(
     )
 
 try:
-    from panoptes.runtime.backend_probe import ort_available  # type: ignore[import]
+    from panoptes.runtime.backend_probe import ort_available, OrtProbeStatus  # type: ignore[import]
 except Exception:  # pragma: no cover
-    def ort_available() -> Tuple[bool, Optional[str], Optional[list[str]], Optional[str]]:
-        return False, None, None, "backend probe unavailable"
+    class OrtProbeStatus(NamedTuple):
+        ok: bool
+        version: Optional[str]
+        providers: Optional[List[str]]
+        reason: Optional[str]
+        providers_ok: bool
+        expected_provider: Optional[str]
+        healed: bool
+        summary: Optional[Dict[str, Any]]
+
+    def ort_available() -> OrtProbeStatus:
+        return OrtProbeStatus(False, None, None, "backend probe unavailable", False, None, False, None)
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
@@ -385,8 +395,8 @@ def _candidate_backend(path: Path) -> str:
 
 def _preferred_backend_order(preference: str) -> List[str]:
     pref = (preference or "auto").lower()
-    ort_ok, _ort_version, providers, _ = ort_available()
-    providers_l = [p.lower() for p in (providers or [])]
+    ort_status = ort_available()
+    providers_l = [p.lower() for p in (ort_status.providers or [])]
     has_cuda = any("cuda" in p for p in providers_l)
     has_dml = any("dml" in p or "directml" in p for p in providers_l)
     disable_tensorrt = os.environ.get("ORT_DISABLE_TENSORRT", "").strip().lower() in _TRUTHY
@@ -410,7 +420,7 @@ def _preferred_backend_order(preference: str) -> List[str]:
         order = []
         if not disable_tensorrt:
             order.append("tensorrt")
-        if ort_ok:
+        if ort_status.ok:
             if has_cuda or has_dml:
                 order.append("onnx-gpu")
             order.append("onnx")
@@ -1129,20 +1139,29 @@ class _YOLOHeatmap(TaskAdapter):
         self.conf = float(conf)
         self.names = _names_from_model(model.active_model())
         self.label = model.descriptor()
+        # Cache resize index arrays keyed by (src_h, src_w, dst_h, dst_w) to avoid
+        # recomputing np.linspace for every frame.
+        self._resize_cache: dict[Tuple[int, int, int, int], Tuple[Any, Any]] = {}
 
     def current_label(self) -> str:
         return self.model.descriptor()
 
-    @staticmethod
-    def _resize_nn(mask: NDArrayU8, new_hw: Tuple[int, int]) -> NDArrayU8:
+    def _resize_nn(self, mask: NDArrayU8, new_hw: Tuple[int, int]) -> NDArrayU8:
         np_ = cast(Any, np)
         assert np_ is not None
         H, W = new_hw
         h, w = int(mask.shape[0]), int(mask.shape[1])
         if (h, w) == (H, W):
             return mask
-        y_idx = np_.round(np_.linspace(0, h - 1, H)).astype(int)
-        x_idx = np_.round(np_.linspace(0, w - 1, W)).astype(int)
+        cache = self._resize_cache
+        key = (h, w, H, W)
+        cached = cache.get(key)
+        if cached is None:
+            y_idx = np_.round(np_.linspace(0, h - 1, H)).astype(int)
+            x_idx = np_.round(np_.linspace(0, w - 1, W)).astype(int)
+            cache[key] = (y_idx, x_idx)
+        else:
+            y_idx, x_idx = cached
         return mask[y_idx[:, None], x_idx[None, :]]
 
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[NDArrayU8, float, Optional[int]]]:
@@ -1189,14 +1208,14 @@ class _YOLOHeatmap(TaskAdapter):
         try:
             confs_seq = cast(
                 Sequence[float],
-                _to_numpy(getattr(boxes_obj, "conf", None), dtype=f32).reshape(-1).tolist(),
+                _to_numpy(getattr(boxes_obj, "conf", None), dtype=f32).reshape(-1),
             )
         except Exception:
             confs_seq = None
         try:
             clses_seq = cast(
                 Sequence[int],
-                _to_numpy(getattr(boxes_obj, "cls", None), dtype=i64).reshape(-1).astype(int).tolist(),
+                _to_numpy(getattr(boxes_obj, "cls", None), dtype=i64).reshape(-1).astype(int),
             )
         except Exception:
             clses_seq = None
@@ -1207,18 +1226,23 @@ class _YOLOHeatmap(TaskAdapter):
         if count <= 0:
             return []
         max_keep = self._MAX_INSTANCES
+        need_resize = tuple(getattr(m_np, "shape", (0, 0, 0))[1:3]) != (H, W)
         for i in range(count):
             conf_v = float(confs_seq[i]) if confs_seq is not None and i < len(confs_seq) else 0.0
             if conf_v < self.conf:
                 continue
             m = m_np[i]
             m_bin: NDArrayU8 = (m >= 0.5).astype(u8, copy=False)
-            if tuple(m_bin.shape) != (H, W):
+            if need_resize:
                 m_bin = self._resize_nn(m_bin, (H, W))
-            area = float(m_bin.sum())
+            area = float(np_.count_nonzero(m_bin))
             if area < self._MIN_AREA_PX or (area / total_px) < self._MIN_AREA_FRAC:
                 continue
-            cls_v: Optional[int] = int(clses_seq[i]) if clses_seq is not None and i < len(clses_seq) else None
+            cls_v: Optional[int]
+            if clses_seq is not None and i < len(clses_seq):
+                cls_v = int(clses_seq[i])
+            else:
+                cls_v = None
             out.append((m_bin, conf_v, cls_v))
             if len(out) >= max_keep:
                 break

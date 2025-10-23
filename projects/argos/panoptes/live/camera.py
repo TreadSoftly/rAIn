@@ -230,6 +230,26 @@ def _is_convert_rgb_enabled(value: Optional[float]) -> bool:
     return abs(val - 1.0) <= 1e-3
 
 
+def _normalize_auto_exposure(value: Optional[object]) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if not token:
+            return None
+        if token in {"auto", "on"}:
+            return 0.75 if sys.platform.startswith("win") else 1.0
+        if token in {"manual", "off"}:
+            return 0.25 if sys.platform.startswith("win") else 0.0
+        try:
+            return float(token)
+        except ValueError:
+            return None
+    return None
+
+
 def _guess_backend_ids() -> list[int]:
     """Return a list of platform-appropriate OpenCV backend ids (try in order)."""
     ids: list[int] = []
@@ -271,7 +291,11 @@ class _CVCamera(FrameSource):
         width: Optional[int] = None,
         height: Optional[int] = None,
         fps: Optional[int] = None,
+        auto_exposure: Optional[object] = None,
+        exposure: Optional[float] = None,
     ) -> None:
+        self._requested_auto_exposure = auto_exposure
+        self._requested_exposure = exposure
         if cv2 is None:
             raise RuntimeError("OpenCV not available for camera capture.")
         self._source = str(source)
@@ -359,6 +383,22 @@ class _CVCamera(FrameSource):
                     self.cap.set(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4), float(height))
                 if fps is not None:
                     self.cap.set(getattr(cv2, "CAP_PROP_FPS", 5), float(fps))
+
+                auto_value = _normalize_auto_exposure(
+                    self._requested_auto_exposure if self._requested_auto_exposure is not None else ("manual" if self._requested_exposure is not None else None)
+                )
+                if auto_value is not None and hasattr(cv2, "CAP_PROP_AUTO_EXPOSURE"):
+                    try:
+                        if self.cap.set(getattr(cv2, "CAP_PROP_AUTO_EXPOSURE"), float(auto_value)) and TRACE_CAMERA:
+                            _log("live.camera.auto_exposure", source=self._source, value=auto_value)
+                    except Exception:
+                        pass
+                if self._requested_exposure is not None and hasattr(cv2, "CAP_PROP_EXPOSURE"):
+                    try:
+                        if self.cap.set(getattr(cv2, "CAP_PROP_EXPOSURE"), float(self._requested_exposure)) and TRACE_CAMERA:
+                            _log("live.camera.exposure", source=self._source, value=self._requested_exposure)
+                    except Exception:
+                        pass
 
                 fourcc_applied = None
                 if hasattr(cv2, "VideoWriter_fourcc"):
@@ -801,6 +841,8 @@ def open_camera(
     width: Optional[int] = None,
     height: Optional[int] = None,
     fps: Optional[int] = None,
+    auto_exposure: Optional[object] = None,
+    exposure: Optional[float] = None,
 ) -> FrameSource:
     """
     Open a camera/video source, using OS-specific backend hints when available.
@@ -809,7 +851,7 @@ def open_camera(
     _log("live.camera.request", source=str(source), width=width, height=height, fps=fps)
     if cv2 is None:
         raise RuntimeError("OpenCV not available. Install opencv-python (not headless) or use synthetic_source().")
-    return _CVCamera(source, width=width, height=height, fps=fps)
+    return _CVCamera(source, width=width, height=height, fps=fps, auto_exposure=auto_exposure, exposure=exposure)
 
 
 def synthetic_source(size: Tuple[int, int] = (640, 480), fps: int = 30) -> FrameSource:

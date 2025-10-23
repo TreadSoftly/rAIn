@@ -476,6 +476,8 @@ def _run_pipeline_worker(
     override_path: Optional[str],
     prefer_small: bool,
     fps: Optional[int],
+    camera_auto_exposure: Optional[str],
+    camera_exposure: Optional[float],
     size: Optional[Tuple[int, int]],
     headless: bool,
     conf: float,
@@ -500,6 +502,8 @@ def _run_pipeline_worker(
             out_path=save_path,
             prefer_small=prefer_small,
             fps=fps,
+            camera_auto_exposure=camera_auto_exposure,
+            camera_exposure=camera_exposure,
             size=size,
             headless=headless,
             conf=conf,
@@ -535,6 +539,16 @@ def run(
     headless: bool = typer.Option(False, "--headless", help="Disable preview window."),
     save: Optional[str] = typer.Option(None, "--save", "-o", help="Optional MP4 output path."),
     fps: Optional[int] = typer.Option(None, "--fps", help="Target FPS for writer (default 30)."),
+    camera_auto_exposure: Optional[str] = typer.Option(
+        None,
+        "--camera-auto-exposure",
+        help="Override camera auto-exposure (auto/manual/off or numeric value).",
+    ),
+    camera_exposure: Optional[float] = typer.Option(
+        None,
+        "--camera-exposure",
+        help="Explicit exposure value passed to the camera driver.",
+    ),
     width: Optional[int] = typer.Option(None, "--width", help="Capture width hint."),
     height: Optional[int] = typer.Option(None, "--height", help="Capture height hint."),
     conf: float = typer.Option(0.25, "--conf", help="Detector confidence (detect/pose/obb where applicable)."),
@@ -643,7 +657,7 @@ def run(
 
     size: Optional[Tuple[int, int]] = (width, height) if (width and height) else None
 
-    ort_ok, ort_version, ort_providers, ort_reason = ort_available()
+    ort_status = ort_available()
     torch_ok = torch_available()
     try:
         import cv2  # type: ignore
@@ -652,22 +666,53 @@ def run(
     except Exception as exc:
         opencv_desc = f"missing ({type(exc).__name__}: {exc})"
 
-    capabilities = { # type: ignore[var-annotated]
+    allow_cpu_fallback = os.environ.get("ARGOS_ALLOW_CPU_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+    capabilities = {  # type: ignore[var-annotated]
         "ort": {
-            "ok": bool(ort_ok and ort_providers and not ort_reason),
-            "version": ort_version,
-            "providers": ort_providers,
-            "reason": ort_reason,
+            "ok": bool(ort_status.ok and ort_status.providers_ok),
+            "version": ort_status.version,
+            "providers": ort_status.providers,
+            "reason": ort_status.reason,
+            "expected": ort_status.expected_provider,
+            "providers_ok": ort_status.providers_ok,
+            "healed": ort_status.healed,
         },
         "torch": {"ok": bool(torch_ok)},
         "opencv": opencv_desc,
     }
-    _log_event("live.capabilities", **capabilities) # type: ignore[arg-type]
+    healed_provider_label: Optional[str] = None
+    if ort_status.summary:
+        capabilities["ort"]["summary"] = ort_status.summary  # type: ignore[index]
+    _log_event("live.capabilities", **capabilities)  # type: ignore[arg-type]
+
+    if ort_status.healed and ort_status.ok and ort_status.providers_ok and ort_status.expected_provider:
+        healed_provider_label = ort_status.expected_provider
+        os.environ["PANOPTES_ORT_HEALED"] = healed_provider_label
+
+    if not ort_status.ok and not allow_cpu_fallback:
+        _log_event(
+            "live.capabilities.abort",
+            reason=ort_status.reason or "onnxruntime unavailable",
+            expected=ort_status.expected_provider,
+            providers=",".join(ort_status.providers or []),
+        )
+        raise typer.Exit(code=1)
+    if not ort_status.ok and allow_cpu_fallback:
+        _log_event(
+            "live.capabilities.fallback",
+            reason=ort_status.reason or "onnxruntime unavailable",
+            expected=ort_status.expected_provider,
+            providers=",".join(ort_status.providers or []),
+        )
 
     result_queue: MPQueue[ResultMessage] = mp.Queue()
     processes: list[mp.Process] = []
     try:
         for idx, spec in enumerate(resolved_specs):
+            if healed_provider_label and idx == 1:
+                os.environ.pop("PANOPTES_ORT_HEALED", None)
+                healed_provider_label = None
             src_label = _format_source_label(spec.source)
             with bind_context(live_task=spec.task, source=src_label):
                 _log_event("live.cli.selection", task=spec.task, source=src_label, small=spec.prefer_small, save=save, headless=headless)
@@ -680,6 +725,8 @@ def run(
                     str(spec.override) if spec.override is not None else None,
                     spec.prefer_small,
                     fps,
+                    camera_auto_exposure,
+                    camera_exposure,
                     size,
                     headless,
                     conf,
@@ -748,6 +795,7 @@ def run(
             result_queue.close()
         except Exception:
             pass
+        os.environ.pop("PANOPTES_ORT_HEALED", None)
 
 
 def _prepend_argv(token: str) -> None:

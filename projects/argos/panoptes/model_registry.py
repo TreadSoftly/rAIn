@@ -8,7 +8,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Final, Iterable, Iterator, Mapping, Optional, Sequence, Union, cast
+from typing import Any, Final, Iterable, Iterator, Mapping, Optional, Sequence, Union, cast, Set
 
 from .logging_config import bind_context
 from .runtime.backend_probe import ort_available, torch_available
@@ -24,6 +24,7 @@ LOGGER.setLevel(logging.ERROR)
 
 _ERROR_TOKENS = ("error", "fail", "failed", "exception", "warning")
 _ERROR_KEYS = ("error", "reason")
+_WARNED_EXPECTED_PROVIDERS: Set[str] = set()
 
 
 def _should_log(event: str, info: Mapping[str, object]) -> bool:
@@ -260,23 +261,37 @@ def _candidate_weights(
           not explicitly de-prioritised via environment toggles.
     """
     prefer_onnx = os.environ.get("ARGOS_PREFER_ONNX", "1").strip().lower() not in {"0", "false", "no", "off"}
-    ort_ok, ort_version, ort_providers, ort_reason = ort_available()
+    ort_status = ort_available()
     torch_ok = torch_available()
-    ort_ready = bool(ort_ok and ort_providers and not ort_reason)
+    ort_providers = ort_status.providers or []
+    ort_ready = bool(ort_status.ok and ort_status.providers_ok)
     if ort_providers:
-        ort_status = ",".join(ort_providers)
-    elif ort_reason:
-        ort_status = ort_reason
+        ort_status_text = ",".join(ort_providers)
+    elif ort_status.reason:
+        ort_status_text = ort_status.reason
     else:
-        ort_status = "OK" if ort_ready else "unavailable"
+        ort_status_text = "OK" if ort_ready else "unavailable"
+    ort_reason = ort_status.reason
+    if not ort_reason and not ort_ready:
+        ort_reason = "onnxruntime unavailable"
+    if not ort_status.providers_ok and ort_status.expected_provider:
+        expected_key = ort_status.expected_provider.lower()
+        if expected_key not in _WARNED_EXPECTED_PROVIDERS:
+            _WARNED_EXPECTED_PROVIDERS.add(expected_key)
+            _log(
+                "weights.select.provider_mismatch",
+                expected=ort_status.expected_provider,
+                providers=",".join(ort_providers),
+                reason=ort_reason,
+            )
 
     _log(
         "weights.select.start",
         task=task,
         prefer_small=small,
         prefer_onnx=int(prefer_onnx),
-        ort=ort_status,
-        ort_version=ort_version or "?",
+        ort=ort_status_text,
+        ort_version=ort_status.version or "?",
         torch="OK" if torch_ok else "missing",
     )
 
@@ -339,7 +354,7 @@ def _candidate_weights(
                 "weights.select.warn",
                 task=task,
                 weight=str(override_path),
-                reason=f"ORT unavailable: {ort_reason}",
+                reason=f"ORT unavailable: {ort_reason or 'onnxruntime unavailable'}",
             )
 
     if small:

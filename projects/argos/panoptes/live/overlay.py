@@ -150,6 +150,8 @@ def draw_masks_bgr(
         (52, 148, 230), (222, 98, 98), (141, 218, 139), (255, 160, 122),
     ]
 
+    alpha = float(max(0.0, min(1.0, alpha)))
+    inv_alpha = 1.0 - alpha
     idx = 0
     for m_u8, conf, cls_id in instances:
         try:
@@ -164,21 +166,27 @@ def draw_masks_bgr(
             color = palette[idx % len(palette)]
             idx += 1
 
+            mask_bool = np.greater(m_u8, 0)
+            if not np.any(mask_bool):
+                continue
+
             # Blend
             if cv2 is not None:
-                colored = np.zeros_like(out)
-                colored[:] = color
-                mask = (m_u8 > 0).astype(np.uint8)
-                mask3 = mask[..., None]
-                out = (out.astype("float32") * (1.0 - alpha * mask3) + colored.astype("float32") * (alpha * mask3)).astype(np.uint8)
+                color_vec = np.array(color, dtype=np.float32)
+                region = out[mask_bool].astype(np.float32, copy=False)
+                blended = region * inv_alpha + color_vec * alpha
+                out[mask_bool] = blended.astype(np.uint8, copy=False)
+                mask_u8 = mask_bool.astype(np.uint8) * 255
                 # Optional thin outline for instance boundary
-                edges = cv2.Canny((mask * 255).astype(np.uint8), 50, 150)
-                out[edges > 0] = color
+                edges = cv2.Canny(mask_u8, 50, 150)
+                if edges.size:
+                    out[edges > 0] = color
             else:
                 # Minimal NumPy-only overlay
-                mask = (m_u8 > 0)
-                for c in range(3):
-                    out[..., c] = (out[..., c].astype("float32") * (1.0 - alpha * mask) + color[c] * (alpha * mask)).astype(np.uint8)
+                color_vec = np.array(color, dtype=np.float32)
+                region = out[mask_bool].astype(np.float32, copy=False)
+                blended = region * inv_alpha + color_vec * alpha
+                out[mask_bool] = blended.astype(np.uint8, copy=False)
 
             if cls_id is not None and names:
                 label = names.get(int(cls_id), str(cls_id))
@@ -186,7 +194,7 @@ def draw_masks_bgr(
                 label = ""
             if label and cv2 is not None:
                 # find a spot to draw label: first pixel of mask bounding box
-                ys, xs = np.where((m_u8 > 0))
+                ys, xs = np.nonzero(mask_bool)
                 if ys.size > 0:
                     y0, x0 = int(ys.min()), int(xs.min())
                     txt = f"{label} {conf:.2f}"

@@ -226,11 +226,7 @@ def _site_packages_root() -> Path:
 def _as_str_key_dict(obj: object) -> Dict[str, Any]:
     if isinstance(obj, Mapping):
         mapping_view = cast(Mapping[Any, Any], obj)
-        result: Dict[str, Any] = {}
-        for key_obj, value in mapping_view.items():
-            key_str = key_obj if isinstance(key_obj, str) else str(key_obj)
-            result[key_str] = value
-        return result
+        return {str(key): value for key, value in mapping_view.items()}
     return {}
 
 
@@ -274,15 +270,14 @@ def _gather_paths_from_root(root: Path, *, include_nvidia_prefix: bool) -> list[
     return discovered
 
 
-_REQUIRED_CUDA_DLLS: tuple[str, ...] = (
-    "cublas64_12.dll",
-    "cublasLt64_12.dll",
-    "cudart64_12.dll",
-    "cudnn64_9.dll",
-    "cudnn_cnn_infer64_9.dll",
-    "cudnn_cnn_train64_9.dll",
-    "cudnn_ops_infer64_9.dll",
-    "cudnn_ops_train64_9.dll",
+_REQUIRED_CUDA_DLL_SETS: tuple[tuple[str, ...], ...] = (
+    ("cublas64_12.dll",),
+    ("cublasLt64_12.dll",),
+    ("cudart64_12.dll",),
+    ("cudnn64_9.dll",),
+    ("cudnn_ops64_9.dll", "cudnn_ops_infer64_9.dll", "cudnn_ops_train64_9.dll"),
+    ("cudnn_cnn64_9.dll", "cudnn_cnn_infer64_9.dll", "cudnn_cnn_train64_9.dll"),
+    ("cudnn_adv64_9.dll",),
 )
 
 
@@ -304,15 +299,17 @@ def _discover_cuda_library_dirs() -> list[Path]:
 def _detect_missing_cuda_dlls(directories: Sequence[Path]) -> list[str]:
     missing: list[str] = []
     normalized = [p.resolve() for p in directories if p.exists()]
-    for dll_name in _REQUIRED_CUDA_DLLS:
+    for variants in _REQUIRED_CUDA_DLL_SETS:
         found = False
         for directory in normalized:
-            dll_path = directory / dll_name
-            if dll_path.exists():
-                found = True
+            for candidate in variants:
+                if (directory / candidate).exists():
+                    found = True
+                    break
+            if found:
                 break
         if not found:
-            missing.append(dll_name)
+            missing.append(variants[0])
     return missing
 
 
@@ -412,6 +409,25 @@ def _collect_ort_metadata() -> Dict[str, Any]:
         """\
         import json
         import sys
+        from typing import Optional
+
+        def _detect_package() -> Optional[dict[str, object]]:
+            try:
+                import importlib.metadata as importlib_metadata  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    import importlib_metadata  # type: ignore[type-arg]
+                except Exception:
+                    return None
+            for name in ("onnxruntime-gpu", "onnxruntime-directml", "onnxruntime"):
+                try:
+                    dist = importlib_metadata.distribution(name)
+                except Exception:
+                    continue
+                meta_name = getattr(dist, "metadata", {}).get("Name", None)
+                pretty = meta_name if isinstance(meta_name, str) and meta_name.strip() else name
+                return {"name": pretty, "version": getattr(dist, "version", None)}
+            return None
 
         payload: dict[str, object] = {}
         try:
@@ -422,6 +438,9 @@ def _collect_ort_metadata() -> Dict[str, Any]:
         else:
             payload["available"] = True
             payload["version"] = getattr(ort, "__version__", None)
+            package_meta = _detect_package()
+            if package_meta is not None:
+                payload["package"] = package_meta
             try:
                 providers = list(getattr(ort, "get_available_providers", lambda: [])())
             except Exception as exc:  # pragma: no cover - diagnostics only
@@ -457,6 +476,49 @@ def _refresh_capabilities_cache(log: bool = False) -> Dict[str, Any]:
     info["timestamp"] = time.time()
     info["torch"] = _collect_torch_metadata()
     info["onnxruntime"] = _collect_ort_metadata()
+
+    if _last_onnx_summary:
+        summary_map: Dict[str, Any] = {str(key): value for key, value in _last_onnx_summary.items()}
+        ort_meta_obj = _as_str_key_dict(info.get("onnxruntime") or {})
+        providers_obj = summary_map.get("providers")
+        if isinstance(providers_obj, Sequence) and not isinstance(providers_obj, (str, bytes)):
+            providers_seq = cast(Sequence[Any], providers_obj)
+            ort_meta_obj["providers"] = [str(provider) for provider in providers_seq]
+        expected_provider = _coerce_optional_str(summary_map.get("expected_provider"))
+        if expected_provider:
+            ort_meta_obj["expected_provider"] = expected_provider
+        package_name = _coerce_optional_str(summary_map.get("package"))
+        if package_name:
+            ort_meta_obj["package"] = package_name
+        spec_str = _coerce_optional_str(summary_map.get("spec"))
+        if spec_str:
+            ort_meta_obj["spec"] = spec_str
+        providers_ok = summary_map.get("providers_ok")
+        if isinstance(providers_ok, bool):
+            ort_meta_obj["providers_ok"] = providers_ok
+        elif providers_ok is not None:
+            ort_meta_obj["providers_ok"] = bool(providers_ok)
+        validation_obj = summary_map.get("validation")
+        if isinstance(validation_obj, Mapping):
+            validation_map_input = cast(Mapping[Any, Any], validation_obj)
+            validation_map = {str(key): value for key, value in validation_map_input.items()}
+            validation_payload: Dict[str, Any] = {"ok": bool(validation_map.get("ok"))}
+            validation_error = _coerce_optional_str(validation_map.get("error"))
+            if validation_error:
+                validation_payload["error"] = validation_error
+            validation_providers = validation_map.get("providers")
+            if isinstance(validation_providers, Sequence) and not isinstance(validation_providers, (str, bytes)):
+                validation_payload["providers"] = [
+                    str(provider) for provider in cast(Sequence[Any], validation_providers)
+                ]
+            ort_meta_obj["validation"] = validation_payload
+        heal_flag = summary_map.get("healed")
+        if isinstance(heal_flag, bool):
+            ort_meta_obj["last_heal"] = {"healed": heal_flag, "timestamp": time.time()}
+        elif heal_flag is not None:
+            ort_meta_obj["last_heal"] = {"healed": bool(heal_flag), "timestamp": time.time()}
+        info["onnxruntime"] = ort_meta_obj
+
     cuda_dirs: List[Path] = _discover_cuda_library_dirs()
     info["cuda"] = {
         "dll_dirs": [str(path_obj) for path_obj in cuda_dirs],
@@ -464,7 +526,7 @@ def _refresh_capabilities_cache(log: bool = False) -> Dict[str, Any]:
     }
     preferred_accelerator = env_preferred
     if not preferred_accelerator:
-        ort_meta_obj = _as_str_key_dict(info.get("onnxruntime"))
+        ort_meta_obj = _as_str_key_dict(info.get("onnxruntime") or {})
         providers_obj = ort_meta_obj.get("providers")
         if isinstance(providers_obj, Sequence) and not isinstance(providers_obj, (str, bytes)):
             providers_seq = cast(Sequence[Any], providers_obj)
@@ -474,7 +536,7 @@ def _refresh_capabilities_cache(log: bool = False) -> Dict[str, Any]:
             elif any("directml" in p or "dml" in p for p in lowered):
                 preferred_accelerator = "directml"
         if not preferred_accelerator:
-            cuda_meta_obj = _as_str_key_dict(info.get("cuda"))
+            cuda_meta_obj = _as_str_key_dict(info.get("cuda") or {})
             if cuda_meta_obj.get("dll_dirs"):
                 preferred_accelerator = "cuda"
     info["preferred_accelerator"] = preferred_accelerator or "cpu"
@@ -1023,6 +1085,57 @@ def _install_windows_vcredist(
 _last_onnx_summary: Optional[dict[str, object]] = None
 
 
+def _extract_ort_package(spec: str) -> str:
+    """Return the distribution name portion of an onnxruntime specifier."""
+    if not spec:
+        return "onnxruntime"
+    trimmed = spec.strip()
+    for idx, ch in enumerate(trimmed):
+        if ch in "<>!=[":
+            return trimmed[:idx].strip() or "onnxruntime"
+    return trimmed
+
+
+def _replace_ort_package(spec: str, package: str) -> str:
+    """Swap the distribution name in the given specifier string."""
+    base = _extract_ort_package(spec)
+    if not base:
+        return package
+    if package == base:
+        return spec
+    return f"{package}{spec[len(base):]}"
+
+
+def _expected_provider_for_accelerator(accelerator: str) -> Optional[str]:
+    """Map an accelerator hint to the provider we expect from ONNX Runtime."""
+    accel = accelerator.strip().lower()
+    if accel == "cuda":
+        return "CUDAExecutionProvider"
+    if accel == "directml":
+        return "DmlExecutionProvider"
+    if accel == "tensorrt":
+        return "TensorrtExecutionProvider"
+    return None
+
+
+def _package_for_accelerator(accelerator: str, *, default: str) -> str:
+    """Return the preferred onnxruntime wheel for the requested accelerator."""
+    accel = accelerator.strip().lower()
+    if accel in {"cuda", "tensorrt"}:
+        return "onnxruntime-gpu"
+    if accel == "directml":
+        return "onnxruntime-directml"
+    return default
+
+
+def _coerce_optional_str(value: object) -> Optional[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
+
+
 def ensure_onnxruntime(
     venv_py: Optional[Path] = None,
     *,
@@ -1046,13 +1159,57 @@ def ensure_onnxruntime(
         "dlls_missing": [],
     }
     attempts: list[dict[str, object]] = summary["attempts"]  # type: ignore[assignment]
-    ort_spec = desired_ort_spec()
-    summary["spec"] = ort_spec
-    accelerator_hint = os.getenv("ARGOS_ACCELERATOR", "").strip().lower()
+    try:
+        raw_caps = read_capabilities()
+    except Exception:
+        raw_caps = {}
+    capabilities_snapshot = _as_str_key_dict(raw_caps)
+
+    env_accel_env = os.getenv("ARGOS_ACCELERATOR")
+    env_accelerator_raw = _coerce_optional_str(env_accel_env)
+    preferred_value: object = capabilities_snapshot.get("preferred_accelerator")
+    preferred_from_caps = _coerce_optional_str(preferred_value)
+    accelerator_hint = (env_accelerator_raw or preferred_from_caps or "").lower()
+    if accelerator_hint and (not env_accelerator_raw or env_accelerator_raw.lower() != accelerator_hint):
+        os.environ["ARGOS_ACCELERATOR"] = accelerator_hint
     summary["accelerator"] = accelerator_hint or None
 
+    base_spec = desired_ort_spec()
+    env_spec_override_raw = os.getenv("ARGOS_ONNXRUNTIME_SPEC")
+    env_spec_override = _coerce_optional_str(env_spec_override_raw)
+    default_package = _extract_ort_package(base_spec)
+    capability_package = None
+    ort_meta_value: object = capabilities_snapshot.get("onnxruntime")
+    ort_meta_snapshot = _as_str_key_dict(ort_meta_value)
+    package_obj = ort_meta_snapshot.get("package")
+    capability_package = _coerce_optional_str(package_obj)
+    if capability_package is None:
+        package_meta = _as_str_key_dict(package_obj)
+        capability_package = _coerce_optional_str(package_meta.get("name"))
+
+    if env_spec_override:
+        ort_spec = env_spec_override
+        package_name = _extract_ort_package(env_spec_override)
+    else:
+        package_name = default_package
+        if accelerator_hint:
+            package_name = _package_for_accelerator(accelerator_hint, default=default_package)
+        elif capability_package:
+            package_name = capability_package
+        ort_spec = _replace_ort_package(base_spec, package_name)
+
+    summary["spec"] = ort_spec
+    summary["package"] = package_name
+
+    expected_provider = _expected_provider_for_accelerator(accelerator_hint)
+    if not expected_provider and package_name == "onnxruntime-gpu":
+        expected_provider = "CUDAExecutionProvider"
+    elif not expected_provider and package_name == "onnxruntime-directml":
+        expected_provider = "DmlExecutionProvider"
+    summary["expected_provider"] = expected_provider
+
     def providers_match_expectation(providers: Optional[object]) -> bool:
-        if accelerator_hint not in {"cuda", "directml", "tensorrt"}:
+        if not expected_provider:
             return True
         if not providers:
             return False
@@ -1061,28 +1218,104 @@ def ensure_onnxruntime(
         else:
             provider_items = (providers,)
         lowered = [str(p).lower() for p in provider_items]
-        if accelerator_hint == "cuda":
+        expected_lower = expected_provider.lower()
+        if expected_lower in lowered:
+            return True
+        if expected_lower.startswith("cuda"):
             return any("cuda" in p for p in lowered)
-        if accelerator_hint == "directml":
+        if expected_lower.startswith(("dml", "directml")):
             return any("directml" in p or "dml" in p for p in lowered)
-        if accelerator_hint == "tensorrt":
+        if expected_lower.startswith("tensorrt"):
             return any("tensorrt" in p for p in lowered)
-        return True
-
-    def expected_provider_label() -> Optional[str]:
-        if accelerator_hint == "cuda":
-            return "CUDAExecutionProvider"
-        if accelerator_hint == "directml":
-            return "DmlExecutionProvider"
-        if accelerator_hint == "tensorrt":
-            return "TensorrtExecutionProvider"
-        return None
+        return False
 
     def record(action: str, info: Optional[dict[str, object]] = None) -> None:
         entry: dict[str, object] = {"action": action}
         if info:
             entry.update(info)
         attempts.append(entry)
+
+    def validate_provider(provider_label: Optional[str]) -> dict[str, object]:
+        if not provider_label:
+            return {"ok": True, "providers": None, "error": None}
+        script = textwrap.dedent(
+            """\
+            import json
+            import sys
+            import tempfile
+            from pathlib import Path
+
+            provider = sys.argv[1]
+            result = {"ok": False, "error": None, "providers": []}
+            tmp_path = None
+            try:
+                import onnx  # noqa: F401
+                import onnxruntime as ort  # type: ignore
+                from onnx import helper, TensorProto
+
+                node = helper.make_node("Identity", inputs=["X"], outputs=["Y"])
+                graph = helper.make_graph(
+                    [node],
+                    "ArgosValidateORT",
+                    [helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])],
+                    [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])],
+                )
+                model = helper.make_model(
+                    graph,
+                    producer_name="argos.bootstrap.ensure",
+                    opset_imports=[helper.make_operatorsetid("", 12)],
+                )
+                try:
+                    model.ir_version = min(getattr(model, "ir_version", 7), 7)
+                except Exception:
+                    try:
+                        model.ir_version = 7
+                    except Exception:
+                        pass
+                tmp_path = Path(tempfile.gettempdir()) / "argos_validate.onnx"
+                tmp_path.write_bytes(model.SerializeToString())
+
+                session = ort.InferenceSession(tmp_path.as_posix(), providers=[provider])
+                get_providers = getattr(session, "get_providers", lambda: [])
+                providers = [str(p) for p in get_providers()]
+                result["providers"] = providers
+                wanted = provider.lower()
+                result["ok"] = any(wanted == p.lower() for p in providers)
+            except Exception as exc:  # pragma: no cover - validation issues bubble up
+                result["error"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            sys.stdout.write(json.dumps(result))
+            """
+        )
+        proc = _run([str(py), "-c", script, provider_label], check=False, capture=True)
+        payload: dict[str, object] = {"ok": False, "providers": None, "error": None}
+        out = (proc.stdout or "").strip()
+        if out:
+            try:
+                parsed = json.loads(out)
+                if isinstance(parsed, dict):
+                    payload = cast(dict[str, object], parsed)
+            except Exception:
+                payload = {"ok": False, "providers": None, "error": "validation: invalid response"}
+        if not payload.get("error") and proc.returncode != 0:
+            stderr_msg = (proc.stderr or "").strip()
+            if stderr_msg:
+                payload["error"] = stderr_msg
+        record(
+            "validate-provider",
+            {
+                "provider": provider_label,
+                "ok": bool(payload.get("ok")),
+                "error": payload.get("error"),
+            },
+        )
+        return payload
 
     def run_probe(label: str) -> dict[str, object]:
         info = _probe_onnx_runtime(py)
@@ -1131,7 +1364,12 @@ def ensure_onnxruntime(
 
     info = run_probe("probe-initial")
 
-    def _succeed(data: dict[str, object], healed: bool) -> dict[str, object]:
+    def _succeed(
+        data: dict[str, object],
+        healed: bool,
+        validation: Optional[dict[str, object]] = None,
+    ) -> dict[str, object]:
+        global _last_onnx_summary
         summary["installed"] = True
         summary["healed"] = healed
         summary["ort_version"] = data.get("version")
@@ -1139,6 +1377,11 @@ def ensure_onnxruntime(
         summary["providers"] = data.get("providers")
         summary["error"] = None
         summary["providers_ok"] = providers_match_expectation(data.get("providers"))
+        summary["validation"] = validation
+        if validation is not None:
+            summary["validation_ok"] = bool(validation.get("ok"))
+        else:
+            summary["validation_ok"] = None if expected_provider else True
         os.environ.pop("ARGOS_DISABLE_ONNX", None)
         log(f"-> onnxruntime ready (v{data.get('version') or '?'}, providers={data.get('providers') or []})")
         providers_raw = data.get("providers")
@@ -1153,17 +1396,33 @@ def ensure_onnxruntime(
             log(f"-> CUDA execution provider active (providers={providers_list})")
         elif accelerator_hint == "directml" and summary["providers_ok"]:
             log(f"-> DirectML execution provider active (providers={providers_list})")
+        _last_onnx_summary = summary
+        try:
+            _refresh_capabilities_cache(log=True)
+        except Exception:
+            pass
         return summary
 
     if _probe_onnx_success(info) and providers_match_expectation(info.get("providers")):
-        result = _succeed(info, healed=False)
-        _last_onnx_summary = result
-        return result
+        validation = validate_provider(expected_provider) if expected_provider else None
+        if validation and not validation.get("ok"):
+            summary["validation"] = validation
+            summary["validation_ok"] = bool(validation.get("ok"))
+            summary["providers_ok"] = False
+            summary["error"] = validation.get("error") or (
+                f"onnxruntime missing validated provider ({expected_provider})"
+            )
+        else:
+            result = _succeed(info, healed=False, validation=validation)
+            return result
 
     summary["providers"] = info.get("providers")
     summary["providers_ok"] = providers_match_expectation(info.get("providers"))
     if _probe_onnx_success(info) and not summary["providers_ok"] and accelerator_hint:
-        summary["error"] = f"onnxruntime missing expected {accelerator_hint} provider ({expected_provider_label() or accelerator_hint})"
+        expected_display = expected_provider or accelerator_hint
+        summary["error"] = (
+            f"onnxruntime missing expected {accelerator_hint} provider ({expected_display})"
+        )
         log(
             f"-> onnxruntime present but missing expected {accelerator_hint.upper()} provider; reinstalling {ort_spec}"
         )
@@ -1182,6 +1441,17 @@ def ensure_onnxruntime(
             if _install_windows_vcredist(log, lambda act, details: record(act, details)):
                 performed_heal = True
                 summary["dlls_missing"] = _windows_missing_runtime_dlls()
+    removal_targets: list[str] = []
+    if package_name == "onnxruntime":
+        removal_targets = ["onnxruntime-gpu", "onnxruntime-directml"]
+    elif package_name == "onnxruntime-gpu":
+        removal_targets = ["onnxruntime", "onnxruntime-directml"]
+    elif package_name == "onnxruntime-directml":
+        removal_targets = ["onnxruntime", "onnxruntime-gpu"]
+    if removal_targets:
+        if uninstall_packages(removal_targets, label="pip-uninstall-onnxruntime-pre"):
+            performed_heal = True
+
     install_packages(["pip", "setuptools", "wheel"], label="pip-upgrade", binary_only=False)
     if install_packages(["onnx"], label="pip-onnx"):
         performed_heal = True
@@ -1190,9 +1460,17 @@ def ensure_onnxruntime(
 
     info = run_probe("probe-after-pip")
     if _probe_onnx_success(info) and providers_match_expectation(info.get("providers")):
-        result = _succeed(info, healed=performed_heal)
-        _last_onnx_summary = result
-        return result
+        validation = validate_provider(expected_provider) if expected_provider else None
+        if validation and not validation.get("ok"):
+            summary["validation"] = validation
+            summary["validation_ok"] = bool(validation.get("ok"))
+            summary["providers_ok"] = False
+            summary["error"] = validation.get("error") or (
+                f"onnxruntime missing validated provider ({expected_provider})"
+            )
+        else:
+            result = _succeed(info, healed=performed_heal, validation=validation)
+            return result
     summary["providers"] = info.get("providers")
     summary["providers_ok"] = providers_match_expectation(info.get("providers"))
 
@@ -1216,9 +1494,17 @@ def ensure_onnxruntime(
         summary["providers"] = info.get("providers")
         summary["providers_ok"] = providers_match_expectation(info.get("providers"))
         if _probe_onnx_success(info) and summary["providers_ok"]:
-            result = _succeed(info, healed=True)
-            _last_onnx_summary = result
-            return result
+            validation = validate_provider(expected_provider) if expected_provider else None
+            if validation and not validation.get("ok"):
+                summary["validation"] = validation
+                summary["validation_ok"] = bool(validation.get("ok"))
+                summary["providers_ok"] = False
+                summary["error"] = validation.get("error") or (
+                    f"onnxruntime missing validated provider ({expected_provider})"
+                )
+            else:
+                result = _succeed(info, healed=True, validation=validation)
+                return result
 
     if os.name == "nt":
         missing = _windows_missing_runtime_dlls()
@@ -1238,13 +1524,21 @@ def ensure_onnxruntime(
                 summary["providers"] = info.get("providers")
                 summary["providers_ok"] = providers_match_expectation(info.get("providers"))
                 if _probe_onnx_success(info) and summary["providers_ok"]:
-                    result = _succeed(info, healed=True)
-                    _last_onnx_summary = result
-                    return result
+                    validation = validate_provider(expected_provider) if expected_provider else None
+                    if validation and not validation.get("ok"):
+                        summary["validation"] = validation
+                        summary["validation_ok"] = bool(validation.get("ok"))
+                        summary["providers_ok"] = False
+                        summary["error"] = validation.get("error") or (
+                            f"onnxruntime missing validated provider ({expected_provider})"
+                        )
+                    else:
+                        result = _succeed(info, healed=True, validation=validation)
+                        return result
 
     if summary.get("providers_ok") is False and accelerator_hint:
         summary["error"] = summary.get("error") or (
-            f"onnxruntime missing expected {accelerator_hint} provider ({expected_provider_label() or accelerator_hint})"
+            f"onnxruntime missing expected {accelerator_hint} provider ({expected_provider or accelerator_hint})"
         )
     else:
         summary["error"] = info.get("error")
@@ -1272,10 +1566,14 @@ def _ensure_onnx_runtime_packages() -> None:
     global _last_onnx_summary
     summary = ensure_onnxruntime(venv_python(), log=_print)
     _last_onnx_summary = summary
-    if not summary.get("installed"):
+    if (not summary.get("installed")) or (summary.get("providers_ok") is False):
         reason = summary.get("error") or "unknown"
         providers = summary.get("providers")
-        _print(f"?? onnxruntime unavailable after bootstrap: {reason}; providers={providers}")
+        if isinstance(providers, Sequence) and not isinstance(providers, (str, bytes)):
+            provider_display: object = [str(p) for p in cast(Sequence[Any], providers)]
+        else:
+            provider_display = providers
+        raise RuntimeError(f"ONNX Runtime validation failed: {reason}; providers={provider_display}")
 
 
 def _probe_weight_presets() -> tuple[Path, list[str], list[str], list[str], list[str]]:
@@ -1881,6 +2179,39 @@ def _ensure(
         ("Move pytest cache", _move_pytest_cache_out_of_repo),
         ("pip check (soft)", _pip_check_soft),
     ]
+
+    compact_progress = os.getenv("ARGOS_PROGRESS_COMPACT", "").strip().lower() in {"1", "true", "yes", "on"}
+    if compact_progress:
+        total_steps = len(steps)
+        last_len = 0
+
+        def _update_progress(message: str) -> None:
+            nonlocal last_len
+            line = f"\r{message}"
+            sys.stdout.write(line)
+            padding = last_len - len(message)
+            if padding > 0:
+                sys.stdout.write(" " * padding)
+            sys.stdout.flush()
+            last_len = len(message)
+
+        try:
+            for idx, (name, fn) in enumerate(steps, start=1):
+                label = f"BOOTSTRAP [{idx}/{total_steps}] {name}"
+                _update_progress(f"{label} ...")
+                try:
+                    fn()
+                except Exception:
+                    _update_progress(f"{label} [FAIL]")
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    raise
+                _update_progress(f"{label} [OK]")
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        finally:
+            sys.stdout.flush()
+        return
 
     if ProgressEngine is None or live_percent is None:
         for name, fn in steps:

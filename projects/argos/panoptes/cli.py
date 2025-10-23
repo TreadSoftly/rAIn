@@ -1376,6 +1376,26 @@ def target(  # noqa: C901
     else:
         task_final = token_task or "detect"
 
+    ort_status = backend_probe.ort_available()
+    allow_cpu_fallback = _env_flag("ARGOS_ALLOW_CPU_FALLBACK", False)
+    if not ort_status.ok and ort_status.expected_provider and not allow_cpu_fallback:
+        _log_event(
+            "cli.ort.unavailable",
+            expected=ort_status.expected_provider,
+            reason=ort_status.reason or "onnxruntime unavailable",
+            providers=",".join(ort_status.providers or []),
+            healed=ort_status.healed,
+        )
+        raise typer.Exit(1)
+    if not ort_status.ok and allow_cpu_fallback:
+        _log_event(
+            "cli.ort.fallback",
+            expected=ort_status.expected_provider,
+            reason=ort_status.reason or "onnxruntime unavailable",
+            providers=",".join(ort_status.providers or []),
+            healed=ort_status.healed,
+        )
+
     model_hint, positional, hint_insert_at = _extract_model_hint(positional)
     hint_path: Optional[Path] = None
     hint_applied = False

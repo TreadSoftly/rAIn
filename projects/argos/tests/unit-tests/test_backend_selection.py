@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import panoptes.model_registry as mr  # type: ignore[import]
+from panoptes.runtime.backend_probe import OrtProbeStatus  # type: ignore[import]
 from panoptes.runtime.onnx_spec import desired_ort_spec  # type: ignore[import]
 from pytest import MonkeyPatch
 
@@ -17,7 +18,11 @@ def test_candidate_weights_skips_onnx_when_ort_unavailable(monkeypatch: MonkeyPa
     pt = _write_weight(tmp_path / "model.pt")
 
     monkeypatch.setitem(mr.WEIGHT_PRIORITY, "pose_small", [onnx, pt])
-    monkeypatch.setattr(mr, "ort_available", lambda: (False, None, None, "ImportError: missing"))
+    monkeypatch.setattr(
+        mr,
+        "ort_available",
+        lambda: OrtProbeStatus(False, None, None, "ImportError: missing", False, None, False, None),
+    )
 
     candidates = mr.candidate_weights("pose", small=True)
     assert candidates == [pt]
@@ -28,7 +33,11 @@ def test_candidate_weights_prefers_pt_when_env_disables_onnx(monkeypatch: Monkey
     pt = _write_weight(tmp_path / "model.pt")
 
     monkeypatch.setitem(mr.WEIGHT_PRIORITY, "detect", [onnx, pt])
-    monkeypatch.setattr(mr, "ort_available", lambda: (True, "1.22.1", ["CPUExecutionProvider"], None))
+    monkeypatch.setattr(
+        mr,
+        "ort_available",
+        lambda: OrtProbeStatus(True, "1.22.1", ["CPUExecutionProvider"], None, True, None, False, None),
+    )
     monkeypatch.setenv("ARGOS_PREFER_ONNX", "0")
 
     candidates = mr.candidate_weights("detect", small=False)
@@ -40,7 +49,11 @@ def test_candidate_weights_prefers_onnx_by_default(monkeypatch: MonkeyPatch, tmp
     pt = _write_weight(tmp_path / "model.pt")
 
     monkeypatch.setitem(mr.WEIGHT_PRIORITY, "heatmap_small", [onnx, pt])
-    monkeypatch.setattr(mr, "ort_available", lambda: (True, "1.22.1", ["CPUExecutionProvider"], None))
+    monkeypatch.setattr(
+        mr,
+        "ort_available",
+        lambda: OrtProbeStatus(True, "1.22.1", ["CPUExecutionProvider"], None, True, None, False, None),
+    )
     monkeypatch.delenv("ARGOS_PREFER_ONNX", raising=False)
 
     candidates = mr.candidate_weights("heatmap", small=True)
@@ -54,11 +67,30 @@ def test_ort_available_failure(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(bp, "_try_import_ort", lambda: (False, None, None, "ImportError: missing"))
     monkeypatch.setattr(bp, "_BOOTSTRAP", None)
 
-    ok, version, providers, reason = bp.ort_available()
-    assert ok is False
-    assert version is None
-    assert providers is None
-    assert reason == "ImportError: missing"
+    status = bp.ort_available()
+    assert status.ok is False
+    assert status.version is None
+    assert status.providers is None
+    assert status.reason == "ImportError: missing"
+
+
+def test_ort_available_reports_missing_expected_provider(monkeypatch: MonkeyPatch) -> None:
+    import panoptes.runtime.backend_probe as bp  # type: ignore[import]
+
+    monkeypatch.setenv("ARGOS_ACCELERATOR", "cuda")
+    monkeypatch.setattr(bp, "_cap_cache", None)
+    monkeypatch.setattr(bp, "_BOOTSTRAP", None)
+    monkeypatch.setattr(
+        bp,
+        "_try_import_ort",
+        lambda: (True, "1.22.1", ["CPUExecutionProvider"], None),
+    )
+
+    status = bp.ort_available()
+    assert status.ok is False
+    assert status.providers_ok is False
+    assert status.expected_provider == "CUDAExecutionProvider"
+    assert status.reason == "missing_expected_provider:CUDAExecutionProvider"
 
 
 def test_desired_ort_spec_matches_packaging() -> None:
