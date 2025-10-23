@@ -1139,6 +1139,9 @@ class _YOLOHeatmap(TaskAdapter):
         self.conf = float(conf)
         self.names = _names_from_model(model.active_model())
         self.label = model.descriptor()
+        from .overlay import new_instance_color_tracker, new_mask_smoother
+        self._mask_tracker = new_instance_color_tracker()
+        self._mask_smoother = new_mask_smoother()
         # Cache resize index arrays keyed by (src_h, src_w, dst_h, dst_w) to avoid
         # recomputing np.linspace for every frame.
         self._resize_cache: dict[Tuple[int, int, int, int], Tuple[Any, Any]] = {}
@@ -1292,7 +1295,14 @@ class _YOLOHeatmap(TaskAdapter):
     def render(self, frame_bgr: NDArrayU8, result: List[Tuple[NDArrayU8, float, Optional[int]]]) -> NDArrayU8:
         # Per-instance compositing with distinct colors + optional labels
         from .overlay import draw_masks_bgr
-        return draw_masks_bgr(frame_bgr, result, names=self.names, alpha=0.35)
+        return draw_masks_bgr(
+            frame_bgr,
+            result,
+            names=self.names,
+            alpha=0.35,
+            tracker=self._mask_tracker,
+            smoother=self._mask_smoother,
+        )
 
 
 # ---------------------------
@@ -1707,11 +1717,14 @@ def build_detect(
                     with _silence_ultralytics():
                         wrapper.prepare()
                 setattr(wrapper, "_argos_prepared", True)
-            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
+            preproc = attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             if warmup and _warmup_wrapper(wrapper, task="detect", conf=conf, iou=iou):
                 sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
-        return _YOLODetect(wrapper, conf=conf, iou=iou, nms_mode=nms_mode_norm)
+        adapter = _YOLODetect(wrapper, conf=conf, iou=iou, nms_mode=nms_mode_norm)
+        if preproc is not None:
+            setattr(adapter, "_preprocessor", preproc)
+        return adapter
     except Exception:
         with _progress_simple_status("FALLBACK: fast-contour (no-ML)"):
             time.sleep(0.05)
@@ -1758,11 +1771,14 @@ def build_heatmap(
                     with _silence_ultralytics():
                         wrapper.prepare()
                 setattr(wrapper, "_argos_prepared", True)
-            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
+            preproc = attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             if warmup and _warmup_wrapper(wrapper, task="heatmap", conf=0.25):
                 sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
-        return _YOLOHeatmap(wrapper, conf=0.25)
+        adapter = _YOLOHeatmap(wrapper, conf=0.25)
+        if preproc is not None:
+            setattr(adapter, "_preprocessor", preproc)
+        return adapter
     except Exception:
         with _progress_simple_status("FALLBACK: laplacian-heatmap (no-ML)"):
             time.sleep(0.05)
@@ -1810,11 +1826,14 @@ def build_classify(
                     with _silence_ultralytics():
                         wrapper.prepare()
                 setattr(wrapper, "_argos_prepared", True)
-            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
+            preproc = attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             if warmup and _warmup_wrapper(wrapper, task="classify"):
                 sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
-        return _YOLOClassify(wrapper, topk=topk)
+        adapter = _YOLOClassify(wrapper, topk=topk)
+        if preproc is not None:
+            setattr(adapter, "_preprocessor", preproc)
+        return adapter
     except Exception:
         with _progress_simple_status("FALLBACK: simple-classify (no-ML)"):
             time.sleep(0.05)
@@ -1862,11 +1881,14 @@ def build_pose(
                     with _silence_ultralytics():
                         wrapper.prepare()
                 setattr(wrapper, "_argos_prepared", True)
-            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
+            preproc = attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             if warmup and _warmup_wrapper(wrapper, task="pose", conf=conf):
                 sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
-        return _YOLOPose(wrapper, conf=conf)
+        adapter = _YOLOPose(wrapper, conf=conf)
+        if preproc is not None:
+            setattr(adapter, "_preprocessor", preproc)
+        return adapter
     except Exception:
         with _progress_simple_status("FALLBACK: simple-pose (no-ML)"):
             time.sleep(0.05)
@@ -1915,11 +1937,14 @@ def build_obb(
                     with _silence_ultralytics():
                         wrapper.prepare()
                 setattr(wrapper, "_argos_prepared", True)
-            attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
+            preproc = attach_preprocessor(wrapper, target_size=input_size, device=preprocess_device)
             if warmup and _warmup_wrapper(wrapper, task="obb", conf=conf, iou=iou):
                 sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
-        return _YOLOOBB(wrapper, conf=conf, iou=iou)
+        adapter = _YOLOOBB(wrapper, conf=conf, iou=iou)
+        if preproc is not None:
+            setattr(adapter, "_preprocessor", preproc)
+        return adapter
     except Exception:
         with _progress_simple_status("FALLBACK: simple-obb (no-ML)"):
             time.sleep(0.05)

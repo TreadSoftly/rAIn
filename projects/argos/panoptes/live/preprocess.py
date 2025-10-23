@@ -66,6 +66,10 @@ class Preprocessor:
     """
     Consolidated resize/letterbox/color conversion utility with buffer reuse.
 
+    Each instance caches internal buffers and is **not** thread-safe; construct
+    one per live pipeline (or inference worker) and avoid sharing across
+    threads or concurrent model wrappers.
+
     Parameters
     ----------
     target_size:
@@ -219,6 +223,9 @@ def attach_preprocessor(
     Attach a reusable preprocessor to the underlying Ultralytics predictor.
     Returns the created ``Preprocessor`` (or ``None`` if the model/predictor
     cannot be resolved).
+
+    The returned instance is intended for single-pipeline use; callers should
+    keep their own handle if they need to coordinate lifetime or teardown.
     """
     model = wrapper.active_model()
     if model is None:
