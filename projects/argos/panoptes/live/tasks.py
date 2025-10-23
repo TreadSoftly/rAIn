@@ -137,7 +137,7 @@ except Exception:  # pragma: no cover
     u8 = cast(Any, "uint8")
 
 from ._types import NDArrayU8, Boxes, Names
-from .preprocess import attach_preprocessor
+from .preprocess import attach_preprocessor, use_preprocessor
 
 try:
     from panoptes.runtime.resilient_yolo import (  # type: ignore[import]
@@ -314,7 +314,6 @@ def _warmup_wrapper(model: "ResilientYOLOProtocol", *, task: str, **kwargs: Any)
     return True
 
 
-_MODEL_POOL: Dict[Tuple[str, Tuple[str, ...]], "ResilientYOLOProtocol"] = {}
 _ort_nms_session: Optional[ORTInferenceSessionType] = None
 
 
@@ -371,10 +370,6 @@ def _get_ort_nms_session() -> Optional[ORTInferenceSessionType]:
         return _ort_nms_session
     except Exception:
         return None
-
-
-def _wrapper_pool_key(task: str, candidates: Sequence[Path]) -> Tuple[str, Tuple[str, ...]]:
-    return task, tuple(str(Path(c)) for c in candidates)
 
 
 def _candidate_backend(path: Path) -> str:
@@ -514,44 +509,22 @@ def _acquire_wrapper(
             metadata_map[cand] = artifact_metadata(cand)
         except Exception as exc:
             metadata_map[cand] = {"analysis_error": f"{type(exc).__name__}:{exc}"}
-    key = _wrapper_pool_key(task, candidates)
-    wrapper = _MODEL_POOL.get(key)
-    if wrapper is None:
-        wrapper = cast(
-            ResilientYOLOProtocol,
-            ResilientYOLORuntime(
-                candidates,
-                task=task,
-                conf=conf,
-                on_switch=hud_callback,
-                metadata=metadata_map,
-            ),
-        )
-        _MODEL_POOL[key] = wrapper
-        LOGGER.debug(
-            "Live task %s created new wrapper using candidates=%s backend_pref=%s",
-            task,
-            [str(p) for p in candidates],
-            backend_preference,
-        )
-    else:
-        refresh = getattr(wrapper, "refresh_candidates", None)
-        if callable(refresh):
-            try:
-                refresh(candidates, metadata=metadata_map)
-            except Exception:
-                LOGGER.debug("Wrapper refresh failed for task=%s", task, exc_info=True)
-        set_switch = getattr(wrapper, "set_on_switch", None)
-        if callable(set_switch):
-            try:
-                set_switch(hud_callback)
-            except Exception:
-                pass
-        LOGGER.debug(
-            "Live task %s reusing cached model for backend_pref=%s",
-            task,
-            backend_preference,
-        )
+    wrapper = cast(
+        ResilientYOLOProtocol,
+        ResilientYOLORuntime(
+            candidates,
+            task=task,
+            conf=conf,
+            on_switch=hud_callback,
+            metadata=metadata_map,
+        ),
+    )
+    LOGGER.debug(
+        "Live task %s created wrapper using candidates=%s backend_pref=%s",
+        task,
+        [str(p) for p in candidates],
+        backend_preference,
+    )
     return wrapper
 # ─────────────────────────────────────────────────────────────────────
 # Central model registry (single source of truth) — guarded import
@@ -1090,7 +1063,8 @@ class _YOLODetect(TaskAdapter):
         np_ = cast(Any, np)
         assert np_ is not None
         inp = _ensure_contiguous(frame_bgr)
-        res_any: Any = self.model.predict(inp, conf=self.conf, iou=self.iou, verbose=False)
+        with use_preprocessor(getattr(self, "_preprocessor", None)):
+            res_any: Any = self.model.predict(inp, conf=self.conf, iou=self.iou, verbose=False)
         if isinstance(res_any, (list, tuple)):
             res_obj: object = cast(Sequence[object], res_any)[0]
         else:
@@ -1210,7 +1184,8 @@ class _YOLOHeatmap(TaskAdapter):
         np_ = cast(Any, np)
         assert np_ is not None
         inp = _ensure_contiguous(frame_bgr)
-        res_any: Any = self.model.predict(inp, conf=self.conf, verbose=False)
+        with use_preprocessor(getattr(self, "_preprocessor", None)):
+            res_any: Any = self.model.predict(inp, conf=self.conf, verbose=False)
         if isinstance(res_any, (list, tuple)):
             res_obj: object = cast(Sequence[object], res_any)[0]
         else:
@@ -1323,7 +1298,8 @@ class _YOLOClassify(TaskAdapter):
         np_ = cast(Any, np)
         assert np_ is not None
         inp = _ensure_contiguous(frame_bgr)
-        res_any: Any = self.model.predict(inp, verbose=False)
+        with use_preprocessor(getattr(self, "_preprocessor", None)):
+            res_any: Any = self.model.predict(inp, verbose=False)
 
         # Ultralytics results often expose .probs with .topk etc.
         def _topk_from_probs(obj: Any) -> Optional[List[Tuple[str, float]]]:
@@ -1417,7 +1393,8 @@ class _YOLOPose(TaskAdapter):
         np_ = cast(Any, np)
         assert np_ is not None
         inp = _ensure_contiguous(frame_bgr)
-        res_any: Any = self.model.predict(inp, conf=self.conf, verbose=False)
+        with use_preprocessor(getattr(self, "_preprocessor", None)):
+            res_any: Any = self.model.predict(inp, conf=self.conf, verbose=False)
         if isinstance(res_any, (list, tuple)):
             res_obj: object = cast(Sequence[object], res_any)[0]
         else:
@@ -1563,7 +1540,8 @@ class _YOLOOBB(TaskAdapter):
         np_ = cast(Any, np)
         assert np_ is not None
         inp = _ensure_contiguous(frame_bgr)
-        res_any: Any = self.model.predict(inp, conf=self.conf, iou=self.iou, verbose=False)
+        with use_preprocessor(getattr(self, "_preprocessor", None)):
+            res_any: Any = self.model.predict(inp, conf=self.conf, iou=self.iou, verbose=False)
         if isinstance(res_any, (list, tuple)):
             res_obj: object = cast(Sequence[object], res_any)[0]
         else:

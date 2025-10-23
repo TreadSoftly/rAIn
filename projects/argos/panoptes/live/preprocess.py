@@ -10,8 +10,10 @@ Ultralytics predictor.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple, SupportsInt, cast
+from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Sequence, Tuple, SupportsInt, cast
+import threading
 
 import numpy as np
 
@@ -39,6 +41,38 @@ try:
     from ultralytics.utils.ops import LetterBox  # type: ignore
 except Exception:  # pragma: no cover
     LetterBox = None  # type: ignore
+
+
+_PREPROCESS_STATE = threading.local()
+
+
+@contextmanager
+def use_preprocessor(preproc: Optional["Preprocessor"]) -> Iterator[None]:
+    """
+    Temporarily activate *preproc* for the current thread.
+
+    The predictor patch installed by ``attach_preprocessor`` reads from this stack
+    to decide which preprocessor should service a given call.  Nesting is supported
+    so autoscale/resolution changes that rebuild adapters can reuse the same helper.
+    """
+    if preproc is None:
+        yield
+        return
+
+    stack: List["Preprocessor"] = getattr(_PREPROCESS_STATE, "stack", [])
+    stack.append(preproc)
+    _PREPROCESS_STATE.stack = stack
+    try:
+        yield
+    finally:
+        stack.pop()
+        if stack:
+            _PREPROCESS_STATE.stack = stack
+        else:
+            try:
+                delattr(_PREPROCESS_STATE, "stack")
+            except AttributeError:
+                pass
 
 
 if TYPE_CHECKING:
@@ -285,11 +319,22 @@ def attach_preprocessor(
         std=std,
     )
 
-    def _patched_preprocess(im: List[UInt8Array]):
-        return preproc.process(im, predictor)
+    original = getattr(predictor, "preprocess", None)
 
-    predictor._argos_preprocessor = preproc  # type: ignore[attr-defined]
-    predictor.preprocess = _patched_preprocess  # type: ignore[assignment]
+    if not hasattr(predictor, "_argos_preprocess_patched"):
+
+        def _argos_shared_preprocess(self: Any, im: List[UInt8Array], *args: Any, **kwargs: Any):
+            stack = getattr(_PREPROCESS_STATE, "stack", None)
+            if stack:
+                active = stack[-1]
+                return active.process(im, self)
+            if original is not None:
+                return original(im, *args, **kwargs)  # type: ignore[misc]
+            raise RuntimeError("No active preprocessor available for predictor.")
+
+        setattr(predictor, "_argos_original_preprocess", original)
+        predictor.preprocess = _argos_shared_preprocess.__get__(predictor, predictor.__class__)  # type: ignore[assignment]
+        predictor._argos_preprocess_patched = True  # type: ignore[attr-defined]
 
     # Keep Ultralytics internals aware of the desired image size.
     th, tw = preproc.cfg.target_hw
