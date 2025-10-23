@@ -18,7 +18,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional, cast
 
 os.environ.setdefault("ORT_LOGGING_LEVEL", "3")
 os.environ.setdefault("ORT_LOGGING_SEVERITY_LEVEL", "3")
@@ -26,7 +26,7 @@ try:
     import onnxruntime as _ort  # type: ignore
 
     if hasattr(_ort, "set_default_logger_severity"):
-        _ort.set_default_logger_severity(3)
+        cast(Any, _ort).set_default_logger_severity(3)  # type: ignore[attr-defined]
 except Exception:
     pass
 
@@ -37,10 +37,10 @@ __all__ = [
     "setup_logging",
 ]
 
-_CONFIGURED = False
-_RUN_DIR: Optional[Path] = None
-_RUN_ID: Optional[str] = None
-_LOG_PATH: Optional[Path] = None
+_configured = False
+_run_dir: Optional[Path] = None
+_run_id: Optional[str] = None
+_log_path: Optional[Path] = None
 
 
 def _platform_data_dir() -> Path:
@@ -64,12 +64,12 @@ def _default_logs_dir() -> Path:
 
 def current_run_dir() -> Optional[Path]:
     """Return the directory that currently holds log artefacts."""
-    return _RUN_DIR
+    return _run_dir
 
 
 def current_run_id() -> Optional[str]:
     """Return a simple identifier for the active logging run."""
-    return _RUN_ID
+    return _run_id
 
 
 def _resolve_log_path(file_env: str) -> Path:
@@ -95,15 +95,15 @@ def setup_logging(
     specified by ``ARGOS_LOG_FILE``). The function is idempotent: repeated calls
     return the previously configured log directory without reconfiguring.
     """
-    global _CONFIGURED, _RUN_DIR, _RUN_ID, _LOG_PATH
+    global _configured, _run_dir, _run_id, _log_path
 
-    if _CONFIGURED:
-        return _RUN_DIR if _RUN_DIR is not None else _default_logs_dir()
+    if _configured:
+        return _run_dir if _run_dir is not None else _default_logs_dir()
 
     log_path = _resolve_log_path(file_env)
-    _LOG_PATH = log_path
-    _RUN_DIR = log_path.parent
-    _RUN_ID = "current"
+    _log_path = log_path
+    _run_dir = log_path.parent
+    _run_id = "current"
 
     level_name = os.getenv(level_env, "ERROR").upper().strip()
     level = getattr(logging, level_name, logging.ERROR)
@@ -118,8 +118,8 @@ def setup_logging(
         fallback = Path(tempfile.gettempdir()) / "argos.log"
         fallback.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.FileHandler(fallback, encoding="utf-8")
-        _LOG_PATH = fallback
-        _RUN_DIR = fallback.parent
+        _log_path = fallback
+        _run_dir = fallback.parent
 
     handler.setLevel(level)
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
@@ -148,17 +148,25 @@ def setup_logging(
     try:
         from ultralytics.utils import LOGGER as _ULY_LOGGER  # type: ignore
 
-        try:
-            _ULY_LOGGER.remove()
-        except Exception:
-            for h in list(_ULY_LOGGER.handlers):
-                _ULY_LOGGER.removeHandler(h)
+        remove_fn = getattr(_ULY_LOGGER, "remove", None)
+        if callable(remove_fn):
+            try:
+                remove_fn()
+            except Exception:
+                pass
+        else:
+            handlers = list(getattr(_ULY_LOGGER, "handlers", []))
+            for handler in handlers:
+                try:
+                    _ULY_LOGGER.removeHandler(handler)
+                except Exception:
+                    pass
         _ULY_LOGGER.setLevel(logging.ERROR)
     except Exception:
         pass
 
-    _CONFIGURED = True
-    return _RUN_DIR if _RUN_DIR is not None else _default_logs_dir()
+    _configured = True
+    return _run_dir or _default_logs_dir()
 
 
 @contextmanager
@@ -169,4 +177,4 @@ def bind_context(**_: object) -> Iterator[None]:
 
 def get_log_path() -> Optional[Path]:
     """Expose the resolved log file path for modules that need it."""
-    return _LOG_PATH
+    return _log_path

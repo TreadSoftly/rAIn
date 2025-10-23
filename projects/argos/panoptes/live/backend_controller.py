@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import os
 import platform
 import sys
@@ -19,6 +20,8 @@ from typing import Any, Dict, Optional, Tuple, Sequence, cast
 
 DEFAULT_INPUT_SIZE = (640, 640)
 DECISION_VERSION = 2
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _coerce_dim(value: object, fallback: int) -> int:
@@ -156,6 +159,38 @@ def _torch_gpu_name() -> Optional[str]:
         return "CUDA"
 
 
+def _gpu_warmup() -> None:
+    """
+    Run a lightweight GPU warm-up so the first live frame avoids CUDA cold-start
+    penalties (Optimize Research:1696-1714).
+    """
+    warmed = False
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                tensor = torch.zeros((1,), device="cuda", dtype=torch.float32)
+                tensor += 1.0
+                torch.cuda.synchronize()
+                warmed = True
+        except Exception as exc:  # pragma: no cover - warm-up failures are non-fatal
+            LOGGER.debug("GPU warmup (torch) failed: %s", exc, exc_info=True)
+    try:
+        import numpy as np  # type: ignore
+        import cv2  # type: ignore
+
+        cuda_mod = getattr(cv2, "cuda", None)
+        gpu_mat_ctor = getattr(cuda_mod, "GpuMat", None) if cuda_mod is not None else None
+        if callable(gpu_mat_ctor):
+            gpu_mat = cast(Any, gpu_mat_ctor())
+            gpu_mat.upload(np.zeros((32, 32, 3), dtype=np.uint8))
+            gpu_mat.download()
+            warmed = True
+    except Exception as exc:  # pragma: no cover
+        LOGGER.debug("GPU warmup (cv2) skipped/failed: %s", exc, exc_info=True)
+    if warmed:
+        LOGGER.debug("GPU warmup completed successfully")
+
+
 def _gather_fingerprint(ort_status: Optional[Any], gpu_name: Optional[str]) -> Dict[str, Any]:
     providers_raw = list(getattr(ort_status, "providers", []) or []) if ort_status else []
     providers: list[str] = [str(p) for p in providers_raw]
@@ -241,7 +276,7 @@ def _decide_backend() -> BackendDecision:
         nms_mode = "auto"
 
     fingerprint = _gather_fingerprint(status, gpu_name)
-    return BackendDecision(
+    decision = BackendDecision(
         version=DECISION_VERSION,
         preferred_backend=preferred_backend,
         preprocess_device=preprocess_device,
@@ -253,6 +288,9 @@ def _decide_backend() -> BackendDecision:
         fingerprint=fingerprint,
         timestamp=time.time(),
     )
+    if decision.preprocess_device == "gpu":
+        _gpu_warmup()
+    return decision
 
 
 def ensure_backend_decision(force: bool = False) -> BackendDecision:

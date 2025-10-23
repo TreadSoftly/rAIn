@@ -215,6 +215,7 @@ class _LiveSpec:
     task: str
     hint: Optional[_ModelHint]
     source: Optional[str]
+    size: Optional[Tuple[int, int]] = None
 
 
 @dataclass
@@ -223,6 +224,7 @@ class _ResolvedSpec:
     source: Union[int, str]
     override: Optional[Path]
     prefer_small: bool
+    size: Optional[Tuple[int, int]]
 
 
 ResultMessage = tuple[Literal["ok", "err"], int, str]
@@ -235,6 +237,45 @@ def _clear_live_overrides() -> None:
     live_tasks.LIVE_POSE_OVERRIDE = None
     live_tasks.LIVE_PSE_OVERRIDE = None
     live_tasks.LIVE_OBB_OVERRIDE = None
+
+
+def _parse_imgsz_option(value: Optional[str]) -> Optional[Tuple[int, int]]:
+    """
+    Normalise an --imgsz option into (width, height).
+
+    Accepts a single integer (applied to both dimensions) or any separator
+    combination using 'x', ',', or whitespace (e.g., "640x512", "640,512").
+    """
+    if value is None:
+        return None
+    cleaned = value.strip().lower().replace("×", "x")
+    if not cleaned:
+        return None
+    for sep in ("x", ","):
+        cleaned = cleaned.replace(sep, " ")
+    parts = [token for token in cleaned.split() if token]
+    if not parts:
+        return None
+    dims: list[int] = []
+    for token in parts:
+        try:
+            dim = int(token)
+        except ValueError as exc:
+            raise typer.BadParameter(f"Invalid --imgsz value: {value!r}") from exc
+        if dim <= 0:
+            raise typer.BadParameter("--imgsz dimensions must be positive integers")
+        dims.append(dim)
+        if len(dims) == 2:
+            break
+    if len(dims) == 1:
+        size = dims[0]
+        return (size, size)
+    return dims[0], dims[1]
+
+
+def parse_imgsz(value: Optional[str]) -> Optional[Tuple[int, int]]:
+    """Public helper for callers/tests that need imgsz parsing."""
+    return _parse_imgsz_option(value)
 
 
 def _extract_all_flag(tokens: List[str]) -> tuple[List[str], bool]:
@@ -402,7 +443,12 @@ def _discover_cameras(max_index: int = 16) -> list[int]:
                 pass
 
 
-def _build_resolved_spec(spec: _LiveSpec, source: Union[int, str], prefer_small_default: bool) -> _ResolvedSpec:
+def _build_resolved_spec(
+    spec: _LiveSpec,
+    source: Union[int, str],
+    prefer_small_default: bool,
+    size_override: Optional[Tuple[int, int]],
+) -> _ResolvedSpec:
     prefer_small = prefer_small_default
     override: Optional[Path] = None
     if spec.hint is not None:
@@ -413,10 +459,22 @@ def _build_resolved_spec(spec: _LiveSpec, source: Union[int, str], prefer_small_
             raise typer.BadParameter(f"Model weight {path} (from token {spec.hint.source!r}) not found.")
         override = path
         prefer_small = False
-    return _ResolvedSpec(task=spec.task, source=source, override=override, prefer_small=prefer_small)
+    size = spec.size if spec.size is not None else size_override
+    return _ResolvedSpec(
+        task=spec.task,
+        source=source,
+        override=override,
+        prefer_small=prefer_small,
+        size=size,
+    )
 
 
-def _resolve_specs(specs: List[_LiveSpec], use_all: bool, prefer_small_default: bool) -> List[_ResolvedSpec]:
+def _resolve_specs(
+    specs: List[_LiveSpec],
+    use_all: bool,
+    prefer_small_default: bool,
+    size_override: Optional[Tuple[int, int]],
+) -> List[_ResolvedSpec]:
     if not specs:
         return []
 
@@ -428,7 +486,10 @@ def _resolve_specs(specs: List[_LiveSpec], use_all: bool, prefer_small_default: 
             raise typer.BadParameter("No cameras detected.")
         _log_event("live.cli.cameras", cameras=",".join(_format_source_label(c) for c in cameras))
         base = specs[0]
-        return [_build_resolved_spec(base, cam, prefer_small_default) for cam in cameras]
+        return [
+            _build_resolved_spec(base, cam, prefer_small_default, size_override)
+            for cam in cameras
+        ]
 
     resolved_pairs: List[tuple[int, _ResolvedSpec]] = []
     pending_defaults: List[tuple[int, _LiveSpec]] = []
@@ -439,7 +500,7 @@ def _resolve_specs(specs: List[_LiveSpec], use_all: bool, prefer_small_default: 
             pending_defaults.append((idx, spec))
             continue
         src = _normalise_source_token(spec.source)
-        res = _build_resolved_spec(spec, src, prefer_small_default)
+        res = _build_resolved_spec(spec, src, prefer_small_default, size_override)
         resolved_pairs.append((idx, res))
         if isinstance(src, int):
             used_int_sources.add(src)
@@ -455,7 +516,7 @@ def _resolve_specs(specs: List[_LiveSpec], use_all: bool, prefer_small_default: 
                 src = next(available)
             except StopIteration:
                 raise typer.BadParameter("Not enough cameras detected to satisfy the request.") from None
-            res = _build_resolved_spec(spec, src, prefer_small_default)
+            res = _build_resolved_spec(spec, src, prefer_small_default, size_override)
             resolved_pairs.append((idx, res))
             used_int_sources.add(src)
 
@@ -549,6 +610,12 @@ def run(
         "--camera-exposure",
         help="Explicit exposure value passed to the camera driver.",
     ),
+    imgsz: Optional[str] = typer.Option(
+        None,
+        "--imgsz",
+        metavar="[SIZE|WxH]",
+        help="Override the input resolution (single value or WxH pair).",
+    ),
     width: Optional[int] = typer.Option(None, "--width", help="Capture width hint."),
     height: Optional[int] = typer.Option(None, "--height", help="Capture height hint."),
     conf: float = typer.Option(0.25, "--conf", help="Detector confidence (detect/pose/obb where applicable)."),
@@ -595,6 +662,21 @@ def run(
     _log_event("live.cli.start", tokens=",".join(tokens) if tokens else None, duration=duration, headless=headless, save=save)
 
     _clear_live_overrides()
+
+    imgsz_tuple = _parse_imgsz_option(imgsz)
+    if imgsz_tuple is not None and (width or height):
+        raise typer.BadParameter("Use either --imgsz or the --width/--height pair, not both.")
+    if width is not None and width <= 0:
+        raise typer.BadParameter("--width must be a positive integer")
+    if height is not None and height <= 0:
+        raise typer.BadParameter("--height must be a positive integer")
+    size_override: Optional[Tuple[int, int]]
+    if imgsz_tuple is not None:
+        size_override = imgsz_tuple
+    elif width and height:
+        size_override = (width, height)
+    else:
+        size_override = None
 
     preprocess_device_norm = (preprocess_device or "auto").strip().lower()
     if preprocess_device_norm not in {"auto", "cpu", "gpu"}:
@@ -649,13 +731,14 @@ def run(
     _log_event("live.cli.tokens", tokens=",".join(cleaned_tokens))
     specs = _parse_specs(cleaned_tokens)
     if not specs:
-        specs = [_LiveSpec(task="detect", hint=None, source=None)]
+        specs = [_LiveSpec(task="detect", hint=None, source=None, size=size_override)]
+    else:
+        for spec in specs:
+            spec.size = size_override
 
-    resolved_specs = _resolve_specs(specs, use_all, small)
+    resolved_specs = _resolve_specs(specs, use_all, small, size_override)
     if not resolved_specs:
         raise typer.BadParameter("No live tasks were specified.")
-
-    size: Optional[Tuple[int, int]] = (width, height) if (width and height) else None
 
     ort_status = ort_available()
     torch_ok = torch_available()
@@ -727,7 +810,7 @@ def run(
                     fps,
                     camera_auto_exposure,
                     camera_exposure,
-                    size,
+                    spec.size,
                     headless,
                     conf,
                     iou,

@@ -1,6 +1,6 @@
 # projects/argos/panoptes/live/pipeline.py
 """
-LivePipeline: source → infer → annotate → sink(s).
+LivePipeline: source -> infer -> annotate -> sink(s).
 Keeps progress UX similar to other ARGOS tasks and returns the saved path (if any).
 """
 from __future__ import annotations
@@ -8,12 +8,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-from pathlib import Path
-from typing import Optional, Tuple, Union
-import threading
-from queue import Empty, Full, Queue
-import time
+from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
+from queue import Empty, Full, Queue
+import threading
+import time
+from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple, Union, TYPE_CHECKING, Protocol, Mapping, cast
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .tasks import TaskAdapter
 
 from .camera import FrameSource, open_camera, synthetic_source
 from .sinks import DisplaySink, VideoSink, MultiSink
@@ -25,15 +29,30 @@ from ._types import NDArrayU8
 from panoptes.logging_config import bind_context, current_run_dir  # type: ignore[import]
 
 # Live progress spinner (robust fallback)
+class SpinnerLike(Protocol):
+    def __enter__(self) -> "SpinnerLike": ...
+    def __exit__(self, exc_type: Optional[type], exc: Optional[BaseException], tb: Optional[Any]) -> Optional[bool]: ...
+    def update(self, **kwargs: object) -> None: ...
+
 try:
-    from panoptes.progress import percent_spinner as _progress_percent_spinner  # type: ignore[import]
+    from panoptes.progress import percent_spinner as _spinner_impl  # type: ignore[import]
 except Exception:  # pragma: no cover
-    def _progress_percent_spinner(*_a: object, **_k: object):
-        class _N:
-            def __enter__(self): return self
-            def __exit__(self, *_: object) -> bool: return False
-            def update(self, **__: object): return self
-        return _N()
+    class _NullSpinner:
+        def __enter__(self) -> "SpinnerLike":
+            return self
+
+        def __exit__(self, exc_type: Optional[type], exc: Optional[BaseException], tb: Optional[Any]) -> Optional[bool]:
+            return False
+
+        def update(self, **__: object) -> None:
+            return None
+
+    def _spinner_impl(*_a: object, **_k: object) -> SpinnerLike:
+        return _NullSpinner()
+
+
+def _progress_spinner(*args: object, **kwargs: object) -> SpinnerLike:
+    return _spinner_impl(*args, **kwargs)
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
@@ -96,10 +115,13 @@ class LivePipeline:
     ort_threads: Optional[int] = None
     ort_execution: Optional[str] = None
     nms_mode: str = "auto"
+    resolution_schedule: Optional[Sequence[Tuple[int, int]]] = None
+    capture_options: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self._hud_notice: Optional[str] = None
         self._hud_notice_until: float = 0.0
+        self._user_size_override = self.size
         self.preprocess_device = (self.preprocess_device or "auto").strip().lower()
         self.warmup = bool(self.warmup)
         self.backend = (self.backend or "auto").strip().lower()
@@ -126,7 +148,165 @@ class LivePipeline:
             formatted = provider_label.upper() if provider_label else "CUDA"
             self._register_toast(f"{formatted} acceleration restored; ONNX Runtime is using the GPU provider.")
         self._hardware_info: Optional[live_config.HardwareInfo] = None
+        self._resolution_schedule: List[Tuple[int, int]] = []
+        self._auto_schedule_enabled = False
+        self._current_size_index = 0
+        self._fps_history: Deque[float] = deque(maxlen=30)
+        self._frames_since_size_change = 0
+        self._downscale_threshold = 30.0  # keep FPS comfortably above 30 (Optimize Research:90-104)
+        self._downscale_warmup_frames = 60
+        self._last_preprocess_device = "cpu"
         self._apply_backend_defaults()
+        self._initialise_resolution_policy()
+
+    def _initialise_resolution_policy(self) -> None:
+        """
+        Establish resolution defaults and whether adaptive resizing is enabled.
+
+        Defaults follow the guidance from Optimize Research (640 as the balanced
+        starting point, stepping down through 512/416/320 when FPS slips).
+        """
+        schedule = self._prepare_resolution_schedule()
+        manual_tuple: Optional[Tuple[int, int]] = None
+        if self._user_size_override is not None:
+            try:
+                manual_tuple = (
+                    int(self._user_size_override[0]),
+                    int(self._user_size_override[1]),
+                )
+            except Exception:
+                manual_tuple = None
+
+        if manual_tuple is not None and manual_tuple not in schedule:
+            schedule.insert(0, manual_tuple)
+        if not schedule:
+            schedule = [(640, 640)]
+
+        if manual_tuple is not None:
+            size_tuple = manual_tuple
+            self._auto_schedule_enabled = False
+        else:
+            candidate: Optional[Tuple[int, int]] = None
+            if self.size is not None:
+                try:
+                    candidate = (int(self.size[0]), int(self.size[1]))  # type: ignore[index]
+                except Exception:
+                    candidate = None
+            size_tuple = candidate or schedule[0]
+            self._auto_schedule_enabled = len(schedule) > 1
+        schedule[0] = size_tuple
+        self.size = size_tuple
+
+        self._resolution_schedule = schedule
+        try:
+            self._current_size_index = self._resolution_schedule.index(size_tuple)
+        except ValueError:
+            self._resolution_schedule.insert(0, size_tuple)
+            self._current_size_index = 0
+        if self._hardware_info is not None:
+            try:
+                self._hardware_info.input_size = (int(size_tuple[0]), int(size_tuple[1]))
+            except Exception:
+                pass
+
+    def _prepare_resolution_schedule(self) -> List[Tuple[int, int]]:
+        raw = self.resolution_schedule
+        sizes: List[Tuple[int, int]] = []
+        if raw is not None:
+            for entry in raw:
+                try:
+                    w = int(entry[0])
+                    h = int(entry[1])
+                except Exception:
+                    continue
+                if w > 0 and h > 0:
+                    sizes.append((w, h))
+        if not sizes:
+            sizes = [(640, 640), (512, 512), (416, 416), (320, 320)]
+        unique: List[Tuple[int, int]] = []
+        seen: set[Tuple[int, int]] = set()
+        for size in sizes:
+            if size not in seen:
+                unique.append(size)
+                seen.add(size)
+        return unique
+
+    def _maybe_adjust_resolution(
+        self,
+        task: "TaskAdapter",
+        model_label: str,
+        spinner: SpinnerLike,
+    ) -> Tuple["TaskAdapter", str]:
+        if not self._auto_schedule_enabled:
+            return task, model_label
+        next_index = self._current_size_index + 1
+        if next_index >= len(self._resolution_schedule):
+            self._auto_schedule_enabled = False
+            return task, model_label
+        if self._frames_since_size_change < self._downscale_warmup_frames:
+            return task, model_label
+        max_len = self._fps_history.maxlen or 0
+        if max_len == 0 or len(self._fps_history) < max_len:
+            return task, model_label
+
+        avg_fps = sum(self._fps_history) / len(self._fps_history)
+        if avg_fps >= self._downscale_threshold:
+            return task, model_label
+
+        self._current_size_index = next_index
+        next_size = self._resolution_schedule[self._current_size_index]
+        previous_size = self._resolution_schedule[self._current_size_index - 1] if self._current_size_index > 0 else self.size
+        self.size = next_size
+        try:
+            spinner.update(job="resize", current=f"{next_size[0]}x{next_size[1]}")
+        except Exception:
+            pass
+        self._register_toast(f"Auto resolution -> {next_size[0]}x{next_size[1]}")
+        _log(
+            "live.pipeline.autoscale",
+            task=self.task,
+            size=f"{next_size[0]}x{next_size[1]}",
+            fps=f"{avg_fps:.2f}",
+        )
+        try:
+            new_task = self._build_task()
+        except Exception as exc:
+            _log(
+                "live.pipeline.autoscale.error",
+                size=f"{next_size[0]}x{next_size[1]}",
+                error=type(exc).__name__,
+                message=str(exc),
+            )
+            if previous_size is not None:
+                self.size = previous_size
+            if self._current_size_index > 0:
+                self._current_size_index -= 1
+            self._auto_schedule_enabled = False
+            return task, model_label
+        label_new = str(getattr(new_task, "label", ""))
+        if "no-ml" in label_new.lower():
+            _log(
+                "live.pipeline.autoscale.fallback_detected",
+                size=f"{next_size[0]}x{next_size[1]}",
+                label=label_new,
+            )
+            if previous_size is not None:
+                self.size = previous_size
+            if self._current_size_index > 0:
+                self._current_size_index -= 1
+            self._auto_schedule_enabled = False
+            return task, model_label
+        model_label = getattr(new_task, "label", model_label)
+        self._fps_history.clear()
+        self._frames_since_size_change = 0
+        if self._hardware_info is not None:
+            try:
+                self._hardware_info.input_size = next_size  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        if self._current_size_index + 1 >= len(self._resolution_schedule):
+            self._auto_schedule_enabled = False
+        return new_task, model_label
 
     def _apply_backend_defaults(self) -> None:
         try:
@@ -179,6 +359,13 @@ class LivePipeline:
             LOGGER.debug("Failed to write NMS summary", exc_info=True)
 
     def _build_source(self) -> FrameSource:
+        capture_opts = dict(self.capture_options or {})
+        if capture_opts:
+            _log(
+                "live.pipeline.capture.options",
+                options=",".join(sorted(str(k) for k in capture_opts.keys())),
+            )
+            # Future toggles (tiling, gamma, etc.) can be wired through capture_opts.
         if isinstance(self.source, str) and self.source.lower().startswith("synthetic"):
             return synthetic_source(size=self.size or (640, 480), fps=self.fps or 30)
         # camera/video path
@@ -293,7 +480,7 @@ class LivePipeline:
             self._hud_notice = None
         return None
 
-    def _build_task(self):
+    def _build_task(self) -> "TaskAdapter":
         t = self.task.lower()
         preprocess_device = self._resolve_preprocess_device()
         if t in ("d", "detect"):
@@ -369,13 +556,17 @@ class LivePipeline:
         if choice not in {"auto", "cpu", "gpu"}:
             choice = "auto"
         if choice == "cpu":
+            self._last_preprocess_device = "cpu"
             return "cpu"
         if choice == "gpu":
-            return "gpu" if self._cuda_available() else "cpu"
+            device = "gpu" if self._gpu_available() else "cpu"
+            self._last_preprocess_device = device
+            return device
         # auto
         hw = self._hardware_info
         if hw and getattr(hw, "preprocess_device", None) == "gpu":
-            if self._cuda_available():
+            if self._gpu_available():
+                self._last_preprocess_device = "gpu"
                 return "gpu"
         if hw is None:
             try:
@@ -384,21 +575,30 @@ class LivePipeline:
                 hw = None
             self._hardware_info = hw
         if hw and getattr(hw, "gpu", None):
-            if self._cuda_available():
+            if self._gpu_available():
+                self._last_preprocess_device = "gpu"
                 return "gpu"
+        self._last_preprocess_device = "cpu"
         return "cpu"
 
     @staticmethod
-    def _cuda_available() -> bool:
+    def _gpu_available() -> bool:
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                return True
+        except Exception:
+            return False
         try:
             import cv2  # type: ignore
 
-            if not hasattr(cv2, "cuda"):
-                return False
-            count = cv2.cuda.getCudaEnabledDeviceCount()
-            return bool(count and count > 0)
+            if hasattr(cv2, "cuda"):
+                count = cv2.cuda.getCudaEnabledDeviceCount()
+                return bool(count and count > 0)
         except Exception:
-            return False
+            pass
+        return False
 
     def _default_out_path(self) -> str:
         ts = time.strftime("%Y%m%d-%H%M%S")
@@ -450,16 +650,21 @@ class LivePipeline:
         video: Optional[VideoSink] = None
         saved_path: Optional[str] = None
 
-        with _progress_percent_spinner(prefix="LIVE") as sp:
+        with _progress_spinner(prefix="LIVE") as sp:
             sp.update(total=total_frames, count=0, current="", job="init", model="")
 
-            task = self._build_task()
+            task: "TaskAdapter" = self._build_task()
+            self._fps_history.clear()
+            self._frames_since_size_change = 0
             hw = live_config.probe_hardware()
             _log("live.pipeline.hardware", arch=getattr(hw, "arch", None), gpu=getattr(hw, "gpu", None), ram=getattr(hw, "ram_gb", None))
             sel: ModelSelection = live_config.select_models_for_live(self.task, hw)
             model_label = getattr(task, "label", "") or str(sel.get("label", ""))
             _log("live.pipeline.models", task=self.task, label=model_label)
             sp.update(job="probe", current=hw.arch or "", model=model_label)
+            size_label = f"{self.size[0]}x{self.size[1]}" if self.size else "auto"
+            device_label = (self._last_preprocess_device or "cpu").upper()
+            self._register_toast(f"{device_label} preprocess x {size_label}")
 
             src: FrameSource = self._build_source()
             sp.update(job="open-src", current=str(self.source))
@@ -516,6 +721,9 @@ class LivePipeline:
                     inst_fps = 1.0 / dt
                     fps_est = 0.9 * fps_est + 0.1 * inst_fps if fps_est > 0 else inst_fps
                     last = now
+                    self._fps_history.append(inst_fps)
+                    self._frames_since_size_change += 1
+                    task, model_label = self._maybe_adjust_resolution(task, model_label, sp)
 
                     if sinks is None:
                         if saved_path:
@@ -592,14 +800,24 @@ class LivePipeline:
                                 try:
                                     detail = strategy_fn()
                                     if isinstance(detail, dict):
-                                        summary.update(detail)
+                                        detail_map = cast(Mapping[Any, Any], detail)
+                                        for key_obj, value_obj in detail_map.items():
+                                            summary[str(key_obj)] = value_obj
                                 except Exception:
                                     pass
                             stats_fn = getattr(task, "nms_statistics", None)
                             if callable(stats_fn):
                                 try:
                                     counts = stats_fn()
-                                    summary["suppressed_counts"] = {str(k): int(v) for k, v in counts.items()}
+                                    suppressed: Dict[str, int] = {}
+                                    if isinstance(counts, dict):
+                                        counts_map = cast(Mapping[Any, Any], counts)
+                                        for key_obj, value_obj in counts_map.items():
+                                            try:
+                                                suppressed[str(key_obj)] = int(value_obj)
+                                            except Exception:
+                                                continue
+                                    summary["suppressed_counts"] = suppressed
                                 except Exception:
                                     pass
                             self._nms_summary = summary

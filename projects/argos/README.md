@@ -194,6 +194,12 @@ obb bunny
       Run Video Stream With Detection, Heatmap, Classify Or Pose = <code>lv d</code> Or <code>livevideo detect</code>, <code>lv hm</code> Or <code>livevideo heatmap</code>, <code>lv clf</code> Or <code>livevideo classify</code>, <code>lv pse</code> Or <code>livevideo pose</code>
     </td>
   </tr>
+  <tr>
+    <td></td>
+    <td>
+      Live runs auto-tune themselves: we start at a balanced <code>640x640</code> on GPU when available, sample FPS after a short warmup, and step down through <code>512 → 416 → 320</code> if throughput drops under ~30&nbsp;FPS. Need manual control? Add <code>--imgsz</code> or <code>--preprocess-device</code> to your <code>lv</code>/<code>livevideo</code> command.
+    </td>
+  </tr>
 </table>
 
 </div>
