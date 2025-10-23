@@ -1164,6 +1164,42 @@ class _YOLOHeatmap(TaskAdapter):
             y_idx, x_idx = cached
         return mask[y_idx[:, None], x_idx[None, :]]
 
+    def _refine_mask(self, mask: NDArrayU8) -> NDArrayU8:
+        if cv2 is None:
+            return mask
+        np_ = cast(Any, np)
+        area = float(np_.count_nonzero(mask))
+        if area <= 0:
+            return mask
+        span = int(max(3, min(15, round(math.sqrt(area) / 3.0))))
+        if span % 2 == 0:
+            span += 1
+        mask_u8 = mask.astype(np_.uint8, copy=False)
+        if mask_u8.max() <= 1:
+            mask_u8 = mask_u8 * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (span, span))
+        refined = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel, iterations=1)
+        refined = cv2.morphologyEx(refined, cv2.MORPH_CLOSE, kernel, iterations=1)
+        if span >= 5:
+            refined = cv2.GaussianBlur(refined, (span, span), 0)
+        _, refined = cv2.threshold(refined, 96, 255, cv2.THRESH_BINARY)
+        refined_bool = refined > 0
+        if refined_bool.any():
+            refined_u8 = refined_bool.astype(np_.uint8, copy=False)
+            num_labels, labels = cv2.connectedComponents(refined_u8)
+            if num_labels > 2:
+                counts = np_.bincount(labels.reshape(-1))[1:]
+                if counts.size:
+                    total = counts.sum()
+                    keep_threshold = max(1, int(total * 0.05))
+                    keep_mask = np_.zeros_like(labels, dtype=bool)
+                    for idx, count in enumerate(counts, start=1):
+                        if count >= keep_threshold:
+                            keep_mask |= labels == idx
+                    if keep_mask.any():
+                        refined_bool = keep_mask
+        return refined_bool.astype(u8, copy=False)
+
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[NDArrayU8, float, Optional[int]]]:
         """
         Returns: list of (mask_u8(H,W), conf: float, cls_id: Optional[int])
@@ -1233,6 +1269,7 @@ class _YOLOHeatmap(TaskAdapter):
                 continue
             m = m_np[i]
             m_bin: NDArrayU8 = (m >= 0.5).astype(u8, copy=False)
+            m_bin = self._refine_mask(m_bin)
             if need_resize:
                 m_bin = self._resize_nn(m_bin, (H, W))
             area = float(np_.count_nonzero(m_bin))

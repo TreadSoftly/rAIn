@@ -13,7 +13,9 @@ input frame (never crashes the pipeline).
 
 from __future__ import annotations
 
-from typing import Optional, Mapping, Iterable, List, Tuple, Dict, Sequence
+from typing import Any, Optional, Mapping, Iterable, List, Tuple, Dict, Sequence, TYPE_CHECKING
+from dataclasses import dataclass
+import math
 
 # Touch progress module lightly so this file participates in UX integration.
 # (No spinners here to avoid per-frame overhead.)
@@ -45,6 +47,107 @@ def _ensure_np(frame: NDArrayU8) -> NDArrayU8:
     if np is None:
         raise RuntimeError("numpy required")
     return frame
+
+
+if TYPE_CHECKING:
+    import numpy as _np
+    MaskCoords = _np.ndarray[Any, _np.dtype[Any]]
+else:
+    MaskCoords = Any
+
+
+_INSTANCE_PALETTE: List[Tuple[int, int, int]] = [
+    (0, 197, 255), (255, 178, 29), (23, 204, 146), (255, 105, 97),
+    (52, 148, 230), (222, 98, 98), (141, 218, 139), (255, 160, 122),
+    (255, 215, 0), (255, 127, 80), (154, 205, 50), (106, 90, 205),
+]
+
+
+@dataclass
+class _TrackedInstance:
+    cls_id: Optional[int]
+    color: Tuple[int, int, int]
+    x: float
+    y: float
+    last_seen: int
+
+
+class _InstanceColorTracker:
+    def __init__(self, palette: Sequence[Tuple[int, int, int]], *, distance: float = 96.0, ttl_frames: int = 30) -> None:
+        self.palette = list(palette)
+        self.distance = float(max(1.0, distance))
+        self.ttl_frames = max(1, int(ttl_frames))
+        self._entries: List[_TrackedInstance] = []
+        self._frame: int = 0
+        self._used_colors: set[Tuple[int, int, int]] = set()
+
+    def start_frame(self) -> None:
+        self._frame += 1
+        self._used_colors.clear()
+
+    def assign(self, cls_id: Optional[int], cx: float, cy: float) -> Tuple[int, int, int]:
+        best: Optional[_TrackedInstance] = None
+        best_dist = float("inf")
+        for entry in self._entries:
+            if entry.cls_id != cls_id:
+                continue
+            dist = math.hypot(entry.x - cx, entry.y - cy)
+            if dist < best_dist:
+                best_dist = dist
+                best = entry
+        if best is not None and best_dist <= self.distance:
+            best.x = cx
+            best.y = cy
+            best.last_seen = self._frame
+            self._used_colors.add(best.color)
+            return best.color
+
+        color = self._next_color()
+        new_entry = _TrackedInstance(cls_id=cls_id, color=color, x=cx, y=cy, last_seen=self._frame)
+        self._entries.append(new_entry)
+        self._used_colors.add(color)
+        return color
+
+    def finalize_frame(self) -> None:
+        cutoff = self._frame - self.ttl_frames
+        if cutoff <= 0:
+            return
+        self._entries = [entry for entry in self._entries if entry.last_seen > cutoff]
+
+    def fallback_color(self, cls_id: Optional[int]) -> Tuple[int, int, int]:
+        if cls_id is not None and self.palette:
+            return self.palette[int(cls_id) % len(self.palette)]
+        return self.palette[0] if self.palette else (0, 197, 255)
+
+    def _next_color(self) -> Tuple[int, int, int]:
+        for color in self.palette:
+            if color not in self._used_colors:
+                return color
+        # palette exhausted this frame; reuse in order
+        return self.palette[0] if self.palette else (0, 197, 255)
+
+
+_INSTANCE_COLOR_TRACKER = _InstanceColorTracker(_INSTANCE_PALETTE)
+
+
+def _stable_mask_color(cls_id: Optional[int], xs: MaskCoords, ys: MaskCoords) -> Tuple[int, int, int]:
+    """
+    Choose a stable palette color for an instance based on class and coarse position.
+    """
+    tracker = _INSTANCE_COLOR_TRACKER
+    try:
+        size_x = int(getattr(xs, "size", 0))
+        size_y = int(getattr(ys, "size", 0))
+    except Exception:
+        size_x = size_y = 0
+    if size_x and size_y:
+        try:
+            cx = float(xs.mean())
+            cy = float(ys.mean())
+            return tracker.assign(cls_id, cx, cy)
+        except Exception:
+            pass
+    return tracker.fallback_color(cls_id)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -144,63 +247,59 @@ def draw_masks_bgr(
     H, W = int(frame.shape[0]), int(frame.shape[1])
     out = frame.copy()
 
-    # Simple color palette
-    palette = [
-        (0, 197, 255), (255, 178, 29), (23, 204, 146), (255, 105, 97),
-        (52, 148, 230), (222, 98, 98), (141, 218, 139), (255, 160, 122),
-    ]
-
     alpha = float(max(0.0, min(1.0, alpha)))
     inv_alpha = 1.0 - alpha
-    idx = 0
-    for m_u8, conf, cls_id in instances:
-        try:
-            if m_u8.shape[:2] != (H, W):
-                if cv2 is not None:
-                    m_u8 = cv2.resize(m_u8, (W, H), interpolation=cv2.INTER_NEAREST)
-                else:
-                    # nearest-neighbor via NumPy
-                    y_idx = np.round(np.linspace(0, m_u8.shape[0] - 1, H)).astype(int)
-                    x_idx = np.round(np.linspace(0, m_u8.shape[1] - 1, W)).astype(int)
-                    m_u8 = m_u8[y_idx[:, None], x_idx[None, :]]
-            color = palette[idx % len(palette)]
-            idx += 1
+    tracker = _INSTANCE_COLOR_TRACKER
+    tracker.start_frame()
+    try:
+        for m_u8, conf, cls_id in instances:
+            try:
+                if m_u8.shape[:2] != (H, W):
+                    if cv2 is not None:
+                        m_u8 = cv2.resize(m_u8, (W, H), interpolation=cv2.INTER_NEAREST)
+                    else:
+                        # nearest-neighbor via NumPy
+                        y_idx = np.round(np.linspace(0, m_u8.shape[0] - 1, H)).astype(int)
+                        x_idx = np.round(np.linspace(0, m_u8.shape[1] - 1, W)).astype(int)
+                        m_u8 = m_u8[y_idx[:, None], x_idx[None, :]]
 
-            mask_bool = np.greater(m_u8, 0)
-            if not np.any(mask_bool):
-                continue
-
-            # Blend
-            if cv2 is not None:
-                color_vec = np.array(color, dtype=np.float32)
-                region = out[mask_bool].astype(np.float32, copy=False)
-                blended = region * inv_alpha + color_vec * alpha
-                out[mask_bool] = blended.astype(np.uint8, copy=False)
-                mask_u8 = mask_bool.astype(np.uint8) * 255
-                # Optional thin outline for instance boundary
-                edges = cv2.Canny(mask_u8, 50, 150)
-                if edges.size:
-                    out[edges > 0] = color
-            else:
-                # Minimal NumPy-only overlay
-                color_vec = np.array(color, dtype=np.float32)
-                region = out[mask_bool].astype(np.float32, copy=False)
-                blended = region * inv_alpha + color_vec * alpha
-                out[mask_bool] = blended.astype(np.uint8, copy=False)
-
-            if cls_id is not None and names:
-                label = names.get(int(cls_id), str(cls_id))
-            else:
-                label = ""
-            if label and cv2 is not None:
-                # find a spot to draw label: first pixel of mask bounding box
+                mask_bool = np.greater(m_u8, 0)
+                if not np.any(mask_bool):
+                    continue
                 ys, xs = np.nonzero(mask_bool)
-                if ys.size > 0:
+                color = _stable_mask_color(cls_id, xs, ys)
+
+                # Blend
+                if cv2 is not None:
+                    color_vec = np.array(color, dtype=np.float32)
+                    region = out[mask_bool].astype(np.float32, copy=False)
+                    blended = region * inv_alpha + color_vec * alpha
+                    out[mask_bool] = blended.astype(np.uint8, copy=False)
+                    mask_u8 = mask_bool.astype(np.uint8) * 255
+                    # Optional thin outline for instance boundary
+                    edges = cv2.Canny(mask_u8, 50, 150)
+                    if edges.size:
+                        out[edges > 0] = color
+                else:
+                    # Minimal NumPy-only overlay
+                    color_vec = np.array(color, dtype=np.float32)
+                    region = out[mask_bool].astype(np.float32, copy=False)
+                    blended = region * inv_alpha + color_vec * alpha
+                    out[mask_bool] = blended.astype(np.uint8, copy=False)
+
+                if cls_id is not None and names:
+                    label = names.get(int(cls_id), str(cls_id))
+                else:
+                    label = ""
+                if label and cv2 is not None and ys.size:
+                    # find a spot to draw label: first pixel of mask bounding box
                     y0, x0 = int(ys.min()), int(xs.min())
                     txt = f"{label} {conf:.2f}"
                     cv2.putText(out, txt, (x0 + 2, max(0, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 245, 200), 2)
-        except Exception:
-            continue
+            except Exception:
+                continue
+    finally:
+        tracker.finalize_frame()
     return out
 
 
