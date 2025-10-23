@@ -125,6 +125,44 @@ class LivePipeline:
                 provider_label = provider_label.replace("ExecutionProvider", "").strip()
             formatted = provider_label.upper() if provider_label else "CUDA"
             self._register_toast(f"{formatted} acceleration restored; ONNX Runtime is using the GPU provider.")
+        self._hardware_info: Optional[live_config.HardwareInfo] = None
+        self._apply_backend_defaults()
+
+    def _apply_backend_defaults(self) -> None:
+        try:
+            hw = live_config.probe_hardware()
+        except Exception:
+            hw = None
+        self._hardware_info = hw
+        if hw is None:
+            return
+        backend_hint = getattr(hw, "backend", None)
+        if (self.backend == "auto" or not self.backend) and backend_hint and backend_hint != "auto":
+            self.backend = backend_hint
+        preprocess_hint = getattr(hw, "preprocess_device", None)
+        if self.preprocess_device == "auto" and preprocess_hint and preprocess_hint != "auto":
+            self.preprocess_device = preprocess_hint
+        size_hint = getattr(hw, "input_size", None)
+        if self.size is None and size_hint:
+            try:
+                self.size = (int(size_hint[0]), int(size_hint[1]))
+            except Exception:
+                self.size = None
+        prefer_small_hint = getattr(hw, "prefer_small", None)
+        if prefer_small_hint is not None and self.prefer_small == True:  # noqa: E712
+            self.prefer_small = bool(prefer_small_hint)
+        ort_threads_hint = getattr(hw, "ort_threads", None)
+        if self.ort_threads is None and ort_threads_hint is not None:
+            try:
+                self.ort_threads = max(1, int(ort_threads_hint))
+            except Exception:
+                self.ort_threads = None
+        ort_exec_hint = getattr(hw, "ort_execution", None)
+        if self.ort_execution is None and ort_exec_hint:
+            self.ort_execution = str(ort_exec_hint)
+        nms_hint = getattr(hw, "nms_mode", None)
+        if self.nms_mode == "auto" and nms_hint:
+            self.nms_mode = str(nms_hint).strip().lower() or "auto"
 
     def _persist_nms_summary(self) -> None:
         if not self._nms_summary:
@@ -335,10 +373,16 @@ class LivePipeline:
         if choice == "gpu":
             return "gpu" if self._cuda_available() else "cpu"
         # auto
-        try:
-            hw = live_config.probe_hardware()
-        except Exception:
-            hw = None
+        hw = self._hardware_info
+        if hw and getattr(hw, "preprocess_device", None) == "gpu":
+            if self._cuda_available():
+                return "gpu"
+        if hw is None:
+            try:
+                hw = live_config.probe_hardware()
+            except Exception:
+                hw = None
+            self._hardware_info = hw
         if hw and getattr(hw, "gpu", None):
             if self._cuda_available():
                 return "gpu"

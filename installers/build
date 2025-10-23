@@ -39,6 +39,8 @@ VENV_ROOT="$(cd "$(dirname "$VPY")/.." && pwd)"
 echo "[Argos] python: $VPY (venv=$VENV_ROOT)"
 export PANOPTES_VENV_ROOT="$VENV_ROOT"
 
+"$VPY" -m panoptes.live.backend_controller --force || true
+
 "$VPY" -m pip check || true
 export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-$HOME/.cache}/rAIn/pycache"
 
