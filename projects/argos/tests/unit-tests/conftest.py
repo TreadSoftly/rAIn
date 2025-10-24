@@ -43,6 +43,8 @@ def _progress_env() -> None:
     os.environ.setdefault("PANOPTES_NESTED_PROGRESS", "1")
     # Tests themselves don't use a PS/outer progress row
     os.environ.setdefault("PANOPTES_PROGRESS_ACTIVE", "0")
+    # Keep CLI subprocesses on the invoking interpreter so repo code is exercised (Windows CI).
+    os.environ.setdefault("PANOPTES_ALREADY_REEXEC", "1")
 
 
 # Make autouse fixture appear “used” to static analyzers without affecting runtime
