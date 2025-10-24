@@ -52,6 +52,21 @@ from typing import (
     overload,
 )
 
+HERE: Path = Path(__file__).resolve().parent
+ARGOS: Path = (
+    HERE
+    if (HERE / "pyproject.toml").exists() and (HERE / "panoptes").exists()
+    else (HERE / "projects" / "argos")
+)
+
+# Ensure the project sources are importable even under isolated (-I) Python runs.
+# Windows Sandbox + fresh installs can launch python -I, which omits the script
+# directory from sys.path, so we add both the bootstrap location and the repo root.
+for candidate in (HERE, ARGOS):
+    path_str = str(candidate)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
 from panoptes.logging_config import setup_logging  # type: ignore[import]
 from panoptes.runtime.onnx_spec import desired_ort_spec  # type: ignore[import]
 
@@ -109,13 +124,6 @@ _LOG.addHandler(logging.NullHandler())
 _LOG.setLevel(logging.ERROR)
 
 StrPath = Union[str, PathLike[str]]
-
-HERE: Path = Path(__file__).resolve().parent
-ARGOS: Path = (
-    HERE
-    if (HERE / "pyproject.toml").exists() and (HERE / "panoptes").exists()
-    else (HERE / "projects" / "argos")
-)
 
 def _cfg_dir() -> Path:
     if os.name == "nt":
