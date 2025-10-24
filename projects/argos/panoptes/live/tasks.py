@@ -91,6 +91,26 @@ try:
 except Exception:
     np = None  # type: ignore
 
+if TYPE_CHECKING:
+    from panoptes.obb_types import OBBDetection as _OBBDetectionType  # type: ignore[import]
+    from panoptes.smoothing import PolygonSmoother as _PolygonSmootherType  # type: ignore[import]
+else:
+    _OBBDetectionType = Any  # type: ignore[misc,assignment]
+    _PolygonSmootherType = Any  # type: ignore[misc,assignment]
+
+OBBDetectionType = _OBBDetectionType
+PolygonSmootherType = _PolygonSmootherType
+
+try:
+    from panoptes.obb_types import OBBDetection as _RuntimeOBBDetection  # type: ignore[import]
+except Exception:  # pragma: no cover
+    _RuntimeOBBDetection = None  # type: ignore[misc,assignment]
+
+try:
+    from panoptes.smoothing import PolygonSmoother as _RuntimePolygonSmoother  # type: ignore[import]
+except Exception:  # pragma: no cover
+    _RuntimePolygonSmoother = None  # type: ignore[misc,assignment]
+
 try:
     import onnxruntime as _ort  # type: ignore[import]
 except Exception:
@@ -1513,16 +1533,16 @@ def build_pse(
 # OBB (YOLO-obb) + fallback
 # ---------------------------
 
-def _rotrect_to_pts(cx: float, cy: float, w: float, h: float, theta_deg: float) -> List[Tuple[int, int]]:
+def _rotrect_to_pts(cx: float, cy: float, w: float, h: float, theta_deg: float) -> List[Tuple[float, float]]:
     rad = math.radians(theta_deg)
     c, s = math.cos(rad), math.sin(rad)
     hw, hh = w / 2.0, h / 2.0
     pts = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
-    out: List[Tuple[int, int]] = []
+    out: List[Tuple[float, float]] = []
     for (px, py) in pts:
         rx = px * c - py * s
         ry = px * s + py * c
-        out.append((int(cx + rx), int(cy + ry)))
+        out.append((cx + rx, cy + ry))
     return out
 
 class _YOLOOBB(TaskAdapter):
@@ -1532,13 +1552,17 @@ class _YOLOOBB(TaskAdapter):
         self.iou = float(iou)
         self.label = model.descriptor()
         self.names = _names_from_model(model.active_model())
+        self._smoother: Optional[PolygonSmootherType] = None
+        if _RuntimePolygonSmoother is not None:
+            self._smoother = _RuntimePolygonSmoother(alpha=0.55, max_distance=90.0, max_age=6)
 
     def current_label(self) -> str:
         return self.model.descriptor()
 
-    def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[List[Tuple[int, int]], float, Optional[int]]]:
+    def infer(self, frame_bgr: NDArrayU8) -> List[OBBDetectionType]:
+        if _RuntimeOBBDetection is None or np is None:
+            return []
         np_ = cast(Any, np)
-        assert np_ is not None
         inp = _ensure_contiguous(frame_bgr)
         with use_preprocessor(getattr(self, "_preprocessor", None)):
             res_any: Any = self.model.predict(inp, conf=self.conf, iou=self.iou, verbose=False)
@@ -1547,14 +1571,14 @@ class _YOLOOBB(TaskAdapter):
         else:
             res_obj = cast(object, res_any)
 
-        out: List[Tuple[List[Tuple[int, int]], float, Optional[int]]] = []
+        out: List[OBBDetectionType] = []
 
         obb_any: Any = getattr(res_obj, "obb", None)
         if obb_any is None:
             poly_any: Any = getattr(res_obj, "xyxyxyxy", None)
             if poly_any is None:
                 return out
-            polys = _to_numpy(poly_any)
+            polys = _to_numpy(poly_any, dtype=f32)
             confs = getattr(res_obj, "conf", None)
             clses = getattr(res_obj, "cls", None)
             confs_seq: Optional[Sequence[float]] = None
@@ -1564,11 +1588,10 @@ class _YOLOOBB(TaskAdapter):
             if clses is not None:
                 clses_seq = cast(Sequence[int], _to_numpy(clses, dtype=i64).reshape(-1).astype(int).tolist())
             for i in range(polys.shape[0]):
-                poly = polys[i].reshape(-1, 2).astype(float)
-                pts: List[Tuple[int, int]] = [(int(poly[j, 0]), int(poly[j, 1])) for j in range(poly.shape[0])]
+                poly = np_.asarray(polys[i].reshape(-1, 2), dtype=np.float32)
                 conf_v = float(confs_seq[i]) if confs_seq is not None and i < len(confs_seq) else 1.0
                 cls_v: Optional[int] = int(clses_seq[i]) if clses_seq is not None and i < len(clses_seq) else None
-                out.append((pts, conf_v, cls_v))
+                out.append(_RuntimeOBBDetection(points=poly, confidence=conf_v, class_id=cls_v))
             return out
 
         data: Any = getattr(obb_any, "xywhr", None)
@@ -1591,13 +1614,19 @@ class _YOLOOBB(TaskAdapter):
 
         for i in range(arr.shape[0]):
             cx, cy, w, h, theta = arr[i][:5].tolist()
-            pts = _rotrect_to_pts(float(cx), float(cy), float(w), float(h), float(theta))
+            pts = np_.asarray(
+                _rotrect_to_pts(float(cx), float(cy), float(w), float(h), float(theta)),
+                dtype=np.float32,
+            )
             conf_v = float(confs_seq2[i]) if confs_seq2 is not None and i < len(confs_seq2) else 1.0
             cls_v: Optional[int] = int(clses_seq2[i]) if clses_seq2 is not None and i < len(clses_seq2) else None
-            out.append((pts, conf_v, cls_v))
+            out.append(_RuntimeOBBDetection(points=pts, confidence=conf_v, class_id=cls_v, angle=float(theta)))
+        if self._smoother is not None:
+            smoothed = self._smoother.smooth(out)
+            return list(smoothed)
         return out
 
-    def render(self, frame_bgr: NDArrayU8, result: List[Tuple[List[Tuple[int, int]], float, Optional[int]]]) -> NDArrayU8:
+    def render(self, frame_bgr: NDArrayU8, result: List[OBBDetectionType]) -> NDArrayU8:
         from .overlay import draw_obb_bgr
         return draw_obb_bgr(frame_bgr, result, names=self.names)
 
@@ -1608,8 +1637,8 @@ class _SimpleOBB(TaskAdapter):
         self.conf = float(conf)
         self.label = "simple-obb (no-ML)"
 
-    def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[List[Tuple[int, int]], float, Optional[int]]]:
-        if cv2 is None:
+    def infer(self, frame_bgr: NDArrayU8) -> List[OBBDetectionType]:
+        if cv2 is None or np is None or _RuntimeOBBDetection is None:
             return []
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         v = max(10, int(gray.mean()))
@@ -1617,20 +1646,18 @@ class _SimpleOBB(TaskAdapter):
         cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         H, W = gray.shape[:2]
         min_area = max(120, (H * W) // 250)
-        out: List[Tuple[List[Tuple[int, int]], float, Optional[int]]] = []
+        out: List[OBBDetectionType] = []
         for c in cnts:
             if cv2.contourArea(c) < min_area:
                 continue
             rect = cv2.minAreaRect(c)
             box = cv2.boxPoints(rect)
-            # Cast to a sequence of 2-item sequences for static type checkers
-            box_pts: Sequence[Sequence[float]] = cast(Sequence[Sequence[float]], box)
-            pts = [(int(x), int(y)) for x, y in box_pts]
+            pts = np.asarray(box, dtype=np.float32)
             conf = min(0.99, 0.6 + (cv2.contourArea(c) / (W * H)))
-            out.append((pts, conf, None))
+            out.append(_RuntimeOBBDetection(points=pts, confidence=conf, class_id=None))
         return out
 
-    def render(self, frame_bgr: NDArrayU8, result: List[Tuple[List[Tuple[int, int]], float, Optional[int]]]) -> NDArrayU8:
+    def render(self, frame_bgr: NDArrayU8, result: List[OBBDetectionType]) -> NDArrayU8:
         from .overlay import draw_obb_bgr
         return draw_obb_bgr(frame_bgr, result, names=None)
 

@@ -1,24 +1,21 @@
 # projects/argos/panoptes/predict_obb_mp4.py
 """
-predict_obb_mp4 — per‑frame oriented bounding boxes overlay for videos.
+predict_obb_mp4 ΓÇö perΓÇæframe oriented bounding boxes overlay for videos.
 
 ONE PROGRESS SYSTEM
-───────────────────
 * Uses ONLY the Halo/Rich spinner from panoptes.progress.
 * If a parent spinner is passed (recommended via CLI), we ONLY update its
   [File | Job | Model] fields (no 'current' writes) so the single-line
   format/colors match Detect/Heatmap/GeoJSON.
 * If no parent spinner is provided AND no global spinner is marked active
   (PANOPTES_PROGRESS_ACTIVE != "1"), a local Halo spinner is started for
-  standalone runs — still a single consistent line.
+  standalone runs ΓÇö still a single consistent line.
 
 Strict weights
-──────────────
 * Either pass explicit *weights=* or load strictly via model_registry.load_obb().
 
 Output ladder
-─────────────
-* FFmpeg H.264 preferred → OpenCV mp4v fallback → keep MJPG .avi as last resort.
+* FFmpeg H.264 preferred ΓåÆ OpenCV mp4v fallback ΓåÆ keep MJPG .avi as last resort.
 """
 
 from __future__ import annotations
@@ -31,14 +28,18 @@ import sys
 import tempfile
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Optional, Protocol, Tuple, cast
+from typing import Any, Callable, Optional, Protocol, Tuple, cast, List, Sequence, Dict
 
 import cv2  # type: ignore
 import numpy as np
 from numpy.typing import NDArray
+import math
 
 from panoptes import ROOT  # type: ignore[import-not-found]
 from panoptes.model_registry import load_obb  # type: ignore[import-not-found]
+from panoptes.live.overlay import draw_obb_bgr  # type: ignore[import-not-found]
+from panoptes.obb_types import OBBDetection # type: ignore[import-not-found]
+from panoptes.smoothing import PolygonSmoother # type: ignore[import-not-found]
 from .ffmpeg_utils import resolve_ffmpeg
 
 # ---- progress spinner (Halo-based) ------------------------------------------
@@ -93,7 +94,7 @@ def _fourcc(code: str) -> int:
 def _avi_writer(path: Path, fps: float, size: Tuple[int, int]) -> cv2.VideoWriter:
     vw = cv2.VideoWriter(str(path.with_suffix(".avi")), _fourcc("MJPG"), fps, size)
     if not vw.isOpened():
-        raise RuntimeError("❌  OpenCV cannot open any MJPG writer on this system.")
+        raise RuntimeError("Γ¥î  OpenCV cannot open any MJPG writer on this system.")
     return vw
 
 
@@ -124,57 +125,109 @@ def _opencv_reencode_to_mp4(src_avi: Path, dst_mp4: Path, fps: float) -> bool:
 
 NDArrayU8 = NDArray[np.uint8]
 NDArrayF32 = NDArray[np.float32]
+NDArrayAny = NDArray[Any]
 
 
-def _extract_polys(res: Any) -> list[NDArrayF32]:
-    """
-    Return list of (4,2) float32 polygons if available; else [].
-    Supports Ultralytics OBB results (xyxyxyxy) and variants; falls back to AABB.
-    """
-    polys: list[NDArrayF32] = []
-
-    obb = getattr(res, "obb", None)
-    if obb is not None:
-        for key in ("xyxyxyxy", "xyxy", "xy"):
-            pts = getattr(obb, key, None)
-            if pts is None:
-                continue
-            if hasattr(pts, "cpu"):
-                try:
-                    pts = pts.cpu().numpy()
-                except Exception:
-                    pass
-            arr = np.asarray(pts, dtype=np.float32)
-            if arr.size == 0:
-                continue
-
-            # Normalize to shape (-1, 8) then → (-1, 4, 2)
+def _to_numpy(obj: Any, dtype: Any = np.float32) -> NDArrayAny:
+    arr = obj
+    if hasattr(arr, "cpu"):
+        try:
+            arr = arr.cpu().numpy()
+        except Exception:
             try:
-                flat = arr.reshape(-1, 8)
-            except Exception:
-                # Some reps may already be (N,4,2)
-                if arr.ndim == 3 and arr.shape[-2:] == (4, 2):
-                    flat = arr.reshape(-1, 8)
-                else:
-                    continue
-            shaped = flat.reshape(-1, 4, 2).astype(np.float32, copy=False)
-            for poly in shaped:
-                polys.append(np.asarray(poly, dtype=np.float32))
-            if polys:
-                return polys  # prefer first found representation
-
-    # AABB fallback
-    boxes = getattr(getattr(res, "boxes", None), "xyxy", None)
-    if boxes is not None:
-        if hasattr(boxes, "cpu"):
-            try:
-                boxes = boxes.cpu().numpy()
+                arr = arr.numpy()
             except Exception:
                 pass
-        arr2 = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
-        for x1, y1, x2, y2 in arr2:
-            polys.append(np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32))
-    return polys
+    return np.asarray(arr, dtype=dtype)
+
+
+def _rotrect_to_pts(cx: float, cy: float, w: float, h: float, theta_deg: float) -> NDArrayF32:
+    rad = math.radians(theta_deg)
+    c, s = math.cos(rad), math.sin(rad)
+    hw, hh = w / 2.0, h / 2.0
+    corners: List[Tuple[float, float]] = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+    pts: List[Tuple[float, float]] = []
+    for px, py in corners:
+        rx = px * c - py * s
+        ry = px * s + py * c
+        pts.append((cx + rx, cy + ry))
+    return np.asarray(pts, dtype=np.float32)
+
+
+def _extract_detections(res: Any) -> List[OBBDetection]:
+    out: List[OBBDetection] = []
+    if np is None:
+        return out
+
+    obb_any = getattr(res, "obb", None)
+    if obb_any is None:
+        poly_any = getattr(res, "xyxyxyxy", None)
+        if poly_any is None:
+            return out
+        polys = cast(NDArray[np.float32], _to_numpy(poly_any, dtype=np.float32))
+        confs_attr = getattr(res, "conf", None)
+        clses_attr = getattr(res, "cls", None)
+        confs_seq: Optional[Sequence[float]] = None
+        clses_seq: Optional[Sequence[int]] = None
+        if confs_attr is not None:
+            confs_arr = cast(NDArray[np.float32], _to_numpy(confs_attr, dtype=np.float32))
+            confs_seq = confs_arr.reshape(-1).astype(float).tolist()
+        if clses_attr is not None:
+            clses_arr = cast(NDArray[np.int64], _to_numpy(clses_attr, dtype=np.int64))
+            clses_seq = clses_arr.reshape(-1).astype(int).tolist()
+        for i in range(polys.shape[0]):
+            poly = np.asarray(polys[i].reshape(-1, 2), dtype=np.float32)
+            conf = float(confs_seq[i]) if confs_seq is not None and i < len(confs_seq) else 1.0
+            cls_id = int(clses_seq[i]) if clses_seq is not None and i < len(clses_seq) else None
+            out.append(OBBDetection(points=poly, confidence=conf, class_id=cls_id))
+        return out
+
+    data = getattr(obb_any, "xywhr", None)
+    if data is None:
+        data = getattr(obb_any, "data", None)
+    if data is None:
+        return out
+    arr = cast(NDArray[np.float32], _to_numpy(data, dtype=np.float32))
+
+    boxes_obj = getattr(res, "boxes", None) or res
+    confs_attr = getattr(boxes_obj, "conf", None)
+    clses_attr = getattr(boxes_obj, "cls", None)
+    confs_seq: Optional[Sequence[float]] = None
+    clses_seq: Optional[Sequence[int]] = None
+    if confs_attr is not None:
+        confs_seq = cast(NDArray[np.float32], _to_numpy(confs_attr, dtype=np.float32)).reshape(-1).astype(float).tolist()
+    if clses_attr is not None:
+        clses_seq = cast(NDArray[np.int64], _to_numpy(clses_attr, dtype=np.int64)).reshape(-1).astype(int).tolist()
+
+    for i in range(arr.shape[0]):
+        cx, cy, w, h, theta = arr[i][:5].tolist()
+        pts = _rotrect_to_pts(float(cx), float(cy), float(w), float(h), float(theta))
+        conf = float(confs_seq[i]) if confs_seq is not None and i < len(confs_seq) else 1.0
+        cls_id = int(clses_seq[i]) if clses_seq is not None and i < len(clses_seq) else None
+        out.append(OBBDetection(points=pts, confidence=conf, class_id=cls_id, angle=float(theta)))
+    return out
+
+
+def _names_from_model(model: Any) -> Optional[Dict[int, str]]:
+    names_attr = getattr(model, "names", None)
+    if isinstance(names_attr, dict):
+        result: Dict[int, str] = {}
+        for key, value in cast(Dict[Any, Any], names_attr).items():
+            try:
+                key_int = int(key)
+                result[key_int] = str(value)
+            except Exception:
+                continue
+        return result or None
+    if isinstance(names_attr, (list, tuple)):
+        result: Dict[int, str] = {}
+        for idx, value in enumerate(cast(Sequence[Any], names_attr)):
+            try:
+                result[int(idx)] = str(value)
+            except Exception:
+                continue
+        return result or None
+    return None
 
 
 def _poke(sp: SpinnerLike | None, **fields: Any) -> None:
@@ -236,7 +289,7 @@ def main(  # noqa: C901
 
     cap = cv2.VideoCapture(str(srcp))
     if not cap.isOpened():
-        raise RuntimeError(f"❌  Cannot open video {srcp}")
+        raise RuntimeError(f"Γ¥î  Cannot open video {srcp}")
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -251,6 +304,9 @@ def main(  # noqa: C901
     parent_active = (os.environ.get("PANOPTES_PROGRESS_ACTIVE") or "").strip() == "1"
     use_local = (progress is None) and (not parent_active) and (percent_spinner is not None)
     sp_ctx = percent_spinner(prefix="OBB-MP4", stream=sys.stderr) if use_local else _NullCtx()  # type: ignore[operator]
+
+    smoother = PolygonSmoother(alpha=0.55, max_distance=110.0, max_age=6)
+    names_map = _names_from_model(obb_model)
 
     i = 0
     file_lbl = srcp.name
@@ -271,11 +327,14 @@ def main(  # noqa: C901
                 obb_model.predict(frame, imgsz=640, conf=(conf or 0.25), iou=(iou or 0.45), verbose=False)
             )
             res = res_list[0] if res_list else None
+            detections: List[OBBDetection]
             if res is not None:
-                polys = _extract_polys(res)
-                for poly in polys:
-                    pts = np.asarray(poly, dtype=np.float32).reshape(4, 2).astype(np.int32)
-                    cv2.polylines(frame, [pts], isClosed=True, color=(0, 210, 255), thickness=2)
+                detections = _extract_detections(res)
+            else:
+                detections = []
+            smoothed = smoother.smooth(detections)
+            if smoothed:
+                frame = draw_obb_bgr(frame, smoothed, names=names_map)
             vw.write(frame)
             i += 1
 
@@ -322,7 +381,7 @@ def main(  # noqa: C901
                 shutil.move(str(avi), str(final))
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        print(f"Saved → {_osc8(final.name, final)}")
+        print(f"Saved ΓåÆ {_osc8(final.name, final)}")
 
         if use_local:
             _poke(sp_ctx, count=float(total + 1), item=file_lbl, job="done", model=model_lbl)  # type: ignore[arg-type]

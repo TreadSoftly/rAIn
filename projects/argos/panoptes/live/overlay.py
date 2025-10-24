@@ -13,7 +13,7 @@ input frame (never crashes the pipeline).
 
 from __future__ import annotations
 
-from typing import Any, Optional, Mapping, Iterable, List, Tuple, Dict, Sequence, TYPE_CHECKING
+from typing import Any, Optional, Mapping, Iterable, List, Tuple, Dict, Sequence, TYPE_CHECKING, Union
 from dataclasses import dataclass
 import math
 
@@ -40,6 +40,7 @@ try:
 except Exception:
     cv2 = None  # type: ignore
 
+from panoptes.obb_types import OBBDetection # type: ignore
 from ._types import NDArrayU8, Boxes, Names
 
 
@@ -637,8 +638,10 @@ def draw_pose_bgr(
 
 def draw_obb_bgr(
     frame: NDArrayU8,
-    obbs: Iterable[Tuple[List[Tuple[int, int]], float, Optional[int]]],  # (pts4, conf, cls_id)
+    obbs: Iterable[Union[OBBDetection, Tuple[List[Tuple[int, int]], float, Optional[int]]]],
     names: Optional[Dict[int, str]] = None,
+    *,
+    show_labels: bool = False,
 ) -> NDArrayU8:
     frame = _ensure_np(frame)
     assert np is not None
@@ -646,9 +649,20 @@ def draw_obb_bgr(
         return frame
 
     palette_size = len(_INSTANCE_PALETTE) if _INSTANCE_PALETTE else 0
-    for idx, (pts4, conf, cls_id) in enumerate(obbs):
+    for idx, entry in enumerate(obbs):
         try:
-            pts = np.array(pts4, dtype=np.int32).reshape((-1, 1, 2))  # type: ignore
+            if isinstance(entry, OBBDetection):
+                det = entry
+            else:
+                pts_raw, conf_raw, cls_raw = entry
+                pts_arr = np.asarray(pts_raw, dtype=np.float32)
+                det = OBBDetection(points=pts_arr, confidence=float(conf_raw), class_id=cls_raw)
+
+            pts2 = np.asarray(det.points[:, :2], dtype=np.float32)
+            if pts2.shape[0] < 3:
+                continue
+            pts = np.round(pts2).astype(np.int32).reshape((-1, 1, 2))
+
             base_color = _INSTANCE_PALETTE[idx % palette_size] if palette_size else (0, 210, 255)
             tier = (idx // max(1, palette_size)) % 3
             if tier == 1:
@@ -657,11 +671,7 @@ def draw_obb_bgr(
                 factor = 0.9
             else:
                 factor = 1.0
-            edge_color = (
-                max(0, min(255, int(base_color[0] * factor))),
-                max(0, min(255, int(base_color[1] * factor))),
-                max(0, min(255, int(base_color[2] * factor))),
-            )
+            edge_color = tuple(max(0, min(255, int(channel * factor))) for channel in base_color)
             fill_color = tuple(int(edge_color[i] * 0.4 + 255 * 0.6) for i in range(3))
 
             mask = np.zeros(frame.shape[:2], dtype=np.uint8)
@@ -673,19 +683,18 @@ def draw_obb_bgr(
 
             cv2.polylines(frame, [pts], isClosed=True, color=edge_color, thickness=2, lineType=cv2.LINE_AA)
 
-            if cls_id is not None and names:
-                label = names.get(int(cls_id), str(cls_id))
-            else:
-                label = ""
-            conf_txt = _confidence_text(conf)
-            label_parts: List[str] = []
-            if label:
-                label_parts.append(label)
-                if conf_txt:
-                    label_parts.append(conf_txt)
-            if label_parts:
-                x0, y0 = int(pts4[0][0]), int(pts4[0][1])
-                cv2.putText(frame, " ".join(label_parts), (x0 + 2, max(0, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 245, 200), 2)
+            if show_labels:
+                cls_id = det.class_id
+                conf = det.confidence
+                label = names.get(int(cls_id), str(cls_id)) if (cls_id is not None and names) else ""
+                conf_txt = _confidence_text(conf)
+                label_parts = [part for part in (label, conf_txt) if part]
+                if label_parts:
+                    label_txt = " ".join(label_parts)
+                    centroid = pts2.mean(axis=0)
+                    x0 = int(min(max(0, round(float(centroid[0]))), frame.shape[1] - 1))
+                    y0 = int(min(max(0, round(float(centroid[1]))), frame.shape[0] - 1))
+                    cv2.putText(frame, label_txt, (x0 + 2, max(0, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 245, 200), 2)
         except Exception:
             continue
     return frame
