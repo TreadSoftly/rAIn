@@ -74,6 +74,14 @@ def maybe_reexec_into_managed_venv(
     if os.environ.get(_ENV_FLAG):
         return
 
+    # During pytest runs we want to stay inside the invoking interpreter so test
+    # doubles and monkeypatches keep working predictably.  Allow opt-in via env.
+    if (
+        os.environ.get("PANOPTES_ENABLE_REEXEC_UNDER_PYTEST") != "1"
+        and "pytest" in sys.modules
+    ):
+        return
+
     try:
         managed_python = _managed_python_path(expected_rel)
         if managed_python is None:

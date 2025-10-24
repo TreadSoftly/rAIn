@@ -15,20 +15,24 @@ cv2 = pytest.importorskip("cv2")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def _fake_cls_model() -> Any:
-    class M:
+    class Adapter:
         names = {0: "cat", 1: "dog"}
+        label = "fake-classifier"
 
-        def predict(
-            self,
-            frame: npt.NDArray[np.uint8] | Any,
-            imgsz: int = 640,
-            conf: float = 0.0,
-            verbose: bool = False,
-        ) -> list[types.SimpleNamespace]:
-            probs = types.SimpleNamespace(data=np.array([0.7, 0.3], dtype=np.float32))
-            return [types.SimpleNamespace(probs=probs)]
+        def current_label(self) -> str:
+            return self.label
 
-    return M()
+        def infer(self, frame_bgr: npt.NDArray[np.uint8]) -> list[tuple[str, float]]:
+            return [("cat", 0.7), ("dog", 0.3)]
+
+        def render(self, frame_bgr: npt.NDArray[np.uint8], result: list[tuple[str, float]]) -> npt.NDArray[np.uint8]:
+            # Return the frame unchanged (tests only verify output file exists).
+            return frame_bgr
+
+        def reset_temporal_state(self) -> None:
+            pass
+
+    return Adapter()
 
 
 def _fake_pose_model() -> Any:

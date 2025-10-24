@@ -7,6 +7,7 @@ batch processing) can produce steadier overlays without visible jitter.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -17,6 +18,7 @@ from numpy.typing import NDArray
 from .obb_types import OBBDetection
 
 NDArrayF32 = NDArray[np.float32]
+NDArrayBool = NDArray[np.bool_]
 
 
 class ProbabilitySmoother:
@@ -286,3 +288,191 @@ class PolygonSmoother:
 
         self._tracks = next_tracks
         return outputs
+
+
+@dataclass
+class _MaskObservation:
+    mask: NDArrayF32
+    weight: float
+    frame: int
+
+
+@dataclass
+class _MaskTrack:
+    history: deque[_MaskObservation]
+    centroid: Optional[Tuple[float, float]] = None
+    area: float = 0.0
+    total_weight: float = 0.0
+    missing: int = 0
+
+
+class MaskTemporalController:
+    """
+    Blend binary masks over a short history to reduce frame-to-frame flicker.
+
+    Each track keeps a deque of float32 masks with exponentially decaying weights.
+    Incoming masks are blended in float space, re-thresholded, and paired with a
+    smoothed centroid so overlays can stay anchored without jitter.
+    """
+
+    def __init__(
+        self,
+        *,
+        history: int = 3,
+        current_weight: float = 0.7,
+        decay: float = 0.3,
+        threshold: float = 0.5,
+        max_missing: int = 5,
+        centroid_alpha: Optional[float] = None,
+        weight_floor: float = 1e-3,
+        edge_merge: bool = True,
+    ) -> None:
+        self.history = max(1, int(history))
+        self.current_weight = float(max(0.0, min(1.0, current_weight)))
+        self.decay = float(max(0.0, min(1.0, decay)))
+        # Ensure there is always some immediate contribution.
+        if self.current_weight <= 0.0 and self.decay <= 0.0:
+            self.current_weight = 1.0
+        self.threshold = float(max(0.0, min(1.0, threshold)))
+        self.max_missing = max(1, int(max_missing))
+        self.centroid_alpha = (
+            float(max(0.0, min(1.0, centroid_alpha)))
+            if centroid_alpha is not None
+            else self.current_weight
+        )
+        self.weight_floor = float(max(weight_floor, 1e-5))
+        self.edge_merge = bool(edge_merge)
+        self._tracks: Dict[int, _MaskTrack] = {}
+        self._seen: set[int] = set()
+        self._frame: int = 0
+
+    def reset(self) -> None:
+        self._tracks.clear()
+        self._seen.clear()
+        self._frame = 0
+
+    def start_frame(self) -> None:
+        self._seen.clear()
+        self._frame += 1
+
+    def smooth(
+        self,
+        track_id: int,
+        mask: NDArrayBool,
+        *,
+        cls_id: Optional[int] = None,  # reserved for future class-aware tuning
+        edges: Optional[NDArrayBool] = None,
+    ) -> Tuple[NDArrayBool, Tuple[float, float], float]:
+        del cls_id  # quiet lint until class-aware tuning is added
+        mask_bool: NDArrayBool = np.asarray(mask, dtype=bool)
+        if mask_bool.size == 0:
+            return mask_bool, (0.0, 0.0), 0.0
+
+        if track_id < 0:
+            centroid = self._centroid(mask_bool)
+            area = float(np.count_nonzero(mask_bool))
+            return mask_bool, centroid, area
+
+        state = self._tracks.get(track_id)
+        if state is None:
+            state = _MaskTrack(history=deque(maxlen=self.history))
+            self._tracks[track_id] = state
+
+        history = state.history
+        if history.maxlen != self.history:
+            history = deque(history, maxlen=self.history)
+            state.history = history
+
+        current_mask_f32: NDArrayF32 = mask_bool.astype(np.float32, copy=False)
+
+        # Decay existing weights and drop stale observations.
+        for _ in range(len(history)):
+            obs = history.popleft()
+            obs.weight *= self.decay
+            if obs.weight >= self.weight_floor:
+                history.append(obs)
+
+        history.append(_MaskObservation(mask=current_mask_f32, weight=self.current_weight, frame=self._frame))
+
+        total_weight = float(sum(obs.weight for obs in history))
+        if total_weight <= self.weight_floor:
+            history.clear()
+            state.total_weight = 0.0
+            state.area = 0.0
+            centroid = state.centroid if state.centroid is not None else (0.0, 0.0)
+            self._seen.add(track_id)
+            return mask_bool, centroid, 0.0
+
+        blended: NDArrayF32 = np.zeros_like(current_mask_f32, dtype=np.float32)
+        for obs in history:
+            np.add(
+                blended,
+                obs.mask * np.float32(obs.weight),
+                out=blended,
+                casting="unsafe",
+            )
+        np.divide(
+            blended,
+            np.float32(total_weight),
+            out=blended,
+            casting="unsafe",
+        )
+
+        smoothed = blended >= self.threshold
+        if self.edge_merge and edges is not None:
+            try:
+                smoothed = np.logical_or(smoothed, np.logical_and(edges, mask_bool))
+            except Exception:
+                smoothed = np.logical_or(smoothed, mask_bool)
+
+        if not np.any(smoothed):
+            smoothed = mask_bool.copy()
+
+        raw_centroid = self._centroid(smoothed)
+        if state.centroid is None:
+            centroid = raw_centroid
+        else:
+            centroid = (
+                (1.0 - self.centroid_alpha) * state.centroid[0] + self.centroid_alpha * raw_centroid[0],
+                (1.0 - self.centroid_alpha) * state.centroid[1] + self.centroid_alpha * raw_centroid[1],
+            )
+
+        area = float(np.count_nonzero(smoothed))
+        state.centroid = centroid
+        state.area = area
+        state.total_weight = total_weight
+        state.missing = 0
+        self._seen.add(track_id)
+
+        return smoothed, centroid, area
+
+    def finalize_frame(self) -> None:
+        stale: List[int] = []
+        for track_id, state in list(self._tracks.items()):
+            if track_id in self._seen:
+                continue
+
+            history = state.history
+            for _ in range(len(history)):
+                obs = history.popleft()
+                obs.weight *= self.decay
+                if obs.weight >= self.weight_floor:
+                    history.append(obs)
+
+            if not history:
+                stale.append(track_id)
+                continue
+
+            state.missing += 1
+            if state.missing > self.max_missing:
+                stale.append(track_id)
+
+        for track_id in stale:
+            self._tracks.pop(track_id, None)
+
+    @staticmethod
+    def _centroid(mask_bool: NDArrayBool) -> Tuple[float, float]:
+        ys, xs = np.nonzero(mask_bool)
+        if ys.size == 0 or xs.size == 0:
+            return (0.0, 0.0)
+        return (float(xs.mean()), float(ys.mean()))

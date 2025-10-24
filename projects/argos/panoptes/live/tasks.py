@@ -37,8 +37,13 @@ from __future__ import annotations
 from typing import Any, Optional, Protocol, Union, cast, Sequence, List, Tuple, Dict, Callable, Iterator, TYPE_CHECKING, NamedTuple
 from pathlib import Path
 from contextlib import contextmanager
+from collections import Counter
+import fnmatch
 import logging
+import math
 import os
+import time
+import warnings
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -51,11 +56,6 @@ def _filter_providers(providers: Sequence[str]) -> List[str]:
     if _tensorrt_disabled():
         return [p for p in providers if "tensorrt" not in p.lower()]
     return list(providers)
-import math
-import time
-import warnings
-from collections import Counter
-
 # ─────────────────────────────────────────────────────────────────────
 # Progress helpers (percent spinner preferred, safe fallbacks if missing)
 # ─────────────────────────────────────────────────────────────────────
@@ -94,12 +94,18 @@ except Exception:
 if TYPE_CHECKING:
     from panoptes.obb_types import OBBDetection as _OBBDetectionType  # type: ignore[import]
     from panoptes.smoothing import PolygonSmoother as _PolygonSmootherType  # type: ignore[import]
+    from panoptes.smoothing import MaskTemporalController as _MaskTemporalControllerType  # type: ignore[import]
+    from panoptes.smoothing import ProbabilitySmoother  # type: ignore[import]
 else:
     _OBBDetectionType = Any  # type: ignore[misc,assignment]
     _PolygonSmootherType = Any  # type: ignore[misc,assignment]
+    _MaskTemporalControllerType = Any  # type: ignore[misc,assignment]
 
 OBBDetectionType = _OBBDetectionType
 PolygonSmootherType = _PolygonSmootherType
+MaskTemporalControllerType = _MaskTemporalControllerType
+
+from panoptes.smoothing import ProbabilitySmoother  # type: ignore[import]
 
 try:
     from panoptes.obb_types import OBBDetection as _RuntimeOBBDetection  # type: ignore[import]
@@ -628,6 +634,7 @@ class TaskAdapter(Protocol):
     def infer(self, frame_bgr: NDArrayU8) -> Any: ...
     def render(self, frame_bgr: NDArrayU8, result: Any) -> NDArrayU8: ...
     label: str  # for HUD
+    def current_label(self) -> str: ...
 
 
 # Minimal predictor protocol so static checkers know these attributes exist.
@@ -700,6 +707,9 @@ class _ContourDetect(TaskAdapter):
         self.names: Names = {}
         self.label = "fast-contour (no-ML)"
 
+    def current_label(self) -> str:
+        return self.label
+
     def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[int, int, int, int, float, Optional[int]]]:
         np_ = cast(Any, np)
         assert np_ is not None
@@ -732,6 +742,9 @@ class _ContourDetect(TaskAdapter):
 class _LaplacianHeatmap(TaskAdapter):
     def __init__(self) -> None:
         self.label = "laplacian-heatmap (no-ML)"
+
+    def current_label(self) -> str:
+        return self.label
 
     def infer(self, frame_bgr: NDArrayU8) -> NDArrayU8:
         np_ = cast(Any, np)
@@ -775,9 +788,27 @@ class _YOLODetect(TaskAdapter):
         mode_norm = (nms_mode or "auto").strip().lower()
         self._nms_override = mode_norm if mode_norm in {"auto", "graph", "torch", "ort"} else "auto"
         self._last_nms_mode: str = "auto"
+        self._mask_tracker: Optional[Any] = None
+        self._mask_smoother: Optional[MaskTemporalControllerType] = None
 
     def current_label(self) -> str:
         return self.model.descriptor()
+
+    def reset_temporal_state(self) -> None:
+        tracker = getattr(self, "_mask_tracker", None)
+        if tracker is not None:
+            try:
+                reset_fn = getattr(tracker, "reset", None)
+                if callable(reset_fn):
+                    reset_fn()
+            except Exception:
+                pass
+        smoother = getattr(self, "_mask_smoother", None)
+        if smoother is not None:
+            try:
+                smoother.reset()
+            except Exception:
+                self._mask_smoother = None
 
     @staticmethod
     def _coerce_float(value: object, default: float) -> float:
@@ -1128,14 +1159,34 @@ class _YOLOHeatmap(TaskAdapter):
     _MIN_AREA_PX: int = 96
     _MIN_AREA_FRAC: float = 5e-4
 
-    def __init__(self, model: ResilientYOLOProtocol, *, conf: float = 0.25) -> None:
+    def __init__(
+        self,
+        model: ResilientYOLOProtocol,
+        *,
+        conf: float = 0.25,
+        smoothing: bool = True,
+        smooth_decay: float = 0.3,
+        smooth_history: int = 3,
+        smooth_max_gap: int = 5,
+        mask_alpha: float = 0.35,
+    ) -> None:
         self.model = model
         self.conf = float(conf)
         self.names = _names_from_model(model.active_model())
         self.label = model.descriptor()
         from .overlay import new_instance_color_tracker, new_mask_smoother
-        self._mask_tracker = new_instance_color_tracker()
-        self._mask_smoother = new_mask_smoother()
+        self._mask_tracker: Any = new_instance_color_tracker()
+        decay = float(max(0.0, min(0.95, smooth_decay)))
+        current_weight = float(max(0.05, min(1.0, 1.0 - decay)))
+        self._mask_smoother: Optional[MaskTemporalControllerType] = new_mask_smoother(
+            enabled=smoothing,
+            history=max(1, int(smooth_history)),
+            current_weight=current_weight,
+            decay=decay,
+            threshold=0.5,
+            max_missed=max(1, int(smooth_max_gap)),
+        )
+        self._mask_alpha = float(max(0.0, min(1.0, mask_alpha)))
         # Cache resize index arrays keyed by (src_h, src_w, dst_h, dst_w) to avoid
         # recomputing np.linspace for every frame.
         self._resize_cache: dict[Tuple[int, int, int, int], Tuple[Any, Any]] = {}
@@ -1294,7 +1345,7 @@ class _YOLOHeatmap(TaskAdapter):
             frame_bgr,
             result,
             names=self.names,
-            alpha=0.35,
+            alpha=self._mask_alpha,
             tracker=self._mask_tracker,
             smoother=self._mask_smoother,
         )
@@ -1305,23 +1356,76 @@ class _YOLOHeatmap(TaskAdapter):
 # ---------------------------
 
 class _YOLOClassify(TaskAdapter):
-    def __init__(self, model: ResilientYOLOProtocol, *, topk: int = 1) -> None:
+    def __init__(
+        self,
+        model: ResilientYOLOProtocol,
+        *,
+        topk: int = 3,
+        smooth_probs: bool = False,
+        prob_alpha: float = 0.6,
+        prob_decay: float = 0.85,
+        whitelist: Optional[Sequence[str]] = None,
+        blacklist: Optional[Sequence[str]] = None,
+    ) -> None:
         self.model = model
         self.label = model.descriptor()
         self.topk = max(1, int(topk))
         self.names = _names_from_model(model.active_model())
+        self._candidate_limit = max(5, self.topk * 2)
+        self._smooth_probs = bool(smooth_probs)
+        self._prob_smoother = (
+            ProbabilitySmoother(alpha=prob_alpha, decay=prob_decay, max_items=self._candidate_limit)
+            if self._smooth_probs
+            else None
+        )
+        self._whitelist = self.prepare_patterns(whitelist)
+        self._blacklist = self.prepare_patterns(blacklist)
+        self._filtered_label = "filtered out"
+
+    @staticmethod
+    def prepare_patterns(patterns: Optional[Sequence[str]]) -> Tuple[str, ...]:
+        if not patterns:
+            return ()
+        cleaned: List[str] = []
+        for token in patterns:
+            text = str(token).strip().lower()
+            if text:
+                cleaned.append(text)
+        return tuple(cleaned)
+
+    @staticmethod
+    def matches_pattern(label: str, patterns: Tuple[str, ...]) -> bool:
+        if not patterns:
+            return False
+        name = label.lower()
+        for pat in patterns:
+            if fnmatch.fnmatch(name, pat):
+                return True
+        return False
+
+    def _apply_filters(self, pairs: List[Tuple[str, float]]) -> List[Tuple[str, Optional[float]]]:
+        if not pairs:
+            return []
+        filtered: List[Tuple[str, float]] = pairs
+        if self._whitelist:
+            whitelisted = [pair for pair in filtered if self.matches_pattern(pair[0], self._whitelist)]
+            filtered = whitelisted if whitelisted else pairs[:1]
+        if self._blacklist:
+            filtered = [pair for pair in filtered if not self.matches_pattern(pair[0], self._blacklist)]
+            if not filtered:
+                return [(self._filtered_label, None)]
+        return [(name, score) for name, score in filtered]
 
     def current_label(self) -> str:
         return self.model.descriptor()
 
-    def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[str, float]]:
+    def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[str, Optional[float]]]:
         np_ = cast(Any, np)
         assert np_ is not None
         inp = _ensure_contiguous(frame_bgr)
         with use_preprocessor(getattr(self, "_preprocessor", None)):
             res_any: Any = self.model.predict(inp, verbose=False)
 
-        # Ultralytics results often expose .probs with .topk etc.
         def _topk_from_probs(obj: Any) -> Optional[List[Tuple[str, float]]]:
             probs = getattr(obj, "probs", None)
             if probs is None:
@@ -1329,14 +1433,14 @@ class _YOLOClassify(TaskAdapter):
             try:
                 topk_fn = getattr(probs, "topk", None)
                 data_vec = _to_numpy(getattr(probs, "data", []), dtype=f32).reshape(-1)
+                limit = min(self._candidate_limit, int(data_vec.shape[0]))
                 if callable(topk_fn):
-                    raw = topk_fn(self.topk)  # could be list/np/tensor-like
+                    raw = topk_fn(limit)
                     idxs = np_.asarray(raw).astype(int).ravel().tolist()
-                    scores = [float(data_vec[i]) for i in idxs if 0 <= i < data_vec.shape[0]]
                 else:
-                    idxs = data_vec.argsort()[-self.topk:][::-1].tolist()
-                    scores = [float(data_vec[i]) for i in idxs]
-                labels = [self.names.get(int(i), str(int(i))) for i in idxs]
+                    idxs = data_vec.argsort()[-limit:][::-1].tolist()
+                scores = [float(data_vec[i]) for i in idxs if 0 <= i < data_vec.shape[0]]
+                labels = [self.names.get(int(i), str(int(i))) for i in idxs[: len(scores)]]
                 return list(zip(labels, scores))
             except Exception:
                 return None
@@ -1346,37 +1450,68 @@ class _YOLOClassify(TaskAdapter):
         else:
             res_obj = cast(object, res_any)
 
-        top = _topk_from_probs(res_obj)
-        if top is not None:
-            return top
+        candidates = _topk_from_probs(res_obj)
+        if candidates is None:
+            for attr in ("probs", "logits", "scores", "data"):
+                arr = getattr(res_obj, attr, None)
+                if arr is None:
+                    continue
+                try:
+                    vec = _to_numpy(arr, dtype=f32).reshape(-1)
+                    idxs = vec.argsort()[-self._candidate_limit:][::-1].tolist()
+                    labels = [self.names.get(int(i), str(i)) for i in idxs]
+                    scores = [float(vec[i]) for i in idxs]
+                    candidates = list(zip(labels, scores))
+                    break
+                except Exception:
+                    continue
 
-        for attr in ("probs", "logits", "scores", "data"):
-            arr = getattr(res_obj, attr, None)
-            if arr is None:
-                continue
-            try:
-                vec = _to_numpy(arr, dtype=f32).reshape(-1)
-                idxs = vec.argsort()[-self.topk:][::-1].tolist()
-                labels = [self.names.get(int(i), str(i)) for i in idxs]
-                scores = [float(vec[i]) for i in idxs]
-                return list(zip(labels, scores))
-            except Exception:
-                continue
+        if candidates is None or not candidates:
+            return [("unknown", 1.0)]
 
-        return [("unknown", 1.0)]
+        filtered = self._apply_filters(candidates)
+        if filtered and filtered[0][0] == self._filtered_label and filtered[0][1] is None:
+            return filtered
 
-    def render(self, frame_bgr: NDArrayU8, result: List[Tuple[str, float]]) -> NDArrayU8:
+        limited = [(name, score if score is not None else 0.0) for name, score in filtered][: self._candidate_limit]
+
+        if self._prob_smoother is not None:
+            smoothed = self._prob_smoother.update(limited)
+            limited = smoothed
+
+        result = limited[: self.topk]
+        if not result:
+            return [("unknown", 1.0)]
+        return [(name, score) for name, score in result]
+
+    def render(self, frame_bgr: NDArrayU8, result: List[Tuple[str, Optional[float]]]) -> NDArrayU8:
         from .overlay import draw_classify_card_bgr
         return draw_classify_card_bgr(frame_bgr, result)
+
+    def reset_temporal_state(self) -> None:
+        if self._prob_smoother is not None:
+            self._prob_smoother.reset()
 
 
 class _SimpleClassify(TaskAdapter):
     """No-ML fallback classification: brightness & saturation heuristic."""
-    def __init__(self, topk: int = 1) -> None:
+    def __init__(
+        self,
+        topk: int = 1,
+        *,
+        whitelist: Optional[Sequence[str]] = None,
+        blacklist: Optional[Sequence[str]] = None,
+    ) -> None:
         self.label = "simple-classify (no-ML)"
         self.topk = max(1, int(topk))
+        self._whitelist = _YOLOClassify.prepare_patterns(whitelist)
+        self._blacklist = _YOLOClassify.prepare_patterns(blacklist)
+        self._filtered_label = "filtered out"
 
-    def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[str, float]]:
+    def current_label(self) -> str:
+        return self.label
+
+    def infer(self, frame_bgr: NDArrayU8) -> List[Tuple[str, Optional[float]]]:
         np_ = cast(Any, np)
         assert np_ is not None
         bgr = frame_bgr.astype("float32") / 255.0
@@ -1388,9 +1523,18 @@ class _SimpleClassify(TaskAdapter):
             ("colorful" if sat > 0.25 else "flat", abs(sat - 0.25) + 0.5),
         ]
         candidates.sort(key=lambda x: x[1], reverse=True)
-        return candidates[: self.topk]
+        filtered: List[Tuple[str, float]] = candidates
+        if self._whitelist:
+            whitelisted = [item for item in filtered if _YOLOClassify.matches_pattern(item[0], self._whitelist)]
+            if whitelisted:
+                filtered = whitelisted
+        if self._blacklist:
+            filtered = [item for item in filtered if not _YOLOClassify.matches_pattern(item[0], self._blacklist)]
+            if not filtered:
+                return [(self._filtered_label, None)]
+        return [(name, score) for name, score in filtered[: self.topk]]
 
-    def render(self, frame_bgr: NDArrayU8, result: List[Tuple[str, float]]) -> NDArrayU8:
+    def render(self, frame_bgr: NDArrayU8, result: List[Tuple[str, Optional[float]]]) -> NDArrayU8:
         from .overlay import draw_classify_card_bgr
         return draw_classify_card_bgr(frame_bgr, result)
 
@@ -1459,6 +1603,9 @@ class _SimplePose(TaskAdapter):
     """No-ML fallback pose: draw a stick figure anchored to frame center."""
     def __init__(self) -> None:
         self.label = "simple-pose (no-ML)"
+
+    def current_label(self) -> str:
+        return self.label
 
     def infer(self, frame_bgr: NDArrayU8) -> List[List[List[float]]]:
         np_ = cast(Any, np)
@@ -1637,6 +1784,9 @@ class _SimpleOBB(TaskAdapter):
         self.conf = float(conf)
         self.label = "simple-obb (no-ML)"
 
+    def current_label(self) -> str:
+        return self.label
+
     def infer(self, frame_bgr: NDArrayU8) -> List[OBBDetectionType]:
         if cv2 is None or np is None or _RuntimeOBBDetection is None:
             return []
@@ -1746,6 +1896,11 @@ def build_heatmap(
     ort_threads: Optional[int] = None,
     ort_execution: Optional[str] = None,
     hud_callback: Optional[Callable[[str], None]] = None,
+    hm_smoothing: bool = True,
+    hm_decay: float = 0.3,
+    hm_history: int = 3,
+    hm_reset_frames: int = 5,
+    hm_alpha: float = 0.35,
 ) -> TaskAdapter:
     try:
         candidates = candidate_weights("heatmap", small=small, override=override)
@@ -1780,7 +1935,19 @@ def build_heatmap(
             if warmup and _warmup_wrapper(wrapper, task="heatmap", conf=0.25):
                 sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
-        adapter = _YOLOHeatmap(wrapper, conf=0.25)
+        smooth_history = max(1, int(hm_history))
+        smooth_gap = max(1, int(hm_reset_frames))
+        smooth_alpha = float(max(0.0, min(1.0, hm_alpha)))
+        smooth_decay = float(max(0.0, min(0.95, hm_decay)))
+        adapter = _YOLOHeatmap(
+            wrapper,
+            conf=0.25,
+            smoothing=bool(hm_smoothing),
+            smooth_decay=smooth_decay,
+            smooth_history=smooth_history,
+            smooth_max_gap=smooth_gap,
+            mask_alpha=smooth_alpha,
+        )
         if preproc is not None:
             setattr(adapter, "_preprocessor", preproc)
         return adapter
@@ -1801,6 +1968,11 @@ def build_classify(
     ort_threads: Optional[int] = None,
     ort_execution: Optional[str] = None,
     hud_callback: Optional[Callable[[str], None]] = None,
+    smooth_probs: bool = False,
+    prob_alpha: float = 0.6,
+    prob_decay: float = 0.85,
+    class_whitelist: Optional[Sequence[str]] = None,
+    class_blacklist: Optional[Sequence[str]] = None,
 ) -> TaskAdapter:
     try:
         candidates = candidate_weights("classify", small=small, override=override)
@@ -1835,14 +2007,22 @@ def build_classify(
             if warmup and _warmup_wrapper(wrapper, task="classify"):
                 sp.update(job="warmup", model=wrapper.descriptor())
             sp.update(count=1, job="ready", model=wrapper.descriptor())
-        adapter = _YOLOClassify(wrapper, topk=topk)
+        adapter = _YOLOClassify(
+            wrapper,
+            topk=topk,
+            smooth_probs=smooth_probs,
+            prob_alpha=prob_alpha,
+            prob_decay=prob_decay,
+            whitelist=class_whitelist,
+            blacklist=class_blacklist,
+        )
         if preproc is not None:
             setattr(adapter, "_preprocessor", preproc)
         return adapter
     except Exception:
         with _progress_simple_status("FALLBACK: simple-classify (no-ML)"):
             time.sleep(0.05)
-        return _SimpleClassify(topk=topk)
+        return _SimpleClassify(topk=topk, whitelist=class_whitelist, blacklist=class_blacklist)
 
 def build_pose(
     *,

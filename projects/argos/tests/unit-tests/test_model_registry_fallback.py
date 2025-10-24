@@ -1,4 +1,5 @@
 from pathlib import Path
+import types
 
 import panoptes.model_registry as mr  # type: ignore[import]
 from pytest import MonkeyPatch
@@ -16,6 +17,17 @@ def test_load_detector_falls_back_to_next_weight(monkeypatch: MonkeyPatch, tmp_p
 
     monkeypatch.setitem(mr.WEIGHT_PRIORITY, "detect_small", [bad_weight])
     monkeypatch.setitem(mr.WEIGHT_PRIORITY, "detect", [good_weight])
+
+    fake_status = types.SimpleNamespace(
+        ok=True,
+        providers_ok=True,
+        providers=["CUDAExecutionProvider"],
+        expected_provider=None,
+        reason=None,
+        version="test",
+        healed=False,
+    )
+    monkeypatch.setattr(mr, "ort_available", lambda: fake_status)
 
     calls: list[tuple[Path, str]] = []
 

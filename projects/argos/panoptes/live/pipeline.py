@@ -117,6 +117,15 @@ class LivePipeline:
     nms_mode: str = "auto"
     resolution_schedule: Optional[Sequence[Tuple[int, int]]] = None
     capture_options: Optional[Dict[str, Any]] = None
+    hm_smoothing: bool = True
+    hm_decay: float = 0.3
+    hm_history: int = 3
+    hm_reset_frames: int = 5
+    hm_alpha: float = 0.35
+    clf_topk: int = 3
+    clf_smooth_probs: bool = False
+    clf_whitelist: Tuple[str, ...] = ()
+    clf_blacklist: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         self._hud_notice: Optional[str] = None
@@ -126,6 +135,23 @@ class LivePipeline:
         self.warmup = bool(self.warmup)
         self.backend = (self.backend or "auto").strip().lower()
         self.nms_mode = (self.nms_mode or "auto").strip().lower()
+        self.hm_smoothing = bool(self.hm_smoothing)
+        try:
+            self.hm_decay = float(self.hm_decay)
+        except Exception:
+            self.hm_decay = 0.3
+        self.hm_decay = max(0.0, min(0.95, self.hm_decay))
+        self.hm_history = max(1, int(self.hm_history))
+        self.hm_reset_frames = max(1, int(self.hm_reset_frames))
+        try:
+            self.hm_alpha = float(self.hm_alpha)
+        except Exception:
+            self.hm_alpha = 0.35
+        self.hm_alpha = max(0.0, min(1.0, self.hm_alpha))
+        self.clf_topk = max(1, int(self.clf_topk))
+        self.clf_smooth_probs = bool(self.clf_smooth_probs)
+        self.clf_whitelist = tuple(token for token in (p.strip() for p in self.clf_whitelist) if token)
+        self.clf_blacklist = tuple(token for token in (p.strip() for p in self.clf_blacklist) if token)
         if self.camera_auto_exposure is not None:
             auto_val = self.camera_auto_exposure.strip().lower()
             self.camera_auto_exposure = auto_val or None
@@ -509,6 +535,11 @@ class LivePipeline:
                 ort_threads=self.ort_threads,
                 ort_execution=self.ort_execution,
                 hud_callback=self._register_toast,
+                hm_smoothing=self.hm_smoothing,
+                hm_decay=self.hm_decay,
+                hm_history=self.hm_history,
+                hm_reset_frames=self.hm_reset_frames,
+                hm_alpha=self.hm_alpha,
             )
         if t in ("clf", "classify"):
             return live_tasks.build_classify(
@@ -521,6 +552,10 @@ class LivePipeline:
                 ort_threads=self.ort_threads,
                 ort_execution=self.ort_execution,
                 hud_callback=self._register_toast,
+                topk=self.clf_topk,
+                smooth_probs=self.clf_smooth_probs,
+                class_whitelist=self.clf_whitelist,
+                class_blacklist=self.clf_blacklist,
             )
         if t in ("pose", "pse"):
             return live_tasks.build_pose(

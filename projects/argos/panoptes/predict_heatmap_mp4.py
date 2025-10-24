@@ -44,13 +44,10 @@ from typing import Any, Callable, ContextManager, Protocol, Tuple, Union, cast
 
 import cv2
 import numpy as np
-from PIL import Image
 
-import panoptes.heatmap as _hm  # type: ignore
 from panoptes import ROOT  # type: ignore
-from panoptes.heatmap import heatmap_overlay  # type: ignore
-from panoptes.model_registry import load_segmenter  # type: ignore
 from .ffmpeg_utils import resolve_ffmpeg
+from .live import tasks as live_tasks
 
 # optional progress (safe off-TTY)
 try:
@@ -61,13 +58,6 @@ except Exception:  # pragma: no cover
     ProgressEngine = None  # type: ignore
     live_percent = None  # type: ignore
     simple_status = None  # type: ignore
-
-# NOTE: Ultralytics is not required for segmentation-only heatmaps.
-# We keep this import guarded so environments with it don't fail.
-try:  # pragma: no cover
-    from ultralytics import YOLO  # type: ignore
-except Exception:  # pragma: no cover
-    YOLO = None  # type: ignore
 
 # ───────────────────────── logging ──────────────────────────
 _LOG = logging.getLogger("panoptes.predict_heatmap_mp4")
@@ -162,6 +152,10 @@ def main(  # noqa: C901 - unavoidable CLI glue
     weights: str | Path | None = None,
     cmap: str = "COLORMAP_JET",
     alpha: float = 0.4,
+    hm_smoothing: bool = True,
+    hm_decay: float = 0.3,
+    hm_history: int = 3,
+    hm_reset_frames: int = 5,
     kernel_scale: float = 5.0,  # unused, kept for flag-compat
     out_dir: str | Path | None = None,
     verbose: bool = False,       # NEW: quiet by default, INFO when True
@@ -172,8 +166,7 @@ def main(  # noqa: C901 - unavoidable CLI glue
     Overlay segmentation heat-map on *src* video and emit <stem>_heat.mp4> (or .avi if everything else fails).
     If *progress* is passed, updates its `current` label with "frame i/N", "encode mp4", "done".
     """
-    # Ultralytics YOLO is optional; segmentation path does not require it.
-    # (Do NOT raise here; tests/CI may run without ultralytics installed.)
+    # Reuse the live heatmap adapter so offline output mirrors live behaviour.
 
     if verbose:
         _LOG.setLevel(logging.INFO)
@@ -194,10 +187,27 @@ def main(  # noqa: C901 - unavoidable CLI glue
         override_path = Path(weights).expanduser().resolve()
         if not override_path.exists():
             raise FileNotFoundError(f"override weight not found: {override_path}")
-    seg_model = load_segmenter(override=override_path)  # registry logs weight
+    overlay_alpha = float(max(0.0, min(1.0, alpha)))
+    hm_decay = float(max(0.0, min(0.95, hm_decay)))
+    hm_history = max(1, int(hm_history))
+    hm_reset_frames = max(1, int(hm_reset_frames))
 
-    # propagate into heatmap module so subsequent calls are instant
-    _hm._seg_model = seg_model  # type: ignore[attr-defined]
+    heat_adapter = live_tasks.build_heatmap(
+        small=False,
+        override=override_path,
+        hm_smoothing=hm_smoothing,
+        hm_decay=hm_decay,
+        hm_history=hm_history,
+        hm_reset_frames=hm_reset_frames,
+        hm_alpha=overlay_alpha,
+    )
+    model_lbl = "heatmap"
+    try:
+        model_lbl = heat_adapter.current_label()
+    except Exception:
+        label_attr = getattr(heat_adapter, "label", None)
+        if isinstance(label_attr, str) and label_attr:
+            model_lbl = label_attr
 
     # strip YOLO-specific keys that users might pass by copy-paste
     STRIP = {"weights", "conf", "imgsz", "iou", "classes", "max_det"}
@@ -243,7 +253,7 @@ def main(  # noqa: C901 - unavoidable CLI glue
             eng.set_total(float(total_frames + 1))
             eng.set_current("frame 0")
         elif progress is not None:
-            progress.update(total=total_for_progress, count=0, job=f"frame 0/{total_frames}")
+            progress.update(total=total_for_progress, count=0, job=f"frame 0/{total_frames}", model=model_lbl)
 
         # ── frame loop ───────────────────────────────────────────────────
         while True:
@@ -251,20 +261,10 @@ def main(  # noqa: C901 - unavoidable CLI glue
             if not ok:
                 break
 
-            ov = heatmap_overlay(
-                Image.fromarray(frame[:, :, ::-1]),
-                boxes=None,  # true seg masks only
-                alpha=alpha,
-                cmap=cmap,
-                kernel_scale=kernel_scale,
-                **kw,
-            )
-
-            if isinstance(ov, Image.Image):
-                out_bgr = np.asarray(ov)[:, :, ::-1]
-            else:  # ndarray returned (already BGR)
-                out_bgr = ov
-            vw.write(np.asarray(out_bgr, dtype=np.uint8))
+            frame_bgr = np.asarray(frame, dtype=np.uint8)
+            results = heat_adapter.infer(frame_bgr)
+            annotated = heat_adapter.render(frame_bgr, results)
+            vw.write(np.asarray(annotated, dtype=np.uint8))
 
             frame_idx += 1
             if eng:
@@ -274,6 +274,7 @@ def main(  # noqa: C901 - unavoidable CLI glue
                     total=total_for_progress,
                     count=min(frame_idx, total_frames),
                     job=f"frame {min(frame_idx, total_frames)}/{total_frames}",
+                    model=model_lbl,
                 )
 
         cap.release()
@@ -285,7 +286,7 @@ def main(  # noqa: C901 - unavoidable CLI glue
         if eng:
             eng.set_current("encode mp4")
         elif progress is not None:
-            progress.update(total=total_for_progress, count=total_frames, job="encode mp4")
+            progress.update(total=total_for_progress, count=total_frames, job="encode mp4", model=model_lbl)
 
         # Try FFmpeg first (if available)
         ffmpeg_path, ffmpeg_source = resolve_ffmpeg()
@@ -344,7 +345,11 @@ def main(  # noqa: C901 - unavoidable CLI glue
         if eng:
             eng.add(1.0, current_item="done")
         elif progress is not None:
-            progress.update(total=total_for_progress, count=total_for_progress, job="done")
+            progress.update(total=total_for_progress, count=total_for_progress, job="done", model=model_lbl)
+        try:
+            heat_adapter.reset_temporal_state()  # type: ignore[attr-defined]
+        except Exception:
+            pass
         return final
 
 
@@ -372,16 +377,36 @@ if __name__ == "__main__":
     alpha_arg = float(args.pop("alpha", 0.4))
     kscale_arg = float(args.pop("kernel_scale", 5.0))
     verbose_arg = bool(args.pop("verbose", False))
+    hm_smoothing_arg = bool(args.pop("hm_smoothing", args.pop("hm-smoothing", True)))
+    hm_decay_val = args.pop("hm_decay", args.pop("hm-decay", 0.3))
+    try:
+        hm_decay_arg = float(hm_decay_val)
+    except Exception:
+        hm_decay_arg = 0.3
+    hm_history_val = args.pop("hm_history", args.pop("hm-history", 3))
+    try:
+        hm_history_arg = int(hm_history_val)
+    except Exception:
+        hm_history_arg = 3
+    hm_reset_val = args.pop("hm_reset_frames", args.pop("hm-reset-frames", 5))
+    try:
+        hm_reset_arg = int(hm_reset_val)
+    except Exception:
+        hm_reset_arg = 5
 
     # Remove unsupported/typed-only CLI keys to avoid binding to typed parameters.
     args.pop("progress", None)
 
-    # Note: CLI `__main__` path doesn’t have a spinner to pass; local engine is used.
+    # Note: CLI `__main__` path doesn't have a spinner to pass; local engine is used.
     main(
         sys.argv[1],
         weights=str(weights_arg) if weights_arg is not None else None,
         cmap=cmap_arg,
         alpha=alpha_arg,
+        hm_smoothing=hm_smoothing_arg,
+        hm_decay=hm_decay_arg,
+        hm_history=hm_history_arg,
+        hm_reset_frames=hm_reset_arg,
         kernel_scale=kscale_arg,
         out_dir=str(out_dir_arg) if out_dir_arg is not None else None,
         verbose=verbose_arg,

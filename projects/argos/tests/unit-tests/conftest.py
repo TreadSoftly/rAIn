@@ -6,10 +6,11 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 import pytest
 from PIL import Image
+import shlex
 
 # Type-only imports so static analyzers know what these are
 if TYPE_CHECKING:
@@ -56,17 +57,68 @@ def _ensure_results_dir() -> None:  # type: ignore[no-untyped-def]
     out.mkdir(parents=True, exist_ok=True)
 
 
+def _resolve_argos_target() -> Optional[Path]:
+    override = os.environ.get("PANOPTES_TEST_TARGET")
+    if override:
+        cand = Path(override).expanduser()
+        if cand.exists():
+            return cand
+    exe = shutil.which("target")
+    if not exe:
+        return None
+    candidate = Path(exe)
+    try:
+        candidate = candidate.resolve()
+    except Exception:
+        pass
+
+    if os.environ.get("PANOPTES_TEST_ALLOW_ANY_TARGET") == "1":
+        return candidate
+
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        managed_root = Path(local_app) / "rAIn" / "venvs"
+        if managed_root.exists() and managed_root in candidate.parents:
+            return candidate
+
+    project_root = Path(__file__).resolve().parents[2]  # projects/argos
+    if project_root in candidate.parents:
+        return candidate
+
+    return None
+
+
+def _cli_command_override() -> Optional[List[str]]:
+    override = os.environ.get("PANOPTES_TEST_CLI")
+    if not override:
+        return None
+    try:
+        parsed = shlex.split(override)
+    except ValueError:
+        return None
+    return parsed if parsed else None
+
+
+def _discover_cli_base() -> List[str]:
+    command_override = _cli_command_override()
+    if command_override is not None:
+        return command_override
+
+    target_path = _resolve_argos_target()
+    if target_path is not None:
+        return [str(target_path)]
+
+    return [sys.executable, "-m", "panoptes.cli"]
+
+
 @pytest.fixture(scope="session")
 def cli_base_cmd() -> List[str]:
     """
-    Helper for tests that want a robust way to invoke the CLI:
-    returns ["target"] if it's on PATH, otherwise falls back to
-    [python, -m, panoptes.cli].
+    Helper for tests that want a robust way to invoke the CLI.
+    Prefers the Argos-managed ``target`` entry point when available and
+    falls back to ``python -m panoptes.cli`` otherwise.
     """
-    exe = shutil.which("target")
-    if exe:
-        return ["target"]
-    return [sys.executable, "-m", "panoptes.cli"]
+    return _discover_cli_base()
 
 
 def pytest_collection_modifyitems(config: "Config", items: List["Item"]) -> None:

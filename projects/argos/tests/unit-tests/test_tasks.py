@@ -5,11 +5,12 @@ import base64
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Optional
 
 # ── third-party ─────────────────────────────────────────────────────
 import boto3
@@ -155,10 +156,58 @@ def _annotate_video(vid_path: Path) -> None:
     subprocess.check_call(cmd)
 
 
-def _cli_base_cmd() -> List[str]:
+def _resolve_argos_target() -> Optional[Path]:
+    override = os.environ.get("PANOPTES_TEST_TARGET")
+    if override:
+        cand = Path(override).expanduser()
+        if cand.exists():
+            return cand
+
     exe = shutil.which("target")
-    if exe:
-        return ["target"]
+    if not exe:
+        return None
+    candidate = Path(exe)
+    try:
+        candidate = candidate.resolve()
+    except Exception:
+        pass
+
+    if os.environ.get("PANOPTES_TEST_ALLOW_ANY_TARGET") == "1":
+        return candidate
+
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        managed_root = Path(local_app) / "rAIn" / "venvs"
+        if managed_root.exists() and managed_root in candidate.parents:
+            return candidate
+
+    project_root = Path(__file__).resolve().parents[2]  # projects/argos
+    if project_root in candidate.parents:
+        return candidate
+
+    return None
+
+
+def _cli_command_override() -> Optional[List[str]]:
+    override = os.environ.get("PANOPTES_TEST_CLI")
+    if not override:
+        return None
+    try:
+        parsed = shlex.split(override)
+    except ValueError:
+        return None
+    return parsed if parsed else None
+
+
+def _cli_base_cmd() -> List[str]:
+    override_cmd = _cli_command_override()
+    if override_cmd is not None:
+        return override_cmd
+
+    target_path = _resolve_argos_target()
+    if target_path is not None:
+        return [str(target_path)]
+
     return [sys.executable, "-m", "panoptes.cli"]
 
 

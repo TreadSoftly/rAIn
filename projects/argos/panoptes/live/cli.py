@@ -12,7 +12,7 @@ import traceback
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, List, Optional, Tuple, Union, Literal
+from typing import Final, List, Optional, Tuple, Union, Literal, Sequence
 
 from multiprocessing.queues import Queue as MPQueue
 
@@ -237,6 +237,13 @@ def _clear_live_overrides() -> None:
     live_tasks.LIVE_POSE_OVERRIDE = None
     live_tasks.LIVE_PSE_OVERRIDE = None
     live_tasks.LIVE_OBB_OVERRIDE = None
+
+
+def _parse_class_list(raw: Optional[str]) -> List[str]:
+    if raw is None:
+        return []
+    parts = [item.strip() for item in raw.split(",")]
+    return [item for item in parts if item]
 
 
 def _parse_imgsz_option(value: Optional[str]) -> Optional[Tuple[int, int]]:
@@ -553,6 +560,15 @@ def _run_pipeline_worker(
     ort_execution: Optional[str],
     nms_mode: str,
     result_queue: MPQueue[ResultMessage],
+    hm_smoothing: bool,
+    hm_decay: float,
+    hm_history: int,
+    hm_reset_frames: int,
+    hm_alpha: float,
+    clf_topk: int,
+    clf_smooth_probs: bool,
+    clf_whitelist: Sequence[str],
+    clf_blacklist: Sequence[str],
 ) -> None:
     try:
         override = Path(override_path) if override_path else None
@@ -578,6 +594,15 @@ def _run_pipeline_worker(
             ort_threads=ort_threads,
             ort_execution=ort_execution,
             nms_mode=nms_mode,
+            hm_smoothing=hm_smoothing,
+            hm_decay=hm_decay,
+            hm_history=hm_history,
+            hm_reset_frames=hm_reset_frames,
+            hm_alpha=hm_alpha,
+            clf_topk=clf_topk,
+            clf_smooth_probs=clf_smooth_probs,
+            clf_whitelist=tuple(clf_whitelist),
+            clf_blacklist=tuple(clf_blacklist),
         )
         output = pipeline.run()
         result_queue.put(("ok", idx, output or ""))
@@ -620,6 +645,51 @@ def run(
     height: Optional[int] = typer.Option(None, "--height", help="Capture height hint."),
     conf: float = typer.Option(0.25, "--conf", help="Detector confidence (detect/pose/obb where applicable)."),
     iou: float = typer.Option(0.45, "--iou", help="Detector IOU (detect/obb where applicable)."),
+    hm_smoothing: bool = typer.Option(
+        True,
+        "--hm-smoothing/--no-hm-smoothing",
+        help="Enable temporal smoothing for heatmap masks.",
+    ),
+    hm_decay: float = typer.Option(
+        0.3,
+        "--hm-decay",
+        help="Historical weight applied to previous heatmap masks (0.0-1.0).",
+    ),
+    hm_history: int = typer.Option(
+        3,
+        "--hm-history",
+        help="Number of recent heatmap masks to keep in the temporal buffer.",
+    ),
+    hm_reset_frames: int = typer.Option(
+        5,
+        "--hm-reset-frames",
+        help="Frames to wait before clearing heatmap smoothing state when a class disappears.",
+    ),
+    hm_alpha: float = typer.Option(
+        0.35,
+        "--hm-alpha",
+        help="Overlay alpha used when compositing heatmap masks.",
+    ),
+    topk: int = typer.Option(
+        3,
+        "--topk",
+        help="Number of classification predictions to display.",
+    ),
+    smooth_probs: bool = typer.Option(
+        False,
+        "--smooth-probs/--no-smooth-probs",
+        help="Smooth classification probabilities across frames.",
+    ),
+    class_whitelist: Optional[str] = typer.Option(
+        None,
+        "--class-whitelist",
+        help="Comma-separated class names or patterns to include (classification).",
+    ),
+    class_blacklist: Optional[str] = typer.Option(
+        None,
+        "--class-blacklist",
+        help="Comma-separated class names or patterns to exclude (classification).",
+    ),
     small: bool = typer.Option(True, "--small/--no-small", help="Prefer small models for live."),
     support_bundle: bool = typer.Option(False, "--support-bundle", help="Write a support bundle zip after the session"),
     preprocess_device: str = typer.Option(
@@ -698,6 +768,23 @@ def run(
         if val not in {"sequential", "parallel"}:
             raise typer.BadParameter("--ort-execution must be sequential or parallel")
         ort_execution_norm = val
+
+    try:
+        hm_decay = float(hm_decay)
+    except Exception:
+        hm_decay = 0.3
+    hm_decay = max(0.0, min(0.95, hm_decay))
+    hm_history = max(1, int(hm_history))
+    hm_reset_frames = max(1, int(hm_reset_frames))
+    try:
+        hm_alpha = float(hm_alpha)
+    except Exception:
+        hm_alpha = 0.35
+    hm_alpha = max(0.0, min(1.0, hm_alpha))
+    clf_topk_opt = max(1, int(topk))
+    smooth_probs_opt = bool(smooth_probs)
+    class_whitelist_list = _parse_class_list(class_whitelist)
+    class_blacklist_list = _parse_class_list(class_blacklist)
 
     _log_event("live.cli.backend", backend=backend_norm, ort_threads=ort_threads, ort_execution=ort_execution_norm)
     _log_event("live.cli.nms", mode=nms_mode_norm)
@@ -824,6 +911,15 @@ def run(
                     ort_execution_norm,
                     nms_mode_norm,
                     result_queue,
+                    hm_smoothing,
+                    hm_decay,
+                    hm_history,
+                    hm_reset_frames,
+                    hm_alpha,
+                    clf_topk_opt,
+                    smooth_probs_opt,
+                    class_whitelist_list,
+                    class_blacklist_list,
                 ),
             )
             proc.start()
@@ -909,3 +1005,8 @@ def main() -> None:  # pragma: no cover
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+
+
+
+

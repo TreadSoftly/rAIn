@@ -41,6 +41,7 @@ except Exception:
     cv2 = None  # type: ignore
 
 from panoptes.obb_types import OBBDetection # type: ignore
+from panoptes.smoothing import MaskTemporalController # type: ignore
 from ._types import NDArrayU8, Boxes, Names
 
 
@@ -81,13 +82,6 @@ class _TrackedInstance:
     y: float
     last_seen: int
     track_id: int
-
-
-@dataclass
-class _MaskState:
-    mask: BoolArray
-    centroid: Tuple[float, float]
-    velocity: Tuple[float, float]
 
 
 class _InstanceColorTracker:
@@ -142,6 +136,12 @@ class _InstanceColorTracker:
             return
         self._entries = [entry for entry in self._entries if entry.last_seen > cutoff]
 
+    def reset(self) -> None:
+        self._entries.clear()
+        self._used_colors.clear()
+        self._frame = 0
+        self._next_track_id = 0
+
     def fallback_color(self, cls_id: Optional[int]) -> Tuple[Tuple[int, int, int], int]:
         if cls_id is not None and self.palette:
             color = self.palette[int(cls_id) % len(self.palette)]
@@ -170,133 +170,24 @@ def new_instance_color_tracker(
     return _InstanceColorTracker(palette, distance=distance, ttl_frames=ttl_frames)
 
 
-class _MaskTemporalSmoother:
-    def __init__(self, *, keep_radius: int = 2, ttl_frames: int = 10) -> None:
-        self.keep_radius = max(0, int(keep_radius))
-        self.ttl_frames = max(1, int(ttl_frames))
-        self._states: Dict[int, _MaskState] = {}
-        self._ages: Dict[int, int] = {}
-        self._seen: set[int] = set()
-        if cv2 is not None and self.keep_radius > 0:
-            size = self.keep_radius * 2 + 1
-            self._base_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
-        else:
-            self._base_kernel = None
-
-    def start_frame(self) -> None:
-        self._seen.clear()
-
-    def smooth(
-        self,
-        track_id: int,
-        mask: BoolArray,
-        edges: Optional[BoolArray] = None,
-    ) -> Tuple[BoolArray, Tuple[float, float]]:
-        if np is None:
-            raise RuntimeError("numpy required")
-        assert np is not None
-        if track_id < 0:
-            coords = np.nonzero(mask)
-            if coords[0].size:
-                centroid = (float(coords[1].mean()), float(coords[0].mean()))
-            else:
-                centroid = (0.0, 0.0)
-            return mask, centroid
-
-        mask_bool: BoolArray = mask.astype(bool, copy=False)
-        ys, xs = np.nonzero(mask_bool)
-        if ys.size == 0:
-            return mask_bool, (0.0, 0.0)
-        centroid = (float(xs.mean()), float(ys.mean()))
-
-        state = self._states.get(track_id)
-        if state is None or state.mask.shape != mask_bool.shape:
-            stable = mask_bool.copy()
-            velocity = (0.0, 0.0)
-        else:
-            prev_mask = state.mask
-            prev_centroid = state.centroid
-            velocity = (
-                centroid[0] - prev_centroid[0],
-                centroid[1] - prev_centroid[1],
-            )
-            shift_x = int(round(velocity[0]))
-            shift_y = int(round(velocity[1]))
-            prev_shift: BoolArray = prev_mask
-            if shift_x != 0 or shift_y != 0:
-                prev_shift = np.roll(prev_mask, shift_y, axis=0)
-                prev_shift = np.roll(prev_shift, shift_x, axis=1)
-                if shift_y > 0:
-                    prev_shift[:shift_y, :] = False
-                elif shift_y < 0:
-                    prev_shift[shift_y:, :] = False
-                if shift_x > 0:
-                    prev_shift[:, :shift_x] = False
-                elif shift_x < 0:
-                    prev_shift[:, shift_x:] = False
-                prev_shift = prev_shift.astype(bool, copy=False)
-            dilations = self.keep_radius
-            speed = math.hypot(*velocity)
-            if speed > 1.5:
-                dilations += 1
-            if speed > 4.0:
-                dilations += 1
-            if cv2 is not None and dilations > 0:
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilations * 2 + 1, dilations * 2 + 1))
-                current_dilated: BoolArray = cv2.dilate(mask_bool.astype(np.uint8), kernel, iterations=1).astype(bool)
-            else:
-                current_dilated = mask_bool
-            stable = mask_bool | (prev_shift & current_dilated)
-            if cv2 is not None:
-                close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                stable = cv2.morphologyEx(stable.astype(np.uint8), cv2.MORPH_CLOSE, close_kernel, iterations=1).astype(bool)
-        if edges is not None and cv2 is not None:
-            stable = stable | (edges & mask_bool)
-
-        self._states[track_id] = _MaskState(mask=stable, centroid=centroid, velocity=velocity)
-        self._ages[track_id] = self.ttl_frames
-        self._seen.add(track_id)
-        return stable, centroid
-
-    def finalize_frame(self) -> None:
-        if np is None:
-            raise RuntimeError("numpy required")
-        assert np is not None
-        stale: List[int] = []
-        for track_id, age in list(self._ages.items()):
-            if track_id in self._seen:
-                continue
-            next_age = age - 1
-            if next_age <= 0:
-                stale.append(track_id)
-                continue
-            self._ages[track_id] = next_age
-            state = self._states.get(track_id)
-            if state is None:
-                stale.append(track_id)
-                continue
-            faded = state.mask
-            if cv2 is not None and self._base_kernel is not None:
-                eroded = cv2.erode(faded.astype(np.uint8), self._base_kernel, iterations=1)
-                faded = eroded.astype(bool)
-            else:
-                faded = faded.copy()
-                if faded.shape[0] > 2 and faded.shape[1] > 2:
-                    inner = faded[1:-1, 1:-1]
-                    inner &= faded[:-2, 1:-1]
-                    inner &= faded[2:, 1:-1]
-                    inner &= faded[1:-1, :-2]
-                    inner &= faded[1:-1, 2:]
-            if not np.any(faded):
-                stale.append(track_id)
-                continue
-            self._states[track_id] = _MaskState(mask=faded, centroid=state.centroid, velocity=(0.0, 0.0))
-        for track_id in stale:
-            self._ages.pop(track_id, None)
-            self._states.pop(track_id, None)
-
-def new_mask_smoother(*, keep_radius: int = 2, ttl_frames: int = 10) -> _MaskTemporalSmoother:
-    return _MaskTemporalSmoother(keep_radius=keep_radius, ttl_frames=ttl_frames)
+def new_mask_smoother(
+    *,
+    enabled: bool = True,
+    history: int = 3,
+    current_weight: float = 0.7,
+    decay: float = 0.3,
+    threshold: float = 0.5,
+    max_missed: int = 5,
+) -> Optional[MaskTemporalController]:
+    if not enabled:
+        return None
+    return MaskTemporalController(
+        history=history,
+        current_weight=current_weight,
+        decay=decay,
+        threshold=threshold,
+        max_missing=max_missed,
+    )
 
 
 def _confidence_text(conf: object) -> str:
@@ -420,7 +311,7 @@ def draw_masks_bgr(
     names: Optional[Names] = None,
     alpha: float = 0.35,
     tracker: Optional[_InstanceColorTracker] = None,
-    smoother: Optional[_MaskTemporalSmoother] = None,
+    smoother: Optional[MaskTemporalController] = None,
 ) -> NDArrayU8:
     """Draw instance masks (each mask uint8 0/255) with per-class color and label."""
     frame = _ensure_np(frame)
@@ -463,13 +354,22 @@ def draw_masks_bgr(
                 ys, xs = np.nonzero(mask_bool)
                 color, track_id = _stable_mask_assignment(cls_id, xs, ys, tracker_local)
 
+                centroid: Tuple[float, float]
+                area = float(np.count_nonzero(mask_bool))
+
                 if smoother_local is not None and track_id >= 0:
-                    mask_bool, centroid = smoother_local.smooth(track_id, mask_bool, frame_edges_bool)
+                    mask_bool, centroid, area = smoother_local.smooth(
+                        track_id,
+                        mask_bool,
+                        cls_id=cls_id,
+                        edges=frame_edges_bool,
+                    )
                     if not np.any(mask_bool):
                         continue
                     ys, xs = np.nonzero(mask_bool)
                 else:
                     centroid = (float(xs.mean()), float(ys.mean())) if xs.size else (0.0, 0.0)
+                    area = float(ys.size)
 
                 fill_color = tuple(int(color[i] * 0.15 + 255 * 0.85) for i in range(3))
                 outline_color = tuple(min(255, int(color[i] * 0.6 + 255 * 0.4)) for i in range(3))
@@ -504,7 +404,7 @@ def draw_masks_bgr(
                 conf_clamped = float(max(0.0, min(1.0, conf)))
                 fill_alpha = alpha * (0.05 + 0.18 * (1.0 - conf_clamped))
                 if np.any(mask_bool):
-                    area_ratio = float(np.count_nonzero(mask_bool)) / float(H * W)
+                    area_ratio = float(area) / float(H * W) if H and W else 0.0
                     if area_ratio > 0.2:
                         fill_alpha *= 0.6
                 fill_alpha = min(fill_alpha, alpha * 0.25)
@@ -549,39 +449,80 @@ def draw_masks_bgr(
 
 def draw_classify_card_bgr(
     frame: NDArrayU8,
-    topk: List[Tuple[str, float]],
+    topk: List[Tuple[str, Optional[float]]],
 ) -> NDArrayU8:
     """
-    Draw top-K predictions as a small card in the top-left (under the HUD).
+    Draw top-K predictions as a compact multi-row card in the top-left corner.
     """
     frame = _ensure_np(frame)
-    if cv2 is None:
+    if cv2 is None or not topk:
         return frame
 
-    x, y, pad = 8, 32, 6
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.6
-    thickness = 2
+    cv2_local = cv2
+    if cv2_local is None:
+        return frame
 
-    # compute card size
-    lines = [f"{lbl}: {p*100:.1f}%" for (lbl, p) in topk]
-    w = 0
-    for t in lines:
-        (tw, _), _ = cv2.getTextSize(t, font, scale, thickness)
-        w = max(w, tw)
-    # derive a stable text line height from a sample string
-    line_h = cv2.getTextSize("Ag", font, scale, thickness)[0][1] + 6
-    h = line_h * len(lines) + pad * 2
+    font = cv2_local.FONT_HERSHEY_SIMPLEX
+    scale = 0.55
+    thickness = 1
+    pad = 8
+    gap = 6
+    spacing = 12
+    x, y = 8, 32
 
-    # background
-    cv2.rectangle(frame, (x, y), (x + w + pad * 2, y + h), (20, 20, 20), -1)
-    cv2.rectangle(frame, (x, y), (x + w + pad * 2, y + h), (80, 80, 80), 1)
+    _, frame_w = frame.shape[:2]
+    max_label_px = max(80, min(int(frame_w * 0.35), 240))
 
-    # text
-    ty = y + pad + 14
-    for t in lines:
-        cv2.putText(frame, t, (x + pad, ty), font, scale, (255, 245, 200), thickness)
-        ty += line_h
+    def _text_size(text: str) -> Tuple[int, int]:
+        size, _ = cv2_local.getTextSize(text, font, scale, thickness)
+        return int(size[0]), int(size[1])
+
+    label_lines: List[Tuple[str, str, Tuple[int, int], Tuple[int, int]]] = []
+    label_col_width = 0
+    value_col_width = 0
+
+    for idx, (name, prob) in enumerate(topk, start=1):
+        label = str(name)
+        rank_prefix = f"{idx}. "
+        rank_width = _text_size(rank_prefix)[0]
+        allowed = max(0, max_label_px - rank_width)
+
+        if _text_size(label)[0] > allowed and allowed > 0:
+            truncated = label
+            ellipsis = "..."
+            while truncated and _text_size(truncated + ellipsis)[0] > allowed:
+                truncated = truncated[:-1]
+            label = truncated + ellipsis if truncated else ellipsis
+
+        label_text = rank_prefix + label
+        if prob is None:
+            value_text = ""
+        else:
+            value_text = f"{prob * 100:5.1f}%"
+
+        label_size = _text_size(label_text)
+        value_size = _text_size(value_text) if value_text else (0, 0)
+
+        label_col_width = max(label_col_width, label_size[0])
+        value_col_width = max(value_col_width, value_size[0])
+        label_lines.append((label_text, value_text, label_size, value_size))
+
+    col_spacing = spacing if value_col_width > 0 else 0
+    card_w = pad * 2 + label_col_width + col_spacing + value_col_width
+    text_height = _text_size("Ag")[1]
+    line_step = text_height + gap
+    card_h = pad * 2 + line_step * len(label_lines) - gap
+
+    cv2_local.rectangle(frame, (x, y), (x + card_w, y + card_h), (20, 20, 20), -1)
+    cv2_local.rectangle(frame, (x, y), (x + card_w, y + card_h), (80, 80, 80), 1)
+
+    text_y = y + pad + text_height
+    for label_text, value_text, label_size, value_size in label_lines:
+        cv2_local.putText(frame, label_text, (x + pad, text_y), font, scale, (255, 245, 200), thickness)
+        if value_text:
+            value_x = x + pad + label_col_width + col_spacing + value_col_width - value_size[0]
+            cv2_local.putText(frame, value_text, (value_x, text_y), font, scale, (240, 240, 240), thickness)
+        text_y += line_step
 
     return frame
 
