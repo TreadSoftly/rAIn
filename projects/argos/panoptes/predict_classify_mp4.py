@@ -39,7 +39,7 @@ import cv2  # type: ignore
 import numpy as np
 from numpy.typing import NDArray
 
-from panoptes import ROOT  # type: ignore[import-not-found]
+from panoptes import results_dir  # type: ignore[import-not-found]
 from .ffmpeg_utils import resolve_ffmpeg
 from .live import tasks as live_tasks
 
@@ -175,9 +175,11 @@ def main(
     if not src_path.exists():
         raise FileNotFoundError(src_path)
     if out_dir is None:
-        out_dir = ROOT / "tests" / "results"
-    out_dir = Path(out_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir_path = results_dir()
+    else:
+        out_dir_path = Path(out_dir).expanduser().resolve()
+        out_dir_path.mkdir(parents=True, exist_ok=True)
+    out_dir = out_dir_path
 
     override_path: Optional[Path] = None
     if weights is not None:
@@ -355,5 +357,4 @@ if __name__ == "__main__":
         verbose=verbose_arg,
         progress=None,
     )
-
 

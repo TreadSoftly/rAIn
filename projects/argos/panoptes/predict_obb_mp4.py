@@ -35,7 +35,7 @@ import numpy as np
 from numpy.typing import NDArray
 import math
 
-from panoptes import ROOT  # type: ignore[import-not-found]
+from panoptes import results_dir  # type: ignore[import-not-found]
 from panoptes.model_registry import load_obb  # type: ignore[import-not-found]
 from panoptes.live.overlay import draw_obb_bgr  # type: ignore[import-not-found]
 from panoptes.obb_types import OBBDetection # type: ignore[import-not-found]
@@ -273,9 +273,11 @@ def main(  # noqa: C901
     if not srcp.exists():
         raise FileNotFoundError(srcp)
     if out_dir is None:
-        out_dir = ROOT / "tests" / "results"
-    out_dir = Path(out_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir_path = results_dir()
+    else:
+        out_dir_path = Path(out_dir).expanduser().resolve()
+        out_dir_path.mkdir(parents=True, exist_ok=True)
+    out_dir = out_dir_path
 
     # strict model
     override: Optional[Path] = None

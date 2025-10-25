@@ -45,7 +45,7 @@ from typing import Any, Callable, ContextManager, Protocol, Tuple, Union, cast
 import cv2
 import numpy as np
 
-from panoptes import ROOT  # type: ignore
+from panoptes import results_dir  # type: ignore
 from .ffmpeg_utils import resolve_ffmpeg
 from .live import tasks as live_tasks
 
@@ -177,9 +177,11 @@ def main(  # noqa: C901 - unavoidable CLI glue
         raise FileNotFoundError(src_path)
 
     if out_dir is None:
-        out_dir = ROOT / "tests" / "results"
-    out_dir = Path(out_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir_path = results_dir()
+    else:
+        out_dir_path = Path(out_dir).expanduser().resolve()
+        out_dir_path.mkdir(parents=True, exist_ok=True)
+    out_dir = out_dir_path
 
     # ── load segmentation model (strict) ─────────────────────────────
     override_path: Path | None = None

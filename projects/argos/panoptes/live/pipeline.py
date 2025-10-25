@@ -26,6 +26,7 @@ from . import tasks as live_tasks
 from . import config as live_config
 from .config import ModelSelection
 from ._types import NDArrayU8
+from panoptes import results_dir  # type: ignore[import]
 from panoptes.logging_config import bind_context, current_run_dir  # type: ignore[import]
 
 # Live progress spinner (robust fallback)
@@ -82,14 +83,6 @@ def _log(event: str, **info: object) -> None:
         LOGGER.error("%s %s", event, detail)
     else:
         LOGGER.error("%s", event)
-
-
-def _results_dir() -> Path:
-    # Mirror the offline CLI layout: projects/argos/tests/results
-    root = Path(__file__).resolve().parents[2]
-    out = root / "tests" / "results"
-    out.mkdir(parents=True, exist_ok=True)
-    return out
 
 
 @dataclass
@@ -637,7 +630,7 @@ class LivePipeline:
 
     def _default_out_path(self) -> str:
         ts = time.strftime("%Y%m%d-%H%M%S")
-        return str(_results_dir() / f"live_{self.task}_{ts}.mp4")
+        return str(results_dir() / f"live_{self.task}_{ts}.mp4")
 
 
 
