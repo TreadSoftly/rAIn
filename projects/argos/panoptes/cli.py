@@ -172,15 +172,37 @@ _PREF_EXT_ORDER = (
 # Compute /projects/argos from this file path
 _PROJ_ROOT_PATH: Final[Path] = Path(__file__).resolve().parents[1]
 _RAW_DIR: Path = _PROJ_ROOT_PATH / "tests" / "raw"
+
+
 def _compute_results_dir() -> Path:
     override = os.getenv("PANOPTES_RESULTS_DIR")
     if override:
-        candidate = Path(override).expanduser()
+        base = Path(override).expanduser()
         try:
-            return candidate.resolve()
+            base.mkdir(parents=True, exist_ok=True)
         except Exception:
-            return candidate
-    return _PROJ_ROOT_PATH / "tests" / "results"
+            pass
+        try:
+            return base.resolve()
+        except Exception:
+            return base
+
+    default = _PROJ_ROOT_PATH / "tests" / "results"
+    if default.exists():
+        try:
+            return default.resolve()
+        except Exception:
+            return default
+
+    repo_candidate = Path.cwd() / "projects" / "argos" / "tests" / "results"
+    try:
+        repo_candidate.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        return repo_candidate.resolve()
+    except Exception:
+        return repo_candidate
 
 
 _RESULTS_DIR: Path = _compute_results_dir()
