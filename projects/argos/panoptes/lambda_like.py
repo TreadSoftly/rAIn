@@ -37,6 +37,24 @@ def set_verbose(enabled: bool = True) -> None:
 _BASE = Path(__file__).resolve().parent
 ROOT  = _BASE.parent
 
+
+def _results_dir() -> Path:
+    """
+    Return the results directory honoring the PANOPTES_RESULTS_DIR override.
+    Tests and the CLI set this so that outputs land in the repo tree even
+    when the CLI re-execs into the managed venv.
+    """
+    override = os.getenv("PANOPTES_RESULTS_DIR")
+    if override:
+        base = Path(override).expanduser()
+    else:
+        base = ROOT / "tests" / "results"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return base
+
 try:
     from ultralytics import YOLO  # type: ignore
     _has_yolo = True
@@ -239,7 +257,7 @@ def run_single(  # noqa: C901
             _update_job(progress, "done")
             return None
         else:
-            out_path = ROOT / "tests" / "results" / f"{stem}.geojson"
+            out_path = _results_dir() / f"{stem}.geojson"
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(geo, indent=2), encoding="utf-8")
             # only log when not in pinned-line mode
@@ -268,7 +286,7 @@ def run_single(  # noqa: C901
             out_img = overlay_result
 
         out_ext  = Path(src_str).suffix.lower() if Path(src_str).suffix.lower() in {".jpg", ".jpeg", ".png"} else ".jpg"
-        out_path = ROOT / "tests" / "results" / f"{stem}_heat{out_ext}"
+        out_path = _results_dir() / f"{stem}_heat{out_ext}"
 
     # ── DETECT ---------------------------------------------------------------
     else:
@@ -282,7 +300,7 @@ def run_single(  # noqa: C901
         out_img = Image.fromarray(arr)
 
         out_ext  = Path(src_str).suffix.lower() if Path(src_str).suffix.lower() in {".jpg", ".jpeg", ".png"} else ".jpg"
-        out_path = ROOT / "tests" / "results" / f"{stem}_boxes{out_ext}"
+        out_path = _results_dir() / f"{stem}_boxes{out_ext}"
 
     # ---- write result -------------------------------------------------------
     _update_job(progress, "write result")
