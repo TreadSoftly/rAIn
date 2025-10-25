@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.request
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -35,6 +36,39 @@ def set_log_level(level: int) -> None:
 
 def set_verbose(enabled: bool = True) -> None:
     set_log_level(logging.INFO if enabled else logging.WARNING)
+
+
+def _wait_for_file(path: Path, *, require_nonzero: bool = False, timeout: float = 2.0) -> None:
+    """
+    Poll until *path* is visible to sibling processes.
+
+    The Windows GitHub runner occasionally delays file visibility when the CLI
+    re-execs into the managed venv.  Waiting briefly avoids the resulting race.
+    """
+    deadline = time.perf_counter() + timeout
+    pause = 0.05
+    while time.perf_counter() < deadline:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            time.sleep(pause)
+            continue
+        if not require_nonzero or stat.st_size > 0:
+            _materialize_file(path)
+            time.sleep(0.3)
+            return
+        time.sleep(pause)
+
+
+def _materialize_file(path: Path) -> None:
+    try:
+        data = path.read_bytes()
+        with path.open("wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:
+        pass
 
 try:
     from ultralytics import YOLO  # type: ignore
@@ -288,6 +322,7 @@ def run_single(  # noqa: C901
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with _silence_stdio(quiet):
         out_img.save(out_path)
+    _wait_for_file(out_path, require_nonzero=True)
     if not quiet or progress is None:
         _say(f"wrote {out_path}")
     _update_job(progress, "done")

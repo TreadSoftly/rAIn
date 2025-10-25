@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, ContextManager, Protocol, Tuple, Union, cast
@@ -143,6 +144,44 @@ def _opencv_reencode_to_mp4(src_avi: Path, dst_mp4: Path, fps: float) -> bool:
         return ok_any and dst_mp4.exists() and dst_mp4.stat().st_size > 0
     except Exception:
         return False
+
+
+def _wait_for_file(path: Path, *, require_nonzero: bool = False, timeout: float = 2.0) -> None:
+    """
+    Poll until *path* is visible to sibling processes.
+
+    On Windows, freshly re-executed interpreters occasionally exhibit a short
+    delay between writing a file and that file showing up when queried from
+    another process (notably the pytest harness).  A bounded wait sidesteps the
+    race without penalising platforms that surface the file immediately.
+    """
+    deadline = time.perf_counter() + timeout
+    pause = 0.05
+    while time.perf_counter() < deadline:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            time.sleep(pause)
+            continue
+        if not require_nonzero or stat.st_size > 0:
+            _materialize_file(path)
+            time.sleep(0.3)
+            return
+        time.sleep(pause)
+
+
+def _materialize_file(path: Path) -> None:
+    """
+    Rewrite *path* via Python I/O to ensure the hosting filesystem flushes data.
+    """
+    try:
+        data = path.read_bytes()
+        with path.open("wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:
+        pass
 
 
 # ───────────────────────── main worker ─────────────────────
@@ -284,6 +323,7 @@ def main(  # noqa: C901 - unavoidable CLI glue
 
         # ── re-encode MJPG → H.264 MP4 ───────────────────────────────────
         preferred = out_dir / f"{src_path.stem}_heat.mp4"
+        preferred_tmp: Path | None = None
         final: Path
         if eng:
             eng.set_current("encode mp4")
@@ -302,6 +342,7 @@ def main(  # noqa: C901 - unavoidable CLI glue
                 sp = _Null2()
 
             if ffmpeg_path:
+                preferred_tmp = preferred.with_suffix(preferred.suffix + ".tmp")
                 with sp:
                     subprocess.run(
                         [
@@ -317,7 +358,7 @@ def main(  # noqa: C901 - unavoidable CLI glue
                             "yuv420p",
                             "-movflags",
                             "+faststart",
-                            str(preferred),
+                            str(preferred_tmp),
                         ],
                         check=True,
                         stdout=subprocess.DEVNULL,
@@ -326,6 +367,8 @@ def main(  # noqa: C901 - unavoidable CLI glue
                 # Success path
                 avi.unlink(missing_ok=True)
                 _say(f"FFmpeg re-encode successful ({ffmpeg_source})")
+                preferred.unlink(missing_ok=True)
+                preferred_tmp.replace(preferred)
                 final = preferred
             else:
                 raise FileNotFoundError("ffmpeg not found")
@@ -339,8 +382,11 @@ def main(  # noqa: C901 - unavoidable CLI glue
                 # Final fallback: ship AVI instead of lying with .mp4
                 final = out_dir / f"{src_path.stem}_heat.avi"
                 shutil.move(str(avi), str(final))
+                if preferred_tmp is not None:
+                    preferred_tmp.unlink(missing_ok=True)
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        _wait_for_file(final, require_nonzero=True)
 
         # One clean summary line with a clickable filename label
         print(f"Saved → {_osc8(final.name, final)}")

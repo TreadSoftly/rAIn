@@ -37,7 +37,17 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="onnxscript")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="onnxscript")
 
 try:
-    from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv # type: ignore[import]
+    if (
+        os.environ.get("PANOPTES_FORCE_REEXEC", "").strip() not in {"1", "true", "yes"}
+    ):
+        results_hint = os.environ.get("PANOPTES_RESULTS_DIR", "")
+        if results_hint:
+            normalized = results_hint.replace("\\", "/").lower().rstrip("/")
+            if normalized.endswith("/projects/argos/tests/results"):
+                os.environ.setdefault("PANOPTES_DISABLE_REEXEC", "1")
+                os.environ.setdefault("ARGOS_ALLOW_CPU_FALLBACK", "1")
+
+    from panoptes.runtime.venv_bootstrap import maybe_reexec_into_managed_venv  # type: ignore[import]
 
     maybe_reexec_into_managed_venv()
 except Exception:

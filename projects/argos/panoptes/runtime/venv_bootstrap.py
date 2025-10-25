@@ -71,6 +71,9 @@ def maybe_reexec_into_managed_venv(
     Any failure to probe/re-exec is swallowed intentionally to avoid blocking
     startup when running in unconventional environments.
     """
+    if os.environ.get("PANOPTES_DISABLE_REEXEC") == "1":
+        return
+
     if os.environ.get(_ENV_FLAG):
         return
 
