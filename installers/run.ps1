@@ -232,6 +232,43 @@ function Resolve-Python {
   return $null
 }
 
+function Get-StateRoot {
+  $base = $env:LOCALAPPDATA
+  if (-not $base) { return $null }
+  return (Join-Path $base 'rAIn\state')
+}
+
+function Get-StoredPython {
+  $stateRoot = Get-StateRoot
+  if (-not $stateRoot) { return $null }
+  $recordPath = Join-Path $stateRoot 'host-python.json'
+  if (-not (Test-Path -LiteralPath $recordPath)) { return $null }
+  try {
+    $raw = Get-Content -LiteralPath $recordPath -ErrorAction Stop -Raw
+    $data = $raw | ConvertFrom-Json
+  }
+  catch {
+    return $null
+  }
+  if (-not $data) { return $null }
+  $exe = $data.exe
+  if (-not $exe) { return $null }
+  $args = @()
+  if ($data.args) {
+    if ($data.args -is [System.Array]) {
+      $args = @()
+      foreach ($item in $data.args) { $args += [string]$item }
+    }
+    else {
+      $args = @([string]$data.args)
+    }
+  }
+  if (Test-PythonCandidate -Exe $exe -Args $args) {
+    return [pscustomobject]@{ Exe = $exe; Args = $args }
+  }
+  return $null
+}
+
 # ---- Utility: run a native command quietly, don't escalate stderr to errors; return exit code ----
 function Invoke-NativeQuiet {
   [CmdletBinding()]
@@ -371,9 +408,12 @@ if ($sawBuild) {
 }
 
 # ---------- Python / venv ----------
-$pyCandidate = Resolve-Python -AutoInstall
+$pyCandidate = Get-StoredPython
 if (-not $pyCandidate) {
-  throw "Python 3.9-3.12 not found. Install Python and re-run."
+  $pyCandidate = Resolve-Python -AutoInstall:$false
+}
+if (-not $pyCandidate) {
+  throw "Python 3.9-3.12 not found. Run .\build to perform initial setup."
 }
 $pyExe = $pyCandidate.Exe
 $pyArgs = @()

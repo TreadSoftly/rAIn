@@ -414,6 +414,28 @@ function Test-PythonOk {
   if (-not $script:pyExe) { return $false }
   return (Test-PythonCandidate -Exe $script:pyExe -CandidateArgs $script:pyArgs -Mode $script:pyMode)
 }
+
+function Set-HostPythonRecord {
+  param(
+    [Parameter(Mandatory = $true)][string]$Exe,
+    [Parameter()][string[]]$Args = @()
+  )
+  $base = $env:LOCALAPPDATA
+  if (-not $base) { return }
+  $stateRoot = Join-Path $base 'rAIn\state'
+  try {
+    New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+  }
+  catch {}
+  $payload = @{
+    exe  = $Exe
+    args = @($Args)
+  }
+  try {
+    $payload | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $stateRoot 'host-python.json') -Encoding UTF8
+  }
+  catch {}
+}
 function Test-IsAdmin {
   try {
     $wi = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -475,6 +497,10 @@ function Install-Python {
   throw "Unsupported OS. Please install Python 3.9 - 3.12 and re-run."
 }
 if (-not (Find-Python)) { Install-Python }
+if (-not (Find-Python)) {
+  throw "Python 3.9 - 3.12 required but not located after installation."
+}
+Set-HostPythonRecord -Exe $script:pyExe -Args $script:pyArgs
 
 # Ensure VC++ runtime before anything may trigger local ONNX export (Windows only)
 Install-VcRedistIfMissing
