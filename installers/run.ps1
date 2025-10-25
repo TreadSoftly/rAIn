@@ -107,6 +107,23 @@ function _Here {
 $HERE = _Here
 $ROOT = Split-Path -Parent $HERE
 
+$OsIsWindows = $false
+$OsIsMac = $false
+$OsIsLinux = $false
+if ($env:OS -eq 'Windows_NT') {
+  $OsIsWindows = $true
+} else {
+  try {
+    $OsIsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+    $OsIsLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
+    $OsIsMac = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)
+  }
+  catch {
+    $OsIsLinux = ($env:OSTYPE -like '*linux*')
+    $OsIsMac = ($env:OSTYPE -like '*darwin*')
+  }
+}
+
 function Enable-GitLfs {
   if (Get-Command git -ErrorAction SilentlyContinue) {
     & git lfs version > $null 2>&1
@@ -120,6 +137,99 @@ function Enable-GitLfs {
       Write-Host "   Install Git LFS and re-run this command."
     }
   }
+}
+
+function Test-PythonCandidate {
+  param(
+    [Parameter(Mandatory = $true)][string]$Exe,
+    [Parameter()][string[]]$Args = @()
+  )
+  if (-not $Exe) { return $false }
+  if (-not (Test-Path -LiteralPath $Exe)) { return $false }
+  try {
+    $output = & $Exe @Args --version 2>&1
+  }
+  catch { return $false }
+  if ($output -match 'Python\s+([0-9]+)\.([0-9]+)') {
+    $major = [int]$Matches[1]
+    $minor = [int]$Matches[2]
+    return ($major -eq 3 -and $minor -ge 9 -and $minor -le 12)
+  }
+  return $false
+}
+
+function Test-IsAdmin {
+  try {
+    $wi = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $wp = New-Object Security.Principal.WindowsPrincipal($wi)
+    return $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  }
+  catch { return $false }
+}
+
+function Install-Python {
+  if (-not $OsIsWindows) {
+    throw "Python 3.9-3.12 not found. Please install Python manually and re-run."
+  }
+  Write-Host "Python 3.9 - 3.12 not found. Attempting to install Python..." -ForegroundColor Yellow
+  $winget = Get-Command winget -ErrorAction SilentlyContinue
+  if ($winget) {
+    & winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+      & winget install --id Python.Python.3.11 -e --accept-package-agreements --accept-source-agreements
+    }
+  }
+  else {
+    $arch = if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { 'win32' }
+    $ver = '3.12.10'
+    $url = "https://www.python.org/ftp/python/$ver/python-$ver-$arch.exe"
+    $tmp = Join-Path $env:TEMP "python-$ver-$arch.exe"
+    Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+    $installArgs = "/quiet InstallAllUsers=0 PrependPath=1 Include_test=0"
+    if (Test-IsAdmin) { $installArgs = "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" }
+    $proc = Start-Process -FilePath $tmp -ArgumentList $installArgs -PassThru -Wait
+    if ($proc.ExitCode -ne 0) { throw "Python installer exited with code $($proc.ExitCode)." }
+  }
+
+  $waitSeconds = 30
+  $announced = $false
+  for ($elapsed = 0; $elapsed -lt $waitSeconds; $elapsed++) {
+    if (Resolve-Python -AutoInstall:$false -Quiet) { return }
+    if (-not $announced) {
+      Write-Host "Waiting for newly installed Python to surface..." -ForegroundColor Yellow
+      $announced = $true
+    }
+    Start-Sleep -Seconds 1
+  }
+  throw "Python 3.9 - 3.12 required but not located after installation."
+}
+
+function Resolve-Python {
+  param(
+    [switch]$AutoInstall,
+    [switch]$Quiet
+  )
+
+  $candidates = @()
+  foreach ($name in @('py', 'python3', 'python')) {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
+    if ($cmd) {
+      $args = if ($name -eq 'py') { @('-3') } else { @() }
+      if (Test-PythonCandidate -Exe $cmd.Source -Args $args) {
+        return [pscustomobject]@{ Exe = $cmd.Source; Args = $args }
+      }
+    }
+  }
+
+  if ($AutoInstall) {
+    if (-not $Quiet) {
+      Write-Host "No suitable Python interpreter detected. Installing..." -ForegroundColor Yellow
+    }
+    Install-Python
+    return Resolve-Python -AutoInstall:$false -Quiet
+  }
+
+  return $null
 }
 
 # ---- Utility: run a native command quietly, don't escalate stderr to errors; return exit code ----
@@ -261,13 +371,13 @@ if ($sawBuild) {
 }
 
 # ---------- Python / venv ----------
-$pyExe = $null
+$pyCandidate = Resolve-Python -AutoInstall
+if (-not $pyCandidate) {
+  throw "Python 3.9-3.12 not found. Install Python and re-run."
+}
+$pyExe = $pyCandidate.Exe
 $pyArgs = @()
-$cmd = Get-Command py -ErrorAction SilentlyContinue
-if ($cmd) { $pyExe = $cmd.Source; $pyArgs = @('-3') }
-if (-not $pyExe) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue; if ($cmd) { $pyExe = $cmd.Source } }
-if (-not $pyExe) { $cmd = Get-Command python  -ErrorAction SilentlyContinue; if ($cmd) { $pyExe = $cmd.Source } }
-if (-not $pyExe) { throw "Python 3 not found." }
+if ($pyCandidate.Args) { $pyArgs = @($pyCandidate.Args) }
 
 $bootstrap = Join-Path $ROOT 'projects\argos\bootstrap.py'
 
