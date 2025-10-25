@@ -44,7 +44,8 @@ def _progress_env() -> None:
     # Tests themselves don't use a PS/outer progress row
     os.environ.setdefault("PANOPTES_PROGRESS_ACTIVE", "0")
     results_dir = Path(__file__).resolve().parents[2] / "tests" / "results"
-    os.environ.setdefault("PANOPTES_RESULTS_DIR", str(results_dir))
+    results_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["PANOPTES_RESULTS_DIR"] = str(results_dir)
 
 
 # Make autouse fixture appear “used” to static analyzers without affecting runtime
