@@ -1626,39 +1626,65 @@ def target(  # noqa: C901
 
                 # Silence worker output while spinner is live; always route child updates through proxy
                 with _silence_stdio(quiet):
+                    target_out_dir = out_dir or _RESULTS_DIR
                     if task_final == "heatmap":
                         from .predict_heatmap_mp4 import main as _heat_vid
                         try:
-                            _heat_vid(item, weights=weight, progress=_JobAwareProxy(sp), **hm_kwargs)
+                            _heat_vid(
+                                item,
+                                weights=weight,
+                                out_dir=target_out_dir,
+                                progress=_JobAwareProxy(sp),
+                                **hm_kwargs,
+                            )
                         except TypeError:
-                            _heat_vid(item, weights=weight, **hm_kwargs)
+                            _heat_vid(item, weights=weight, out_dir=target_out_dir, **hm_kwargs)
                     elif task_final == "detect":
                         from .predict_mp4 import main as _detect_vid
                         try:
-                            _detect_vid(item, conf=conf, weights=weight, progress=_JobAwareProxy(sp))
+                            _detect_vid(
+                                item,
+                                conf=conf,
+                                weights=weight,
+                                out_dir=target_out_dir,
+                                progress=_JobAwareProxy(sp),
+                            )
                         except TypeError:
-                            _detect_vid(item, conf=conf, weights=weight)
+                            _detect_vid(item, conf=conf, weights=weight, out_dir=target_out_dir)
                     elif task_final == "classify":
                         from .predict_classify_mp4 import main as _cls_vid
                         try:
                             _cls_vid(item, weights=weight, topk=int(max(1, topk)), conf=conf,
-                                     progress=_JobAwareProxy(sp))
+                                     out_dir=target_out_dir, progress=_JobAwareProxy(sp))
                         except TypeError:
-                            _cls_vid(item, weights=weight, topk=int(max(1, topk)), conf=conf)
+                            _cls_vid(item, weights=weight, topk=int(max(1, topk)), conf=conf,
+                                     out_dir=target_out_dir)
                     elif task_final == "pose":
                         from .predict_pose_mp4 import main as _pose_vid
                         try:
-                            _pose_vid(item, weights=weight, conf=conf, iou=iou,
-                                      progress=_JobAwareProxy(sp))
+                            _pose_vid(
+                                item,
+                                weights=weight,
+                                conf=conf,
+                                iou=iou,
+                                out_dir=target_out_dir,
+                                progress=_JobAwareProxy(sp),
+                            )
                         except TypeError:
-                            _pose_vid(item, weights=weight, conf=conf, iou=iou)
+                            _pose_vid(item, weights=weight, conf=conf, iou=iou, out_dir=target_out_dir)
                     elif task_final == "obb":
                         from .predict_obb_mp4 import main as _obb_vid
                         try:
-                            _obb_vid(item, weights=weight, conf=conf, iou=iou,
-                                     progress=_JobAwareProxy(sp))
+                            _obb_vid(
+                                item,
+                                weights=weight,
+                                conf=conf,
+                                iou=iou,
+                                out_dir=target_out_dir,
+                                progress=_JobAwareProxy(sp),
+                            )
                         except TypeError:
-                            _obb_vid(item, weights=weight, conf=conf, iou=iou)
+                            _obb_vid(item, weights=weight, conf=conf, iou=iou, out_dir=target_out_dir)
 
                 # diff results
                 after = _snapshot_results(snapshot_bases)
